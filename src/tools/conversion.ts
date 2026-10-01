@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type OperationKind = "convert" | "extract-text";
+export type OperationKind = "convert" | "extract-text" | "merge-pdf";
 
 export type ConversionEngine = "poppler" | "pandoc" | "poppler-pandoc";
 
@@ -18,6 +18,7 @@ export type JobStatus = "planned" | "running" | "completed" | "failed";
 export type ConversionJob = {
   id: string;
   sourcePath: string;
+  sourcePaths?: string[];
   sourceFormat: string;
   targetFormat: string;
   outputPath: string;
@@ -80,6 +81,16 @@ export async function planConversionJob(
   return invoke<ConversionJob>("conversion_plan_job", {
     sourcePath,
     targetFormat: targetFormat.toLowerCase().replace(/^\./, ""),
+    outputPath: outputPath ?? null,
+  });
+}
+
+export async function planMergeJob(
+  sourcePaths: string[],
+  outputPath?: string
+): Promise<ConversionJob> {
+  return invoke<ConversionJob>("conversion_plan_merge_job", {
+    sourcePaths,
     outputPath: outputPath ?? null,
   });
 }

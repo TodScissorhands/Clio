@@ -42,7 +42,8 @@ This roadmap is intentionally staged. It describes direction, not promises to im
    - PDF Text-Layer investigation: Evaluated PDF.js `TextLayer` integration in `PdfEngine`. Documented that full TextLayer overlay requires scale-factor transform synchronization and font-loading lifecycle coordination; preserved existing non-durable `pdf-page-text` locator without claiming fake durability or destabilizing canvas rendering.
 8. **Conversion and manipulation improvements**
    - **8A. Conversion capability architecture — implemented**: Typed capability registry (`ConversionCapability`, `CapabilityRegistry`), planned job model (`ConversionJob`), safe path validation (canonical equality, directory permissions), unique UUID temporary file guards (`TempFileGuard`), and `ConversionWorkspace` UI dynamically consuming capabilities and executing planned jobs. Safe PDF operations investigated (`pdfunite`, `pdfseparate`, `lopdf`).
-   - **8B. Safe PDF operations (PDF Merge)**: First safe native PDF manipulation operation via Poppler `pdfunite` using structured command invocation and job planner.
+   - **8B. Safe PDF operations (PDF Merge) — implemented**: Safe native multi-source PDF merge via Poppler `pdfunite` using structured command invocation, `OperationKind::MergePdf` capability, multi-source `ConversionJob` planning, strict validation (minimum-2, canonical comparison, duplicate/collision rejection), and compact Tools UI workflow with deterministic reordering and removal.
+   - **8C. PDF page manipulation (Page Extraction & Split)**: Page range extraction via Poppler `pdfseparate` within the capability/job architecture.
 9. **Additional document formats**
    - Add mature local rendering/preview paths for text, Markdown, DOCX, presentations, spreadsheets, and images according to capability rather than a universal model.
 10. **Cross-platform/mobile implementation**

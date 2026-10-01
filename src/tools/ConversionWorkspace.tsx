@@ -7,10 +7,10 @@ import {
   formatLabel,
   listConversionCapabilities,
   planConversionJob,
+  planMergeJob,
   type ConversionCapability,
   type ConversionJob,
 } from "./conversion";
-
 type DocumentInfo = {
   path: string;
   name: string;
@@ -33,6 +33,7 @@ function formatBytes(bytes: number) {
 }
 
 export function ConversionWorkspace() {
+  const [mode, setMode] = useState<"convert" | "merge">("convert");
   const [document, setDocument] = useState<DocumentInfo | null>(null);
   const [capabilities, setCapabilities] = useState<ConversionCapability[]>([]);
   const [target, setTarget] = useState("epub");
@@ -40,6 +41,7 @@ export function ConversionWorkspace() {
   const [status, setStatus] = useState<"idle" | "converting" | "done" | "error">("idle");
   const [message, setMessage] = useState("Choose a document to begin.");
   const [outputPath, setOutputPath] = useState("");
+  const [mergeFiles, setMergeFiles] = useState<DocumentInfo[]>([]);
 
   // Load initial global capabilities for preview before document selection
   useEffect(() => {
@@ -54,6 +56,12 @@ export function ConversionWorkspace() {
     if (!document) return "converted-document";
     return document.name.replace(/\.[^.]+$/, "") || document.name;
   }, [document]);
+
+  const suggestedMergeName = useMemo(() => {
+    if (mergeFiles.length === 0) return "merged-document";
+    const firstStem = mergeFiles[0].name.replace(/\.[^.]+$/, "") || "document";
+    return `${firstStem}-merged`;
+  }, [mergeFiles]);
 
   async function chooseDocument() {
     const path = await open({ multiple: false, directory: false, filters: fileFilters });
@@ -105,6 +113,91 @@ export function ConversionWorkspace() {
       }
     }
   }
+  async function addMergeDocuments() {
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: "PDF Documents", extensions: ["pdf"] }],
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    const newInfos: DocumentInfo[] = [];
+    for (const p of paths) {
+      try {
+        const info = await invoke<DocumentInfo>("inspect_document", { path: p });
+        if (info.extension.toLowerCase() === "pdf") {
+          newInfos.push(info);
+        }
+      } catch {}
+    }
+    setMergeFiles((prev) => {
+      const existingPaths = new Set(prev.map((f) => f.path));
+      const filtered = newInfos.filter((f) => !existingPaths.has(f.path));
+      const combined = [...prev, ...filtered];
+      if (combined.length >= 2) {
+        setMessage(`Ready to merge ${combined.length} PDFs.`);
+      } else {
+        setMessage("Add at least 2 PDF files to merge.");
+      }
+      return combined;
+    });
+  }
+
+  function moveMergeFile(index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= mergeFiles.length) return;
+    setMergeFiles((prev) => {
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[targetIndex];
+      next[targetIndex] = temp;
+      return next;
+    });
+  }
+
+  function removeMergeFile(index: number) {
+    setMergeFiles((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      if (next.length >= 2) {
+        setMessage(`Ready to merge ${next.length} PDFs.`);
+      } else {
+        setMessage("Add at least 2 PDF files to merge.");
+      }
+      return next;
+    });
+  }
+
+  function clearMergeFiles() {
+    setMergeFiles([]);
+    setOutputPath("");
+    setStatus("idle");
+    setMessage("Add at least 2 PDF files to merge.");
+  }
+
+  async function merge() {
+    if (mergeFiles.length < 2) return;
+
+    const output = await save({
+      defaultPath: `${suggestedMergeName}.pdf`,
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (!output) return;
+
+    setStatus("converting");
+    setMessage(`Merging ${mergeFiles.length} PDF files with Poppler (pdfunite)…`);
+    try {
+      const sourcePaths = mergeFiles.map((f) => f.path);
+      const jobToRun = await planMergeJob(sourcePaths, output);
+      const completedJob = await executeConversionJob(jobToRun);
+      setPlannedJob(completedJob);
+      setOutputPath(completedJob.outputPath);
+      setStatus("done");
+      setMessage(`Successfully merged ${mergeFiles.length} PDFs with ${completedJob.engine}.`);
+    } catch (error) {
+      setStatus("error");
+      setMessage(String(error));
+    }
+  }
 
   async function convert() {
     if (!document) return chooseDocument();
@@ -144,63 +237,219 @@ export function ConversionWorkspace() {
       <div className="view-heading">
         <div>
           <p className="eyebrow">Local document tools</p>
-          <h1>Convert with confidence.</h1>
-          <p className="view-intro">Use the existing native conversion workflow without leaving Clio.</p>
+          <h1>{mode === "convert" ? "Convert with confidence." : "Merge PDFs safely."}</h1>
+          <p className="view-intro">
+            {mode === "convert"
+              ? "Use the existing native conversion workflow without leaving Clio."
+              : "Combine multiple PDF documents in exact order using local Poppler utilities."}
+          </p>
+          <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
+            <button
+              type="button"
+              className={`mode-btn ${mode === "convert" ? "selected" : ""}`}
+              onClick={() => {
+                setMode("convert");
+                setStatus("idle");
+                setMessage(document ? "Ready to convert." : "Choose a document to begin.");
+                setOutputPath("");
+              }}
+            >
+              Convert Document
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${mode === "merge" ? "selected" : ""}`}
+              onClick={() => {
+                setMode("merge");
+                setStatus("idle");
+                setMessage(
+                  mergeFiles.length >= 2
+                    ? `Ready to merge ${mergeFiles.length} PDFs.`
+                    : "Add at least 2 PDF files to merge."
+                );
+                setOutputPath("");
+              }}
+            >
+              Merge PDF
+            </button>
+          </div>
         </div>
       </div>
       <section className="conversion-workspace" aria-label="Document conversion workspace">
-        <div className="source-card">
-          <div className="card-heading"><span className="step">01</span><span>Source document</span></div>
-          {document ? (
-            <div className="selected-file">
-              <div className="file-icon">{document.extension.slice(0, 3).toUpperCase() || "DOC"}</div>
-              <div className="file-info"><strong>{document.name}</strong><span>{document.extension.toUpperCase() || "Unknown"} · {formatBytes(document.size)}</span></div>
-              <button className="quiet-button" onClick={chooseDocument}>Replace</button>
+        {mode === "convert" ? (
+          <>
+            <div className="source-card">
+              <div className="card-heading"><span className="step">01</span><span>Source document</span></div>
+              {document ? (
+                <div className="selected-file">
+                  <div className="file-icon">{document.extension.slice(0, 3).toUpperCase() || "DOC"}</div>
+                  <div className="file-info"><strong>{document.name}</strong><span>{document.extension.toUpperCase() || "Unknown"} · {formatBytes(document.size)}</span></div>
+                  <button className="quiet-button" onClick={chooseDocument}>Replace</button>
+                </div>
+              ) : (
+                <button className="drop-zone" onClick={chooseDocument}>
+                  <span className="plus">+</span><strong>Choose a document</strong><small>PDF, EPUB, DOCX, ODT, Markdown, HTML, or text</small>
+                </button>
+              )}
             </div>
-          ) : (
-            <button className="drop-zone" onClick={chooseDocument}>
-              <span className="plus">+</span><strong>Choose a document</strong><small>PDF, EPUB, DOCX, ODT, Markdown, HTML, or text</small>
-            </button>
-          )}
-        </div>
-        <div className="connector" aria-hidden="true"><span>→</span></div>
-        <div className="target-card">
-          <div className="card-heading"><span className="step">02</span><span>Convert to</span></div>
-          <div className="format-grid">
-            {capabilities.map((cap) => (
-              <button
-                key={`${cap.sourceFormat}-${cap.targetFormat}`}
-                type="button"
-                className={`format-option ${target === cap.targetFormat ? "selected" : ""}`}
-                onClick={() => void handleTargetSelect(cap.targetFormat)}
-              >
-                <strong>{formatLabel(cap.targetFormat)}</strong>
-                <span>{formatDetail(cap.targetFormat)} · {cap.label}</span>
-              </button>
-            ))}
-            {document && capabilities.length === 0 && (
-              <p style={{ gridColumn: "1 / -1", color: "#8c8e83", fontSize: "12px", margin: "16px 0" }}>
-                No conversion targets available for .{document.extension}.
-              </p>
-            )}
-          </div>
-        </div>
+            <div className="connector" aria-hidden="true"><span>→</span></div>
+            <div className="target-card">
+              <div className="card-heading"><span className="step">02</span><span>Convert to</span></div>
+              <div className="format-grid">
+                {capabilities.map((cap) => (
+                  <button
+                    key={`${cap.sourceFormat}-${cap.targetFormat}`}
+                    type="button"
+                    className={`format-option ${target === cap.targetFormat ? "selected" : ""}`}
+                    onClick={() => void handleTargetSelect(cap.targetFormat)}
+                  >
+                    <strong>{formatLabel(cap.targetFormat)}</strong>
+                    <span>{formatDetail(cap.targetFormat)} · {cap.label}</span>
+                  </button>
+                ))}
+                {document && capabilities.length === 0 && (
+                  <p style={{ gridColumn: "1 / -1", color: "#8c8e83", fontSize: "12px", margin: "16px 0" }}>
+                    No conversion targets available for .{document.extension}.
+                  </p>
+                )}
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="source-card">
+              <div className="card-heading">
+                <span className="step">01</span>
+                <span>PDF Source Documents ({mergeFiles.length})</span>
+              </div>
+              {mergeFiles.length > 0 ? (
+                <>
+                  <div className="merge-files-list">
+                    {mergeFiles.map((file, idx) => (
+                      <div key={file.path} className="merge-file-item">
+                        <span className="merge-file-idx">{idx + 1}</span>
+                        <div className="merge-file-info">
+                          <strong title={file.name}>{file.name}</strong>
+                          <span>{formatBytes(file.size)}</span>
+                        </div>
+                        <div className="merge-file-controls">
+                          <button
+                            type="button"
+                            className="merge-reorder-btn"
+                            onClick={() => moveMergeFile(idx, -1)}
+                            disabled={idx === 0 || status === "converting"}
+                            aria-label={`Move ${file.name} up`}
+                            title="Move up"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="merge-reorder-btn"
+                            onClick={() => moveMergeFile(idx, 1)}
+                            disabled={idx === mergeFiles.length - 1 || status === "converting"}
+                            aria-label={`Move ${file.name} down`}
+                            title="Move down"
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            className="merge-remove-btn"
+                            onClick={() => removeMergeFile(idx)}
+                            disabled={status === "converting"}
+                            aria-label={`Remove ${file.name}`}
+                            title="Remove"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="merge-actions-row">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => void addMergeDocuments()}
+                      disabled={status === "converting"}
+                    >
+                      + Add more PDFs
+                    </button>
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      onClick={clearMergeFiles}
+                      disabled={status === "converting"}
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="drop-zone"
+                  onClick={() => void addMergeDocuments()}
+                >
+                  <span className="plus">+</span>
+                  <strong>Choose PDF documents</strong>
+                  <small>Select at least 2 PDF files to combine</small>
+                </button>
+              )}
+            </div>
+            <div className="connector" aria-hidden="true">
+              <span>→</span>
+            </div>
+            <div className="target-card">
+              <div className="card-heading">
+                <span className="step">02</span>
+                <span>Output Destination</span>
+              </div>
+              <div className="merge-target-box">
+                <span className="merge-target-badge">PDF (Merged)</span>
+                <strong>Poppler (pdfunite)</strong>
+                <p className="merge-target-desc">
+                  {mergeFiles.length >= 2
+                    ? `Files will be combined in the exact deterministic order (1 to ${mergeFiles.length}) listed on the left.`
+                    : "Add at least 2 PDF documents to enable merge."}
+                </p>
+              </div>
+            </div>
+          </>
+        )}
       </section>
       <section className="action-row">
         <div className={`conversion-message ${status}`}><span>{status === "done" ? "✓" : status === "error" ? "!" : "•"}</span>{message}</div>
-        <button
-          type="button"
-          className="convert-button"
-          onClick={() => void convert()}
-          disabled={status === "converting" || (!!document && capabilities.length === 0)}
-        >
-          {status === "converting"
-            ? "Converting…"
-            : document
-            ? `Convert to ${target.toUpperCase()}`
-            : "Select a document"}
-          <span>→</span>
-        </button>
+        {mode === "convert" ? (
+          <button
+            type="button"
+            className="convert-button"
+            onClick={() => void convert()}
+            disabled={status === "converting" || (!!document && capabilities.length === 0)}
+          >
+            {status === "converting"
+              ? "Converting…"
+              : document
+              ? `Convert to ${target.toUpperCase()}`
+              : "Select a document"}
+            <span>→</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="convert-button"
+            onClick={() => void merge()}
+            disabled={status === "converting" || mergeFiles.length < 2}
+          >
+            {status === "converting"
+              ? "Merging…"
+              : mergeFiles.length >= 2
+              ? `Merge ${mergeFiles.length} PDFs`
+              : "Select at least 2 PDFs"}
+            <span>→</span>
+          </button>
+        )}
       </section>
       {outputPath && (
         <p className="output-path">

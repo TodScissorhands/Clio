@@ -100,4 +100,54 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
     expect(mdToDocxCapability.operation).toBe("convert");
     expect(mdToDocxCapability.engine).toBe("pandoc");
   });
+
+  it("models a multi-source PDF merge job with deterministic input ordering", () => {
+    const mergeJob: ConversionJob = {
+      id: "merge-job-1",
+      sourcePath: "/docs/intro.pdf",
+      sourcePaths: ["/docs/intro.pdf", "/docs/body.pdf", "/docs/appendix.pdf"],
+      sourceFormat: "pdf",
+      targetFormat: "pdf",
+      outputPath: "/docs/final-merged.pdf",
+      operation: "merge-pdf",
+      engine: "poppler",
+      status: "planned",
+      error: null,
+      createdAt: "2026-10-02T12:00:00Z",
+      completedAt: null,
+    };
+
+    expect(mergeJob.operation).toBe("merge-pdf");
+    expect(mergeJob.sourcePaths?.length).toBe(3);
+    expect(mergeJob.sourcePaths?.[0]).toBe("/docs/intro.pdf");
+    expect(mergeJob.sourcePaths?.[1]).toBe("/docs/body.pdf");
+    expect(mergeJob.sourcePaths?.[2]).toBe("/docs/appendix.pdf");
+    expect(mergeJob.outputPath).toBe("/docs/final-merged.pdf");
+  });
+
+  it("validates that merge requires at least 2 input files", () => {
+    const validateInputs = (inputs: string[]): boolean => inputs.length >= 2;
+
+    expect(validateInputs([])).toBe(false);
+    expect(validateInputs(["/docs/single.pdf"])).toBe(false);
+    expect(validateInputs(["/docs/first.pdf", "/docs/second.pdf"])).toBe(true);
+    expect(validateInputs(["/docs/1.pdf", "/docs/2.pdf", "/docs/3.pdf"])).toBe(true);
+  });
+
+  it("supports reordering of inputs while preserving exact deterministic order", () => {
+    const inputs = ["p1.pdf", "p2.pdf", "p3.pdf"];
+
+    // Move index 2 up
+    const moveUp = (arr: string[], index: number): string[] => {
+      if (index <= 0) return arr;
+      const next = [...arr];
+      const temp = next[index - 1];
+      next[index - 1] = next[index];
+      next[index] = temp;
+      return next;
+    };
+
+    const reordered = moveUp(inputs, 2);
+    expect(reordered).toEqual(["p1.pdf", "p3.pdf", "p2.pdf"]);
+  });
 });

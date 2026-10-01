@@ -222,6 +222,7 @@ pub fn run() {
             conversion::convert_document,
             conversion::conversion_capabilities,
             conversion::conversion_plan_job,
+            conversion::conversion_plan_merge_job,
             conversion::conversion_execute_job,
             library_document_open,
             reader_open_selected,

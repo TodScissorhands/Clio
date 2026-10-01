@@ -72,6 +72,28 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .output-path code { color: #58663e; }
 .tools-note { margin: 60px 0 0; color: #a1a199; font: 10px ui-monospace, monospace; }
 
+/* PDF Merge Workspace */
+.workspace-mode-toggle { display: inline-flex; gap: 6px; margin-top: 20px; padding: 4px; border: 1px solid #deddd5; border-radius: 9px; background: #f5f4ee; }
+.mode-btn { padding: 8px 14px; border: 0; border-radius: 6px; font-size: 12px; font-weight: 600; color: #6d7065; background: transparent; cursor: pointer; transition: 0.15s ease; }
+.mode-btn:hover { color: #394331; background: #eae9e0; }
+.mode-btn.selected { color: #252720; background: #fffefa; box-shadow: 0 1px 4px rgba(40, 42, 33, 0.08); }
+.merge-files-list { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; max-height: 280px; overflow-y: auto; padding-right: 4px; }
+.merge-file-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #e1e1d7; border-radius: 8px; background: #fffefa; }
+.merge-file-idx { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #eef0df; color: #586544; font-size: 10px; font-weight: 700; flex: 0 0 auto; }
+.merge-file-info { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; gap: 2px; }
+.merge-file-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #2e3029; }
+.merge-file-info span { font-size: 10px; color: #82827a; }
+.merge-file-controls { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.merge-reorder-btn { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #deddd5; border-radius: 4px; background: #fbfaf5; color: #5c6052; font-size: 11px; cursor: pointer; }
+.merge-reorder-btn:hover:not(:disabled) { background: #eef0df; color: #394331; }
+.merge-reorder-btn:disabled { opacity: 0.35; cursor: default; }
+.merge-remove-btn { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #9c9c93; font-size: 11px; cursor: pointer; }
+.merge-remove-btn:hover { color: #a45248; background: #f7e9e5; }
+.merge-actions-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.merge-actions-row .secondary-button { padding: 8px 12px; font-size: 11px; }
+.merge-target-box { margin-top: 20px; padding: 16px; border: 1px solid #e4e3da; border-radius: 10px; background: #fffefa; display: flex; flex-direction: column; gap: 8px; }
+.merge-target-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; background: #eef0df; color: #4e5a38; font-size: 10px; font-weight: 600; text-transform: uppercase; width: fit-content; }
+.merge-target-desc { font-size: 12px; color: #6b6d63; line-height: 1.45; }
 @media (max-width: 820px) {
   .app-topbar { grid-template-columns: 1fr auto; padding: 15px 20px; }
   .primary-nav { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; width: 100%; }

@@ -33,10 +33,16 @@
   - **Safe Path Boundary**: Canonical source validation, input == output collision rejection (including canonical path resolution), output parent directory verification, UUID-based unique temporary file guards (`TempFileGuard`) ensuring zero file leakage even upon process failure, and structured process argument passing without shell interpolation.
   - **Conversion Workspace Integration**: `ConversionWorkspace.tsx` dynamically queries native capabilities for the selected document's extension, renders only verified target formats with engine metadata, pre-plans conversion jobs, executes them through the capability boundary, and displays granular engine/output status.
   - **Safe PDF Operations Investigation**: Researched local PDF manipulation tools (`pdfunite`, `pdfseparate`, `lopdf`); verified host Poppler utilities and staged `merge-pdf` as the first candidate for Milestone 8B.
+- **Milestone 8B — Safe PDF Merge**:
+  - **Multi-Source Job Model**: Extended `ConversionJob` with `source_paths: Vec<String>` / `sourcePaths: string[]` while maintaining full single-source backward compatibility via `#[serde(default)]` and `source_path`.
+  - **Typed Merge Capability**: Added `OperationKind::MergePdf` (`"merge-pdf"`) representing `pdf + multiple PDF sources -> pdf` via Poppler `pdfunite`. Capability is dynamically advertised only when `pdfunite` is installed, and filtered out from single-document conversion targets to prevent accidental identity conversion.
+  - **Strict Multi-Path Validation**: `plan_merge_job` validates `>= 2` source files, verifies regular file existence and `.pdf` extension for every input, uses canonical comparison to reject duplicate inputs and input/output aliasing collisions, and checks destination parent directory existence.
+  - **Structured Native Invocation**: `execute_job` runs `pdfunite <input1> <input2> ... <output>` using structured process arguments without shell interpolation.
+  - **Compact Tools UI Workflow**: `ConversionWorkspace.tsx` features a mode switch (`Convert Document` | `Merge PDF`), multi-PDF picker, ordered list with reorder (`↑`/`↓`) and remove (`✕`) controls, minimum-2 validation, destination save dialog, and execution status reporting.
 
 ## Current work
 
-Milestone 8A is complete. The conversion capability architecture and planned job model are functional and verified. The next milestone is Milestone 8B (Safe PDF Operations: PDF Merge).
+Milestone 8B is complete. The safe PDF merge workflow and multi-source job architecture are functional and verified. The next milestone is Milestone 8C (PDF Page Range Extraction / Manipulation) or Milestone 9 (Additional document formats).
 - Filesystem/user-controlled sources remain authoritative.
 - A raw filesystem path is not universal document identity.
 - `DocumentRecord` uses an opaque UUID independent of any raw path.
@@ -50,13 +56,11 @@ Milestone 8A is complete. The conversion capability architecture and planned job
 - Platform-specific storage behavior belongs behind native/platform boundaries.
 
 ## Explicitly deferred
-
-Milestone 8B Safe PDF Operations (merge, page extraction), PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
+Milestone 8C PDF page extraction / rotation, PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
 
 ## Blocked / requires triage
 
 The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains unproven because the packaged hostile EPUB could not be driven or inspected. Treat EPUB sanitization, CSP, and tokenized native reads as defense-in-depth rather than as proof of renderer isolation. An isolated renderer/resource proxy remains the stronger boundary for arbitrary hostile EPUBs.
 
 ## Recently verified
-
-Milestone 8A (Conversion Capability Architecture): `bun test` 100/100 pass (7 files; new conversion test suite covering capability modeling, format metadata, and job state transitions); `bun run build` clean (tsc + Vite); `cargo test` 15/15 pass (including capability registry filtering, format normalization, job planning validation, and temp file guard cleanup); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
+Milestone 8B (Safe PDF Merge): `bun test` 103/103 pass (7 files; tests covering merge capability, multi-source job model, deterministic input ordering, and minimum-2 validation); `bun run build` clean (tsc + Vite); `cargo test` 16/16 pass (including two-file and multi-file merge planning, input count rejection, non-PDF rejection, duplicate rejection, input/output collision rejection, and integration execution with actual `pdfunite` on deterministic PDFs); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
