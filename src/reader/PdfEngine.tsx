@@ -72,6 +72,7 @@ export function PdfEngine({
   onToc,
   onState,
   onTextSelection,
+  annotations: _annotations,
 }: ReaderEngineProps & { engineRef: React.RefObject<ReaderEngineHandle | null> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pdfRef = useRef<PDFDocumentProxy | null>(null);

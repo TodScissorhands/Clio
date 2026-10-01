@@ -760,12 +760,43 @@ impl LibraryDb {
         rows.map(|r| r.map_err(db_error)).collect()
     }
 
+    pub fn update_annotation(
+        &self,
+        annotation_id: &str,
+        note: Option<&str>,
+    ) -> Result<AnnotationDto, String> {
+        let connection = self.lock()?;
+        let now = timestamp();
+        let note_stored = note.map(str::trim).filter(|s| !s.is_empty());
+        let updated = connection
+            .execute(
+                "UPDATE annotations SET note = ?1, updated_at = ?2 WHERE id = ?3",
+                params![note_stored, now, annotation_id],
+            )
+            .map_err(db_error)?;
+        if updated == 0 {
+            return Err("Annotation was not found.".to_string());
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT id, document_id, kind, position_kind, page, cfi, progression, selected_text, note, locator, created_at, updated_at
+                 FROM annotations WHERE id = ?1",
+            )
+            .map_err(db_error)?;
+        statement
+            .query_row([annotation_id], annotation_from_row)
+            .map_err(db_error)
+    }
+
     pub fn delete_annotation(&self, annotation_id: &str) -> Result<(), String> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(db_error)?;
-        transaction
+        let deleted = transaction
             .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id])
             .map_err(db_error)?;
+        if deleted == 0 {
+            return Err("Annotation was not found.".to_string());
+        }
         transaction.commit().map_err(db_error)
     }
 
@@ -1117,6 +1148,15 @@ pub fn annotation_list(
     document_id: String,
 ) -> Result<Vec<AnnotationDto>, String> {
     db.list_annotations(&document_id)
+}
+
+#[tauri::command]
+pub fn annotation_update(
+    db: State<'_, LibraryDb>,
+    annotation_id: String,
+    note: Option<String>,
+) -> Result<AnnotationDto, String> {
+    db.update_annotation(&annotation_id, note.as_deref())
 }
 
 #[tauri::command]
@@ -2051,6 +2091,92 @@ mod tests {
         db.remove_root(&root.id).expect("remove root");
         let after_cascade = db.list_annotations(&doc_id).expect("list after cascade");
         assert!(after_cascade.is_empty());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_annotation_update_and_deletion_failure() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-ann-upd-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        fs::write(temp_dir.join("book.epub"), b"PK epub content").expect("write epub");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan");
+        let docs = db.list_documents(Some(&root.id), false).expect("list");
+        let doc_id = docs[0].id.clone();
+
+        let locator = r#"{"kind":"epub-cfi-range","cfi":"epubcfi(/6/4!/4,/2/1:0,/2/1:10)"}"#;
+        let ann = db
+            .create_annotation(
+                &doc_id,
+                "highlight",
+                ReadingPosition::EpubCfi {
+                    cfi: "epubcfi(/6/4!/4/2)".to_string(),
+                    progression: Some(0.1),
+                },
+                Some("Initial highlight excerpt"),
+                Some("Initial note"),
+                Some(locator),
+            )
+            .expect("create annotation");
+
+        assert_eq!(ann.note.as_deref(), Some("Initial note"));
+        assert_eq!(ann.locator.as_deref(), Some(locator));
+        assert_eq!(
+            ann.selected_text.as_deref(),
+            Some("Initial highlight excerpt")
+        );
+
+        // 1. Update note: note is updated, locator and other fields preserved
+        let updated = db
+            .update_annotation(&ann.id, Some("Updated note content"))
+            .expect("update note");
+        assert_eq!(updated.id, ann.id);
+        assert_eq!(updated.document_id, doc_id);
+        assert_eq!(updated.kind, "highlight");
+        assert_eq!(updated.note.as_deref(), Some("Updated note content"));
+        assert_eq!(updated.locator.as_deref(), Some(locator));
+        assert_eq!(
+            updated.selected_text.as_deref(),
+            Some("Initial highlight excerpt")
+        );
+        match updated.position {
+            ReadingPosition::EpubCfi { cfi, progression } => {
+                assert_eq!(cfi, "epubcfi(/6/4!/4/2)");
+                assert_eq!(progression, Some(0.1));
+            }
+            _ => panic!("position must remain epub-cfi"),
+        }
+
+        // 2. Clear note: passing None or empty string stores NULL
+        let cleared = db
+            .update_annotation(&ann.id, Some("   "))
+            .expect("clear note");
+        assert_eq!(cleared.note, None);
+        assert_eq!(cleared.locator.as_deref(), Some(locator));
+
+        // 3. Update non-existent annotation fails
+        let bad_update = db.update_annotation("non-existent-ann-id", Some("note"));
+        assert!(
+            bad_update.is_err(),
+            "updating non-existent annotation must return Err"
+        );
+
+        // 4. Deleting non-existent annotation fails
+        let bad_delete = db.delete_annotation("non-existent-ann-id");
+        assert!(
+            bad_delete.is_err(),
+            "deleting non-existent annotation must return Err"
+        );
+
+        // 5. Deleting existing annotation succeeds
+        db.delete_annotation(&ann.id)
+            .expect("delete existing annotation");
+        assert!(db.list_annotations(&doc_id).expect("list").is_empty());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

@@ -15,3 +15,11 @@ declare module "foliate-js/epub.js" {
 }
 
 declare module "foliate-js/view.js";
+
+declare module "foliate-js/overlayer.js" {
+  export class Overlayer {
+    static highlight(rects: Array<{ left: number; top: number; width: number; height: number }>, options?: { color?: string; padding?: number }): SVGElement;
+    static underline(rects: Array<{ left: number; top: number; width: number; height: number }>, options?: { color?: string }): SVGElement;
+    static outline(rects: Array<{ left: number; top: number; width: number; height: number }>, options?: { color?: string }): SVGElement;
+  }
+}

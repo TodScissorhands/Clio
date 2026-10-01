@@ -317,6 +317,7 @@ pub fn run() {
             storage::bookmark_list,
             storage::bookmark_delete,
             storage::annotation_create,
+            storage::annotation_update,
             storage::annotation_list,
             storage::annotation_delete
         ])

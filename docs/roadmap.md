@@ -34,16 +34,19 @@ This roadmap is intentionally staged. It describes direction, not promises to im
    - ReaderShell UI: contextual "Annotate" toolbar button active when `pendingTextSelection` is present; creates highlight annotation and clears selection.
    - Annotations panel: listing per-document notes/highlights, jumping to position via `goToPosition`, and deleting annotations with cascade/storage sync.
    - Complete test suite: 10/10 Rust tests, 84/84 Bun tests.
-7. **Annotation interaction Pass 3C — Editing & Refinement**
-   - Note editing modal/input for annotations.
-   - Highlight rendering investigation & implementation (EPUB foliate highlights, PDF text overlay).
-7. **Conversion and manipulation improvements**
+7. **Annotation interaction Pass 3C — Annotation Interaction + Highlight UX — implemented**
+   - Annotation note/memo editing: Rust `update_annotation` storage API, `annotation_update` Tauri command, and `updateAnnotation` frontend API. Allows attaching notes on creation and editing/clearing existing notes while preserving immutable identity, locators, and positions.
+   - EPUB highlight rendering: Foliate `Overlayer` integration via `foliate-js/overlayer.js` rendering translucent highlights from persisted `epub-cfi-range` locators. Synchronizes highlights across chapter/section pagination and annotation updates; handles stale/malformed CFIs safely without crashes.
+   - Annotations panel UX: Inline note editor with Save / Cancel; loading indicator during async retrieval; visual active indicator (`current`) for annotations matching current reading position; error-resilient delete and jump navigation.
+   - Persistence error handling: Creation, update, and deletion failures surface clear reader error notifications via `onState("error", ...)` instead of silently swallowing in empty catch blocks, preserving user selection and input state.
+   - PDF Text-Layer investigation: Evaluated PDF.js `TextLayer` integration in `PdfEngine`. Documented that full TextLayer overlay requires scale-factor transform synchronization and font-loading lifecycle coordination; preserved existing non-durable `pdf-page-text` locator without claiming fake durability or destabilizing canvas rendering.
+8. **Conversion and manipulation improvements**
    - Capability registry, planned jobs, safe PDF operations, and format-specific import/export without redesigning Storage Core.
-8. **Additional document formats**
+9. **Additional document formats**
    - Add mature local rendering/preview paths for text, Markdown, DOCX, presentations, spreadsheets, and images according to capability rather than a universal model.
-9. **Cross-platform/mobile implementation**
-   - Implement managed copies, content URIs, security-scoped resources, and mobile-specific indexing only when target requirements are concrete.
-10. **Packaging and long-term polish**
+10. **Cross-platform/mobile implementation**
+    - Implement managed copies, content URIs, security-scoped resources, and mobile-specific indexing only when target requirements are concrete.
+11. **Packaging and long-term polish**
     - Dependency detection, installer/runtime diagnostics, offline/privacy guarantees, accessibility, and performance hardening.
 
 Storage Core intentionally excludes watchers, mobile providers, collections, annotation editing UI, highlight rendering, text selection, search, cover caching, cloud services, and conversion redesign. Its schema and command surface must be updated from the Rust implementation rather than treated as a promise of unimplemented APIs.

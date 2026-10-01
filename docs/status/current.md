@@ -21,10 +21,16 @@
 - **Bookmarks and Annotation Foundation (Pass 2):** SQLite schema v2 with `bookmarks` and `annotations` tables (cascade deletes, FK constraints, input validation); `BookmarkDto` / `AnnotationDto` / `ReadingPosition` Rust types with serde; `create_bookmark`, `list_bookmarks`, `delete_bookmark`, `create_annotation`, `list_annotations`, `delete_annotation` Tauri commands; `Bookmark`, `Annotation`, `AnnotationKind` TypeScript types; `isSameReadingPosition` position matcher; `createBookmark`, `listBookmarks`, `deleteBookmark`, `createAnnotation`, `listAnnotations`, `deleteAnnotation` frontend API functions; `ReaderShell` integration: per-document bookmark load on document open, toggle (create/delete at current position), bookmarks panel with jump and per-item delete. `goToPosition` navigation in `PdfEngine` and `EpubEngine`.
 - **Annotation Interaction Pass 3A — Selection + Locator Foundation:** `AnnotationLocator` union type (`epub-cfi-range` | `pdf-page-text`) with documented durability properties; `TextSelection` format-neutral boundary type; `validateAnnotationLocator` with runtime null/type guards; `onState` added to `ReaderEngineProps`; `onTextSelection` wired end-to-end through `ReaderEngineProps` → `PdfEngine` (pointer-up selection capture from current page) → `EpubEngine` (selectionchange via Foliate `load` event, `getCFI` range CFI) → `ReaderShell` (`pendingTextSelection` state, cleared on document change, exposed as `data-selection-active` attribute); 32 new tests across 6 describe blocks.
 - **Annotation Interaction Pass 3B — Persistent Annotation Creation + Locator:** SQLite schema v3 migration with additive `locator TEXT` nullable column on `annotations`; Rust `AnnotationDto` extended with `locator: Option<String>` and `annotation_create` command accepting optional locator string; TypeScript `Annotation` model extended with `locator?: AnnotationLocator`; `createAnnotation` and `listAnnotations` handling JSON serialization/deserialization with `validateAnnotationLocator` integrity checks; `ReaderShell` toolbar "Annotate" action creating annotations directly from `pendingTextSelection` with document isolation and state clearance; responsive Annotations panel displaying notes/quotes with position jumping via `goToPosition` and deletion support.
+- **Annotation Interaction Pass 3C — Annotation Interaction + Highlight UX:**
+  - **Note / Memo Workflow**: `update_annotation` in Rust (`UPDATE annotations SET note = ?1, updated_at = ?2 WHERE id = ?3`), `annotation_update` Tauri command, and `updateAnnotation` frontend API. Allows attaching notes on creation and editing/clearing notes of existing annotations while preserving immutable identity, locators, and positions.
+  - **EPUB Highlight Rendering**: Foliate `Overlayer` integration via `foliate-js/overlayer.js`. Renders translucent highlights from persisted `epub-cfi-range` locators; synchronizes highlights dynamically across chapter/section pagination and annotation updates; ignores malformed or stale CFIs safely without crashing.
+  - **Annotations Panel Enhancements**: Inline note editor with Save / Cancel; loading indicator during async retrieval; visual active indicator (`current`) for annotations matching current reading position; error-resilient delete and jump navigation.
+  - **Persistence Error Handling**: Addressed external review finding. Creation, update, and deletion failures now surface clear reader error notifications via `onState("error", ...)` instead of silently swallowing in empty catch blocks, preserving user selection and input state.
+  - **PDF Text-Layer Investigation**: Evaluated PDF.js `TextLayer` integration in `PdfEngine`. Documented that full TextLayer overlay requires scale-factor transform synchronization and font-loading lifecycle coordination; preserved existing non-durable `pdf-page-text` locator without claiming fake durability or destabilizing canvas rendering.
 
 ## Current work
 
-Pass 3B is complete. Next milestone is external review before Pass 3C (annotation note editing and deeper selection interactions).
+Pass 3C is complete. The annotation interaction and EPUB highlight workflow is functional and verified. The next milestone is format expansion or conversion pipeline improvements.
 - Filesystem/user-controlled sources remain authoritative.
 - A raw filesystem path is not universal document identity.
 - `DocumentRecord` uses an opaque UUID independent of any raw path.
@@ -39,7 +45,7 @@ Pass 3B is complete. Next milestone is external review before Pass 3C (annotatio
 
 ## Explicitly deferred
 
-Highlight rendering, note editor UI, annotation toolbar redesign, PDF TextLayer (durable PDF locators), full annotation interaction UI, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
+PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
 
 ## Blocked / requires triage
 
@@ -47,4 +53,4 @@ The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains 
 
 ## Recently verified
 
-Pass 3B (Persistent Annotation Creation + Locator): `bun test` 84/84 pass (6 files; 38 tests in locator suite covering v3 locator serialization, validation, backward compatibility, and document isolation); `bun run build` clean (tsc + Vite); `cargo test` 10/10 pass (schema v3 migration idempotence, CRUD with locator, cascade deletion); `cargo fmt --check` clean; `cargo clippy -- -D warnings` clean.
+Pass 3C (Annotation Interaction + Highlight UX): `bun test` 92/92 pass (6 files; 46 tests in locator suite covering note editing, clearing, deletion, EPUB CFI highlight extraction, and document isolation); `bun run build` clean (tsc + Vite); `cargo test` 11/11 pass (schema v3 migration, CRUD with locator, note update, deletion failure handling); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.

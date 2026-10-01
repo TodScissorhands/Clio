@@ -301,11 +301,22 @@ export async function createAnnotation(
   });
   return deserializeAnnotation(native);
 }
+export async function updateAnnotation(
+  annotationId: string,
+  note?: string
+): Promise<Annotation> {
+  const native = await invoke<NativeAnnotationDto>("annotation_update", {
+    annotationId,
+    note: note ?? null,
+  });
+  return deserializeAnnotation(native);
+}
 
 export async function listAnnotations(documentId: DocumentId): Promise<Annotation[]> {
   const list = await invoke<NativeAnnotationDto[]>("annotation_list", { documentId });
   return list.map(deserializeAnnotation);
 }
+
 export async function deleteAnnotation(annotationId: string): Promise<void> {
   await invoke("annotation_delete", { annotationId });
 }

@@ -1,5 +1,5 @@
 import type { ComponentType, RefObject } from "react";
-import type { ReadingPosition, TextSelection } from "../storage/domain";
+import type { Annotation, ReadingPosition, TextSelection } from "../storage/domain";
 
 export type {
   Annotation,
@@ -79,6 +79,7 @@ export type ReaderEngineProps = {
   onToc(items: ReaderTocItem[]): void;
   onState(state: "loading" | "ready" | "error", message?: string): void;
   onTextSelection?(selection: TextSelection): void;
+  annotations?: Annotation[];
 };
 
 export type ReaderEngineComponent = ComponentType<ReaderEngineProps & {

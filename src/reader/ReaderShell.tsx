@@ -8,6 +8,7 @@ import {
   listAnnotations,
   listBookmarks,
   setReadingState,
+  updateAnnotation,
 } from "../storage/documentStorage";
 import { ReadingStateCoordinator } from "./readingState";
 import { EpubEngine } from "./EpubEngine";
@@ -71,6 +72,10 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [annotationsOpen, setAnnotationsOpen] = useState(false);
+  const [annotationsLoading, setAnnotationsLoading] = useState(false);
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [editingNoteText, setEditingNoteText] = useState("");
+  const [annotationNoteInput, setAnnotationNoteInput] = useState("");
   const [currentPosition, setCurrentPosition] = useState<ReadingPosition | undefined>(undefined);
   const [tocOpen, setTocOpen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -118,6 +123,10 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
       setBookmarksOpen(false);
       setAnnotations([]);
       setAnnotationsOpen(false);
+      setAnnotationsLoading(false);
+      setEditingAnnotationId(null);
+      setEditingNoteText("");
+      setAnnotationNoteInput("");
       setCurrentPosition(undefined);
       setTocOpen(false);
       setControlsVisible(true);
@@ -140,6 +149,10 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     setBookmarksOpen(false);
     setAnnotations([]);
     setAnnotationsOpen(false);
+    setAnnotationsLoading(false);
+    setEditingAnnotationId(null);
+    setEditingNoteText("");
+    setAnnotationNoteInput("");
     setCurrentPosition(undefined);
     setTocOpen(false);
     setControlsVisible(true);
@@ -163,14 +176,22 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
         setBookmarks([]);
       });
 
+    setAnnotationsLoading(true);
     listAnnotations(docId)
       .then((list) => {
         if (cancelled) return;
         setAnnotations(list);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (cancelled) return;
         setAnnotations([]);
+        onState(
+          "error",
+          `Could not load annotations: ${error instanceof Error ? error.message : String(error)}`
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setAnnotationsLoading(false);
       });
 
     return () => {
@@ -205,30 +226,63 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     } catch {}
   }, []);
 
-  const addAnnotationFromSelection = useCallback(async () => {
+  const saveAnnotationFromSelection = useCallback(async () => {
     if (!document || !currentPosition || !pendingTextSelection) return;
     const docId = document.record.id;
     const { locator, selectedText } = pendingTextSelection;
+    const note = annotationNoteInput.trim() ? annotationNoteInput.trim() : undefined;
     try {
       const newAnn = await createAnnotation(
         docId,
         "highlight",
         currentPosition,
         selectedText,
-        undefined,
+        note,
         locator
       );
       setAnnotations((prev) => [...prev, newAnn]);
       setPendingTextSelection(null);
-    } catch {}
-  }, [currentPosition, document, pendingTextSelection]);
+      setAnnotationNoteInput("");
+    } catch (error) {
+      onState(
+        "error",
+        `Could not save annotation: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }, [annotationNoteInput, currentPosition, document, onState, pendingTextSelection]);
+
+  const saveAnnotationNote = useCallback(async (annotationId: string) => {
+    try {
+      const updated = await updateAnnotation(
+        annotationId,
+        editingNoteText.trim() ? editingNoteText.trim() : undefined
+      );
+      setAnnotations((prev) => prev.map((a) => (a.id === annotationId ? updated : a)));
+      setEditingAnnotationId(null);
+      setEditingNoteText("");
+    } catch (error) {
+      onState(
+        "error",
+        `Could not update annotation note: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }, [editingNoteText, onState]);
 
   const removeAnnotation = useCallback(async (annotationId: string) => {
     try {
       await deleteAnnotation(annotationId);
       setAnnotations((prev) => prev.filter((a) => a.id !== annotationId));
-    } catch {}
-  }, []);
+      if (editingAnnotationId === annotationId) {
+        setEditingAnnotationId(null);
+        setEditingNoteText("");
+      }
+    } catch (error) {
+      onState(
+        "error",
+        `Could not delete annotation: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }, [editingAnnotationId, onState]);
 
   const clearSearch = useCallback(() => {
     setQuery("");
@@ -304,6 +358,16 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
         event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
 
       if (event.key === "Escape") {
+        if (editingAnnotationId) {
+          setEditingAnnotationId(null);
+          setEditingNoteText("");
+          return;
+        }
+        if (pendingTextSelection) {
+          setPendingTextSelection(null);
+          setAnnotationNoteInput("");
+          return;
+        }
         if (bookmarksOpen) {
           setBookmarksOpen(false);
           return;
@@ -350,7 +414,7 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [bookmarksOpen, clearSearch, document, query, searchResult, tocOpen, toggleBookmark]);
+  }, [annotationsOpen, bookmarksOpen, clearSearch, document, editingAnnotationId, pendingTextSelection, query, searchResult, tocOpen, toggleBookmark]);
 
   const Engine: ReaderEngineComponent | null = document?.record.format === "pdf" ? PdfEngine : document ? EpubEngine : null;
   const progressLabel = progress.total ? `${progress.current} / ${progress.total}` : progress.label ?? "Reading";
@@ -525,16 +589,53 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
               <span className="bookmark-label">{activeBookmark ? "Bookmarked" : "Bookmark"}</span>
             </button>
             {pendingTextSelection && (
-              <button
-                type="button"
-                className="reader-annotate-btn"
-                onClick={() => void addAnnotationFromSelection()}
-                disabled={!document || !currentPosition}
-                aria-label="Annotate selected text"
-                title="Annotate selected text"
+              <div
+                className="reader-toolbar-group reader-annotate-toolbar-group"
+                role="group"
+                aria-label="Add annotation"
               >
-                Annotate
-              </button>
+                <input
+                  type="text"
+                  className="reader-annotate-note-input"
+                  value={annotationNoteInput}
+                  onChange={(e) => setAnnotationNoteInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void saveAnnotationFromSelection();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setPendingTextSelection(null);
+                      setAnnotationNoteInput("");
+                    }
+                  }}
+                  placeholder="Note (optional)…"
+                  aria-label="Annotation note"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="reader-annotate-btn"
+                  onClick={() => void saveAnnotationFromSelection()}
+                  disabled={!document || !currentPosition}
+                  aria-label="Save annotation"
+                  title="Save annotation (Enter)"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="reader-annotate-cancel-btn"
+                  onClick={() => {
+                    setPendingTextSelection(null);
+                    setAnnotationNoteInput("");
+                  }}
+                  aria-label="Dismiss selection"
+                  title="Dismiss selection (Esc)"
+                >
+                  ✕
+                </button>
+              </div>
             )}
             <button
               type="button"
@@ -623,6 +724,7 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
             onToc={onToc}
             onState={onState}
             onTextSelection={onTextSelection}
+            annotations={annotations}
           />
         ) : (
             <div className="reader-empty">
@@ -689,44 +791,106 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
               <strong>Annotations ({annotations.length})</strong>
               <button
                 type="button"
-                onClick={() => setAnnotationsOpen(false)}
+                onClick={() => {
+                  setAnnotationsOpen(false);
+                  setEditingAnnotationId(null);
+                }}
                 aria-label="Close annotations"
               >
                 ×
               </button>
             </div>
-            {annotations.length > 0 ? (
+            {annotationsLoading ? (
+              <div className="reader-annotations-loading">
+                <span className="reader-spinner" /> Loading annotations…
+              </div>
+            ) : annotations.length > 0 ? (
               <ol className="reader-toc-list reader-annotations-list">
-                {annotations.map((a) => (
-                  <li key={a.id} className="reader-annotation-item">
-                    <div className="reader-annotation-main">
-                      <button
-                        type="button"
-                        className="reader-annotation-jump"
-                        onClick={() => void engineRef.current?.goToPosition?.(a.position)}
-                        title="Jump to annotation"
-                      >
-                        <span className="annotation-kind-badge">{a.kind}</span>
-                        <span className="annotation-quote">
-                          {a.selectedText || a.note || "Annotation"}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className="reader-annotation-delete"
-                        onClick={() => void removeAnnotation(a.id)}
-                        aria-label="Delete annotation"
-                        title="Delete annotation"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                {annotations.map((a) => {
+                  const isActive = isSameReadingPosition(a.position, currentPosition);
+                  const isEditing = editingAnnotationId === a.id;
+                  return (
+                    <li
+                      key={a.id}
+                      className={`reader-annotation-item ${isActive ? "active" : ""}`}
+                    >
+                      <div className="reader-annotation-main">
+                        <button
+                          type="button"
+                          className="reader-annotation-jump"
+                          onClick={() => void engineRef.current?.goToPosition?.(a.position)}
+                          title="Jump to annotation"
+                        >
+                          <div>
+                            <span className="annotation-kind-badge">{a.kind}</span>
+                            {isActive && <span className="annotation-active-badge">current</span>}
+                          </div>
+                          {a.selectedText && (
+                            <span className="annotation-quote">"{a.selectedText}"</span>
+                          )}
+                        </button>
+                        <div className="reader-annotation-actions">
+                          {!isEditing && (
+                            <button
+                              type="button"
+                              className="reader-annotation-edit-btn"
+                              onClick={() => {
+                                setEditingAnnotationId(a.id);
+                                setEditingNoteText(a.note || "");
+                              }}
+                              title={a.note ? "Edit note" : "Add note"}
+                            >
+                              ✎
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="reader-annotation-delete"
+                            onClick={() => void removeAnnotation(a.id)}
+                            aria-label="Delete annotation"
+                            title="Delete annotation"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                      {isEditing ? (
+                        <div className="reader-annotation-edit-wrap">
+                          <textarea
+                            className="reader-annotation-edit-input"
+                            value={editingNoteText}
+                            onChange={(e) => setEditingNoteText(e.target.value)}
+                            placeholder="Add or edit note…"
+                            rows={2}
+                            autoFocus
+                          />
+                          <div className="reader-annotation-edit-btns">
+                            <button
+                              type="button"
+                              className="reader-annotation-save-btn"
+                              onClick={() => void saveAnnotationNote(a.id)}
+                            >
+                              Save
+                            </button>
+                            <button
+                              type="button"
+                              className="reader-annotation-cancel-btn"
+                              onClick={() => setEditingAnnotationId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        a.note && <p className="reader-annotation-note-text">{a.note}</p>
+                      )}
+                    </li>
+                  );
+                })}
               </ol>
             ) : (
               <p className="reader-annotations-empty">
-                No annotations yet. Select text in the document and click Annotate.
+                No annotations yet. Select text in the document to highlight and add notes.
               </p>
             )}
           </aside>

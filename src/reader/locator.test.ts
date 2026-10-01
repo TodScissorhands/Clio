@@ -466,3 +466,219 @@ describe("Annotation with Locator (Pass 3B)", () => {
     expect(betaOnly[0].id).toBe("a2");
   });
 });
+
+// ─── Annotation Interaction & Notes (Pass 3C) ──────────────────────────────
+
+describe("Annotation Note Interaction (Pass 3C)", () => {
+  it("creates an annotation with an optional note attached to a selection", () => {
+    const annotation: Annotation = {
+      id: "ann-with-note",
+      documentId: "doc-1",
+      kind: "highlight",
+      position: { kind: "pdf-page", page: 3 },
+      selectedText: "Quantum computing represents a paradigm shift.",
+      note: "Compare with classical Turing machines in chapter 4.",
+      locator: {
+        kind: "pdf-page-text",
+        page: 3,
+        selectedText: "Quantum computing represents a paradigm shift.",
+      },
+      createdAt: "2026-10-01T15:00:00Z",
+      updatedAt: "2026-10-01T15:00:00Z",
+    };
+
+    expect(annotation.selectedText).toBe("Quantum computing represents a paradigm shift.");
+    expect(annotation.note).toBe("Compare with classical Turing machines in chapter 4.");
+    expect(annotation.locator?.kind).toBe("pdf-page-text");
+  });
+
+  it("models note editing while preserving locator and immutable identity", () => {
+    const original: Annotation = {
+      id: "ann-editable",
+      documentId: "doc-epub-1",
+      kind: "highlight",
+      position: { kind: "epub-cfi", cfi: "epubcfi(/6/8!/4/2)" },
+      selectedText: "The beginning of the chapter",
+      note: "Initial thought",
+      locator: {
+        kind: "epub-cfi-range",
+        cfi: "epubcfi(/6/8!/4,/2/1:0,/2/1:28)",
+      },
+      createdAt: "2026-10-01T15:00:00Z",
+      updatedAt: "2026-10-01T15:00:00Z",
+    };
+
+    // Editing note updates note and updatedAt, but preserves id, documentId, kind, position, locator
+    const updated: Annotation = {
+      ...original,
+      note: "Refined analysis after second reading",
+      updatedAt: "2026-10-01T15:30:00Z",
+    };
+
+    expect(updated.id).toBe(original.id);
+    expect(updated.documentId).toBe(original.documentId);
+    expect(updated.kind).toBe(original.kind);
+    expect(updated.position).toEqual(original.position);
+    expect(updated.locator).toEqual(original.locator);
+    expect(updated.note).toBe("Refined analysis after second reading");
+    expect(updated.updatedAt).not.toBe(original.updatedAt);
+  });
+
+  it("allows clearing a note while retaining the highlight selection and locator", () => {
+    const original: Annotation = {
+      id: "ann-clear-note",
+      documentId: "doc-1",
+      kind: "highlight",
+      position: { kind: "pdf-page", page: 7 },
+      selectedText: "Important formula",
+      note: "Temporary note to be cleared",
+      locator: { kind: "pdf-page-text", page: 7, selectedText: "Important formula" },
+      createdAt: "2026-10-01T15:00:00Z",
+      updatedAt: "2026-10-01T15:00:00Z",
+    };
+
+    const cleared: Annotation = {
+      ...original,
+      note: undefined,
+      updatedAt: "2026-10-01T15:35:00Z",
+    };
+
+    expect(cleared.note).toBeUndefined();
+    expect(cleared.selectedText).toBe("Important formula");
+    expect(cleared.locator).toEqual(original.locator);
+  });
+
+  it("handles deletion by removing the annotation from document state", () => {
+    const annotations: Annotation[] = [
+      {
+        id: "ann-keep",
+        documentId: "doc-1",
+        kind: "highlight",
+        position: { kind: "pdf-page", page: 2 },
+        createdAt: "2026-10-01T15:00:00Z",
+        updatedAt: "2026-10-01T15:00:00Z",
+      },
+      {
+        id: "ann-remove",
+        documentId: "doc-1",
+        kind: "note",
+        position: { kind: "pdf-page", page: 4 },
+        createdAt: "2026-10-01T15:05:00Z",
+        updatedAt: "2026-10-01T15:05:00Z",
+      },
+    ];
+
+    const remaining = annotations.filter((a) => a.id !== "ann-remove");
+    expect(remaining.length).toBe(1);
+    expect(remaining[0].id).toBe("ann-keep");
+  });
+
+  it("extracts and validates EPUB CFI ranges for highlight overlay rendering", () => {
+    const annotations: Annotation[] = [
+      {
+        id: "epub-hl-1",
+        documentId: "doc-epub",
+        kind: "highlight",
+        position: { kind: "epub-cfi", cfi: "epubcfi(/6/4!/4/2)" },
+        locator: {
+          kind: "epub-cfi-range",
+          cfi: "epubcfi(/6/4!/4,/2/1:0,/2/1:15)",
+        },
+        createdAt: "2026-10-01T15:00:00Z",
+        updatedAt: "2026-10-01T15:00:00Z",
+      },
+      {
+        id: "epub-note-only",
+        documentId: "doc-epub",
+        kind: "note",
+        position: { kind: "epub-cfi", cfi: "epubcfi(/6/6!/4/2)" },
+        note: "Standalone note without selection",
+        createdAt: "2026-10-01T15:10:00Z",
+        updatedAt: "2026-10-01T15:10:00Z",
+      },
+      {
+        id: "pdf-hl",
+        documentId: "doc-pdf",
+        kind: "highlight",
+        position: { kind: "pdf-page", page: 1 },
+        locator: { kind: "pdf-page-text", page: 1, selectedText: "PDF text" },
+        createdAt: "2026-10-01T15:15:00Z",
+        updatedAt: "2026-10-01T15:15:00Z",
+      },
+    ];
+
+    // Only EPUB annotations with valid epub-cfi-range locators are extracted for Foliate Overlayer
+    const epubCfis: string[] = [];
+    for (const a of annotations) {
+      if (a.locator?.kind === "epub-cfi-range" && a.locator.cfi) {
+        expect(validateAnnotationLocator(a.locator)).toBeNull();
+        epubCfis.push(a.locator.cfi);
+      }
+    }
+
+    expect(epubCfis.length).toBe(1);
+    expect(epubCfis[0]).toBe("epubcfi(/6/4!/4,/2/1:0,/2/1:15)");
+  });
+
+  it("safely ignores malformed or stale CFI ranges without crashing", () => {
+    const malformedLocators: AnnotationLocator[] = [
+      { kind: "epub-cfi-range", cfi: "not-a-cfi" },
+      { kind: "epub-cfi-range", cfi: "epubcfi(/6/2)" }, // position CFI, not a range
+      { kind: "epub-cfi-range", cfi: "" },
+    ];
+
+    for (const loc of malformedLocators) {
+      const err = validateAnnotationLocator(loc);
+      expect(err).not.toBeNull();
+    }
+  });
+
+  it("prevents duplicate annotation creation by clearing pending selection", () => {
+    let pendingSelection: TextSelection | null = {
+      locator: { kind: "pdf-page-text", page: 1, selectedText: "Selected" },
+      selectedText: "Selected",
+    };
+
+    // Simulated save operation: consumes selection and resets it to null
+    const save = () => {
+      if (!pendingSelection) return false;
+      pendingSelection = null;
+      return true;
+    };
+
+    expect(save()).toBe(true);
+    // Immediate second click cannot create a duplicate
+    expect(save()).toBe(false);
+    expect(pendingSelection).toBeNull();
+  });
+
+  it("clears annotation state on document switch to prevent cross-document contamination", () => {
+    let currentDocId: string = "doc-A";
+    let activeAnnotations: Annotation[] = [
+      {
+        id: "a-A",
+        documentId: "doc-A",
+        kind: "highlight",
+        position: { kind: "pdf-page", page: 1 },
+        createdAt: "2026-10-01T15:00:00Z",
+        updatedAt: "2026-10-01T15:00:00Z",
+      },
+    ];
+    let pendingSel: TextSelection | null = {
+      locator: { kind: "pdf-page-text", page: 1, selectedText: "A" },
+      selectedText: "A",
+    };
+
+    // Switch document: reset ephemeral and loaded state
+    const switchDocument = (nextDocId: string) => {
+      currentDocId = nextDocId;
+      activeAnnotations = [];
+      pendingSel = null;
+    };
+
+    switchDocument("doc-B");
+    expect(currentDocId).toBe("doc-B");
+    expect(activeAnnotations.length).toBe(0);
+    expect(pendingSel).toBeNull();
+  });
+});

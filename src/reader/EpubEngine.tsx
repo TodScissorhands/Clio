@@ -1,5 +1,6 @@
 import { useEffect, useImperativeHandle, useRef } from "react";
 import { EPUB } from "foliate-js/epub.js";
+import { Overlayer } from "foliate-js/overlayer.js";
 import "foliate-js/view.js";
 import { BlobReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 import type {
@@ -26,6 +27,8 @@ type FoliateViewElement = HTMLElement & {
   search?(options: { query: string; index?: number }): AsyncIterable<unknown>;
   clearSearch?(): void;
   getCFI(index: number, range: Range): string;
+  addAnnotation?(annotation: { value: string }, remove?: boolean): Promise<{ index: number; label: string } | undefined>;
+  deleteAnnotation?(annotation: { value: string }): Promise<unknown>;
   book?: FoliateBook;
   renderer?: HTMLElement;
 };
@@ -190,6 +193,7 @@ export function EpubEngine({
   onToc,
   onState,
   onTextSelection,
+  annotations,
 }: EngineProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<FoliateViewElement | null>(null);
@@ -199,6 +203,7 @@ export function EpubEngine({
   const searchMatchesRef = useRef<Array<{ cfi: string; excerpt?: string }>>([]);
   const currentMatchIdxRef = useRef<number>(-1);
   const searchTokenRef = useRef<number>(0);
+  const renderedCfisRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const host = hostRef.current;
@@ -217,6 +222,31 @@ export function EpubEngine({
     viewRef.current = view;
     const blockExternalLink = (event: Event) => event.preventDefault();
     view.addEventListener("external-link", blockExternalLink);
+
+    const handleDrawAnnotation = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        draw: (func: unknown, opts?: unknown) => void;
+        annotation: { value: string };
+      }>).detail;
+      if (detail?.draw) {
+        try {
+          detail.draw(Overlayer.highlight, { color: "var(--reader-highlight-color, #ffd54f)" });
+        } catch {}
+      }
+    };
+    view.addEventListener("draw-annotation", handleDrawAnnotation);
+
+    const handleCreateOverlay = () => {
+      if (!active()) return;
+      const v = viewRef.current;
+      if (!v) return;
+      for (const cfi of renderedCfisRef.current) {
+        try {
+          void v.addAnnotation?.({ value: cfi });
+        } catch {}
+      }
+    };
+    view.addEventListener("create-overlay", handleCreateOverlay);
     let localBook: FoliateBook | null = null;
     let localReader: { close(): Promise<void> | void } | null = null;
     let closed = false;
@@ -332,7 +362,14 @@ export function EpubEngine({
           ? initialPosition.cfi.trim()
           : undefined;
       await view.init({ lastLocation, showTextStart: true });
-      if (active()) onState("ready", "EPUB loaded. Use the reader controls or keyboard arrows.");
+      if (active()) {
+        for (const cfi of renderedCfisRef.current) {
+          try {
+            void view.addAnnotation?.({ value: cfi });
+          } catch {}
+        }
+        onState("ready", "EPUB loaded. Use the reader controls or keyboard arrows.");
+      }
       else closeLocal();
     }).catch((error: unknown) => {
       if (active()) onState("error", error instanceof Error ? error.message : String(error));
@@ -342,6 +379,8 @@ export function EpubEngine({
     return () => {
       operationRef.current += 1;
       view.removeEventListener("external-link", blockExternalLink);
+      view.removeEventListener("draw-annotation", handleDrawAnnotation);
+      view.removeEventListener("create-overlay", handleCreateOverlay);
       view.removeEventListener("load", handleLoad);
       view.removeEventListener("relocate", handleRelocate);
       if (viewRef.current === view) {
@@ -359,6 +398,33 @@ export function EpubEngine({
   useEffect(() => {
     viewRef.current?.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const currentCfis = new Set<string>();
+    for (const a of annotations ?? []) {
+      if (a.locator?.kind === "epub-cfi-range" && a.locator.cfi) {
+        currentCfis.add(a.locator.cfi);
+      }
+    }
+
+    for (const prevCfi of renderedCfisRef.current) {
+      if (!currentCfis.has(prevCfi)) {
+        try {
+          void view.deleteAnnotation?.({ value: prevCfi });
+        } catch {}
+      }
+    }
+
+    for (const cfi of currentCfis) {
+      try {
+        void view.addAnnotation?.({ value: cfi });
+      } catch {}
+    }
+
+    renderedCfisRef.current = currentCfis;
+  }, [annotations]);
 
   useImperativeHandle(engineRef, () => ({
     previous: () => viewRef.current?.goLeft(),
