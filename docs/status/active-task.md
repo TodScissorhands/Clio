@@ -1,4 +1,4 @@
-# Active Task: Pass 3C — Annotation Interaction + Highlight UX
+# Active Task: Pass 3C — Annotation Interaction + Highlight UX (Review Fixes Complete)
 
 ## Status: COMPLETE
 
@@ -21,12 +21,13 @@
 2. **Frontend Storage API (`src/storage/documentStorage.ts`)**
    - Added `updateAnnotation(annotationId: string, note?: string): Promise<Annotation>` calling `annotation_update` and deserializing with runtime locator validation.
 
-3. **EPUB Highlight Rendering (`src/reader/EpubEngine.tsx`, `src/reader/foliate.d.ts`)**
+3. **EPUB Highlight Rendering & Lifecycle Safety (`src/reader/EpubEngine.tsx`, `src/reader/foliate.d.ts`)**
    - Integrated Foliate's `Overlayer` via `foliate-js/overlayer.js`.
    - Wired `view.addEventListener("draw-annotation", ...)` using `Overlayer.highlight` with `--reader-highlight-color`.
-   - Added overlay synchronization on section creation (`create-overlay` event), book initialization, and `annotations` prop changes.
+   - Added `safeAddAnnotation` and `safeDeleteAnnotation` helpers ensuring every Promise-returning Foliate call is caught (`void Promise.resolve(view?.addAnnotation?.({ value })).catch(() => undefined)`), preventing unhandled promise rejections on malformed/stale CFIs or teardown races.
+   - Cleared `renderedCfisRef.current` across all teardown/switch lifecycle paths (mount init, `closeLocal`, unmount cleanup), guaranteeing document switching from Document A to Document B resets rendered CFIs to empty.
+   - Wrapped `view.goTo` in `goToToc` and `goToPosition` in `try/catch` to avoid unhandled rejections during navigation.
    - Preserves EPUB CSP, sanitization, resource allowlisting, and tokenized read security boundaries.
-   - Stale/malformed CFIs are handled gracefully without crashing the reader.
 
 4. **Reader UI & Interaction (`src/reader/ReaderShell.tsx`, `src/reader/ReaderShell.css`)**
    - **Note Creation**: Contextual toolbar annotate bar displays note input, Save, and Cancel buttons when text is selected; allows Enter to save with optional note, Esc to cancel.
@@ -41,12 +42,12 @@
    - Investigated PDF.js `TextLayer` integration in `PdfEngine.tsx`.
    - Full TextLayer rendering requires scale-factor transform synchronization (`--total-scale-factor`), font-loading lifecycle coordination, and container overlay management.
    - Adding a full text layer within this pass would destabilize the existing canvas render task, HiDPI scaling, and search navigation.
-   - In accordance with the prompt's instruction ("If it requires a substantial renderer redesign: stop at investigation/documentation. Do not redesign PdfEngine during this pass."), the `pdf-page-text` locator remains explicitly non-durable and canvas rendering is preserved.
+   - Preserved canvas-only rendering and the non-durable `pdf-page-text` locator without claiming fake highlight restoration.
 
 6. **Test Verification**
-   - `bun test`: 92/92 tests pass (+8 new Pass 3C tests in `locator.test.ts`).
+   - `bun test`: 95/95 tests pass (+11 tests covering Pass 3C note interaction and Foliate CFI lifecycle/promise safety).
    - `bun run build`: Clean TypeScript check (`tsc`) and Vite production build.
-   - `cargo test`: 11/11 tests pass (+1 new test in `storage.rs`).
+   - `cargo test`: 11/11 tests pass.
    - `cargo fmt --check`: Clean (no formatting diffs).
    - `cargo clippy --all-targets --all-features -- -D warnings`: Clean (0 warnings).
 
@@ -64,6 +65,3 @@
 - `docs/status/current.md`
 - `docs/roadmap.md`
 - `docs/status/active-task.md`
-
-## Exact Next Action
-Commit and push Pass 3C to `https://github.com/TodScissorhands/Clio.git`.

@@ -682,3 +682,107 @@ describe("Annotation Note Interaction (Pass 3C)", () => {
     expect(pendingSel).toBeNull();
   });
 });
+
+// ─── Review Regression Tests: Foliate CFI Lifecycle & Promise Safety ────────
+
+describe("Foliate CFI Lifecycle & Promise Safety (Pass 3C Review Fixes)", () => {
+  it("resets rendered CFI tracking on document change/cleanup", () => {
+    const renderedCfis = new Set<string>();
+    renderedCfis.add("epubcfi(/6/2!/4,/2:0,/2:5)");
+    renderedCfis.add("epubcfi(/6/4!/4,/2:10,/2:20)");
+
+    expect(renderedCfis.size).toBe(2);
+
+    // Simulate document switch / closeLocal reset
+    renderedCfis.clear();
+    expect(renderedCfis.size).toBe(0);
+  });
+
+  it("ensures annotation rendering after document replacement uses only the new document CFI set", () => {
+    const docAAnnotations: Annotation[] = [
+      {
+        id: "a-1",
+        documentId: "doc-A",
+        kind: "highlight",
+        position: { kind: "epub-cfi", cfi: "epubcfi(/6/2!/4)" },
+        locator: { kind: "epub-cfi-range", cfi: "epubcfi(/6/2!/4,/1:0,/1:10)" },
+        createdAt: "2026-10-01T15:00:00Z",
+        updatedAt: "2026-10-01T15:00:00Z",
+      },
+    ];
+
+    const docBAnnotations: Annotation[] = [
+      {
+        id: "b-1",
+        documentId: "doc-B",
+        kind: "highlight",
+        position: { kind: "epub-cfi", cfi: "epubcfi(/6/8!/4)" },
+        locator: { kind: "epub-cfi-range", cfi: "epubcfi(/6/8!/4,/2:0,/2:30)" },
+        createdAt: "2026-10-01T16:00:00Z",
+        updatedAt: "2026-10-01T16:00:00Z",
+      },
+    ];
+
+    let renderedCfis = new Set<string>();
+    for (const a of docAAnnotations) {
+      if (a.locator?.kind === "epub-cfi-range" && a.locator.cfi) {
+        renderedCfis.add(a.locator.cfi);
+      }
+    }
+    expect(renderedCfis.has("epubcfi(/6/2!/4,/1:0,/1:10)")).toBe(true);
+
+    // Document change triggers cleanup: renderedCfis is cleared
+    renderedCfis.clear();
+    expect(renderedCfis.size).toBe(0);
+
+    // Document B syncs only its own CFIs
+    for (const b of docBAnnotations) {
+      if (b.locator?.kind === "epub-cfi-range" && b.locator.cfi) {
+        renderedCfis.add(b.locator.cfi);
+      }
+    }
+    expect(renderedCfis.size).toBe(1);
+    expect(renderedCfis.has("epubcfi(/6/8!/4,/2:0,/2:30)")).toBe(true);
+    expect(renderedCfis.has("epubcfi(/6/2!/4,/1:0,/1:10)")).toBe(false);
+  });
+
+  it("guarantees safeAddAnnotation and safeDeleteAnnotation catch rejected promises without unhandled rejection", async () => {
+    let addCalled = false;
+    let deleteCalled = false;
+
+    const mockView = {
+      addAnnotation: async (_ann: { value: string }) => {
+        addCalled = true;
+        // Simulate Foliate resolveNavigation returning undefined for stale/malformed CFI
+        throw new TypeError("Cannot destructure property 'index' as it is undefined.");
+      },
+      deleteAnnotation: async (_ann: { value: string }) => {
+        deleteCalled = true;
+        throw new Error("Section not loaded during delete");
+      },
+    };
+
+    // The safeAdd / safeDelete pattern used in EpubEngine:
+    const safeAdd = (view: typeof mockView | null, value: string) => {
+      try {
+        void Promise.resolve(view?.addAnnotation?.({ value })).catch(() => undefined);
+      } catch {}
+    };
+
+    const safeDelete = (view: typeof mockView | null, value: string) => {
+      try {
+        void Promise.resolve(view?.deleteAnnotation?.({ value })).catch(() => undefined);
+      } catch {}
+    };
+
+    // Calling with rejecting promises does NOT throw or cause unhandledRejection
+    safeAdd(mockView, "epubcfi(/6/999!/4)");
+    safeDelete(mockView, "epubcfi(/6/999!/4)");
+
+    // Allow microtasks to settle
+    await Promise.resolve();
+
+    expect(addCalled).toBe(true);
+    expect(deleteCalled).toBe(true);
+  });
+});

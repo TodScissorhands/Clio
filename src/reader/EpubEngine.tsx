@@ -183,6 +183,18 @@ async function openEpub(file: Blob) {
   }
 }
 
+function safeAddAnnotation(view: FoliateViewElement | null | undefined, value: string) {
+  try {
+    void Promise.resolve(view?.addAnnotation?.({ value })).catch(() => undefined);
+  } catch {}
+}
+
+function safeDeleteAnnotation(view: FoliateViewElement | null | undefined, value: string) {
+  try {
+    void Promise.resolve(view?.deleteAnnotation?.({ value })).catch(() => undefined);
+  } catch {}
+}
+
 export function EpubEngine({
   document,
   engineRef,
@@ -215,7 +227,7 @@ export function EpubEngine({
     const previousReader = zipReaderRef.current;
     zipReaderRef.current = null;
     if (previousReader) void Promise.resolve(previousReader.close()).catch(() => undefined);
-
+    renderedCfisRef.current.clear();
     const operation = ++operationRef.current;
     const view = globalThis.document.createElement("foliate-view") as FoliateViewElement;
     host.replaceChildren(view);
@@ -241,9 +253,7 @@ export function EpubEngine({
       const v = viewRef.current;
       if (!v) return;
       for (const cfi of renderedCfisRef.current) {
-        try {
-          void v.addAnnotation?.({ value: cfi });
-        } catch {}
+        safeAddAnnotation(v, cfi);
       }
     };
     view.addEventListener("create-overlay", handleCreateOverlay);
@@ -252,6 +262,7 @@ export function EpubEngine({
     let closed = false;
     const active = () => operation === operationRef.current && viewRef.current === view;
     const closeLocal = () => {
+      renderedCfisRef.current.clear();
       if (!closed) {
         closed = true;
         view.close();
@@ -364,9 +375,7 @@ export function EpubEngine({
       await view.init({ lastLocation, showTextStart: true });
       if (active()) {
         for (const cfi of renderedCfisRef.current) {
-          try {
-            void view.addAnnotation?.({ value: cfi });
-          } catch {}
+          safeAddAnnotation(view, cfi);
         }
         onState("ready", "EPUB loaded. Use the reader controls or keyboard arrows.");
       }
@@ -378,6 +387,7 @@ export function EpubEngine({
 
     return () => {
       operationRef.current += 1;
+      renderedCfisRef.current.clear();
       view.removeEventListener("external-link", blockExternalLink);
       view.removeEventListener("draw-annotation", handleDrawAnnotation);
       view.removeEventListener("create-overlay", handleCreateOverlay);
@@ -411,18 +421,13 @@ export function EpubEngine({
 
     for (const prevCfi of renderedCfisRef.current) {
       if (!currentCfis.has(prevCfi)) {
-        try {
-          void view.deleteAnnotation?.({ value: prevCfi });
-        } catch {}
+        safeDeleteAnnotation(view, prevCfi);
       }
     }
 
     for (const cfi of currentCfis) {
-      try {
-        void view.addAnnotation?.({ value: cfi });
-      } catch {}
+      safeAddAnnotation(view, cfi);
     }
-
     renderedCfisRef.current = currentCfis;
   }, [annotations]);
 
@@ -569,12 +574,18 @@ export function EpubEngine({
     },
     goToToc: async (item: ReaderTocItem) => {
       const view = viewRef.current;
-      if (item.href && view) await view.goTo(item.href);
+      if (item.href && view) {
+        try {
+          await view.goTo(item.href);
+        } catch {}
+      }
     },
     goToPosition: async (pos) => {
       const view = viewRef.current;
       if (view && pos.kind === "epub-cfi" && pos.cfi.trim()) {
-        await view.goTo(pos.cfi.trim());
+        try {
+          await view.goTo(pos.cfi.trim());
+        } catch {}
       }
     },
   }), [engineRef]);
