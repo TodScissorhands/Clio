@@ -1,11 +1,10 @@
+mod conversion;
 mod storage;
-
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -17,7 +16,7 @@ use storage::{LibraryDb, ReaderOpen};
 const SUPPORTED: &[&str] = &[
     "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt",
 ];
-const OUTPUTS: &[&str] = &["pdf", "epub", "docx", "odt", "html", "md", "txt"];
+
 const READER_AUTHORIZATION_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Serialize)]
@@ -93,13 +92,6 @@ fn verify_authorized_path(path: &Path) -> Result<(), String> {
     }
     let _ = authorized_document_metadata(path)?;
     Ok(())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConversionResult {
-    output_path: String,
-    engine: String,
 }
 
 fn extension(path: &Path) -> String {
@@ -200,83 +192,7 @@ fn read_document_bytes(token: String) -> Result<Vec<u8>, String> {
     fs::read(&entry.path).map_err(|error| format!("Could not read document bytes: {error}"))
 }
 
-fn run_command(command: &mut Command, tool: &str) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not run {tool}. Make sure it is installed: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(format!(
-        "{tool} could not convert this file{}",
-        if details.is_empty() {
-            ".".into()
-        } else {
-            format!(": {details}")
-        }
-    ))
-}
-
-#[tauri::command]
-fn convert_document(
-    input_path: String,
-    output_path: String,
-    output_format: String,
-) -> Result<ConversionResult, String> {
-    let input = Path::new(&input_path);
-    let output = Path::new(&output_path);
-    let source_format = extension(input);
-    let target = output_format.to_ascii_lowercase();
-    if !SUPPORTED.contains(&source_format.as_str()) {
-        return Err(format!("Unsupported input format: .{source_format}"));
-    }
-    if !OUTPUTS.contains(&target.as_str()) {
-        return Err(format!("Unsupported output format: .{target}"));
-    }
-    if input == output {
-        return Err("Choose a different location for the converted file.".into());
-    }
-
-    if source_format == "pdf" && target == "txt" {
-        run_command(
-            Command::new("pdftotext").arg(input).arg(output),
-            "Poppler (pdftotext)",
-        )?;
-        return Ok(ConversionResult {
-            output_path,
-            engine: "Poppler text extraction".into(),
-        });
-    }
-
-    if source_format == "pdf" {
-        let temporary =
-            std::env::temp_dir().join(format!("clio-{}-source.txt", std::process::id()));
-        run_command(
-            Command::new("pdftotext").arg(input).arg(&temporary),
-            "Poppler (pdftotext)",
-        )?;
-        let conversion = run_command(
-            Command::new("pandoc").arg(&temporary).arg("-o").arg(output),
-            "Pandoc",
-        );
-        let _ = fs::remove_file(temporary);
-        conversion?;
-        return Ok(ConversionResult {
-            output_path,
-            engine: "Poppler + Pandoc".into(),
-        });
-    }
-
-    run_command(
-        Command::new("pandoc").arg(input).arg("-o").arg(output),
-        "Pandoc",
-    )?;
-    Ok(ConversionResult {
-        output_path,
-        engine: "Pandoc".into(),
-    })
-}
+// Conversion commands and capability registry are implemented in crate::conversion
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -303,7 +219,10 @@ pub fn run() {
             inspect_document,
             authorize_reader_document,
             read_document_bytes,
-            convert_document,
+            conversion::convert_document,
+            conversion::conversion_capabilities,
+            conversion::conversion_plan_job,
+            conversion::conversion_execute_job,
             library_document_open,
             reader_open_selected,
             storage::library_root_add,

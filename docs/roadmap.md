@@ -41,7 +41,8 @@ This roadmap is intentionally staged. It describes direction, not promises to im
    - Persistence error handling: Creation, update, and deletion failures surface clear reader error notifications via `onState("error", ...)` instead of silently swallowing in empty catch blocks, preserving user selection and input state.
    - PDF Text-Layer investigation: Evaluated PDF.js `TextLayer` integration in `PdfEngine`. Documented that full TextLayer overlay requires scale-factor transform synchronization and font-loading lifecycle coordination; preserved existing non-durable `pdf-page-text` locator without claiming fake durability or destabilizing canvas rendering.
 8. **Conversion and manipulation improvements**
-   - Capability registry, planned jobs, safe PDF operations, and format-specific import/export without redesigning Storage Core.
+   - **8A. Conversion capability architecture — implemented**: Typed capability registry (`ConversionCapability`, `CapabilityRegistry`), planned job model (`ConversionJob`), safe path validation (canonical equality, directory permissions), unique UUID temporary file guards (`TempFileGuard`), and `ConversionWorkspace` UI dynamically consuming capabilities and executing planned jobs. Safe PDF operations investigated (`pdfunite`, `pdfseparate`, `lopdf`).
+   - **8B. Safe PDF operations (PDF Merge)**: First safe native PDF manipulation operation via Poppler `pdfunite` using structured command invocation and job planner.
 9. **Additional document formats**
    - Add mature local rendering/preview paths for text, Markdown, DOCX, presentations, spreadsheets, and images according to capability rather than a universal model.
 10. **Cross-platform/mobile implementation**

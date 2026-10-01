@@ -1,6 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  executeConversionJob,
+  formatDetail,
+  formatLabel,
+  listConversionCapabilities,
+  planConversionJob,
+  type ConversionCapability,
+  type ConversionJob,
+} from "./conversion";
 
 type DocumentInfo = {
   path: string;
@@ -10,23 +19,11 @@ type DocumentInfo = {
   supported: boolean;
 };
 
-type ConversionResult = {
-  outputPath: string;
-  engine: string;
-};
-
-const formats = [
-  { id: "pdf", label: "PDF", detail: "Portable document" },
-  { id: "epub", label: "EPUB", detail: "E-reader book" },
-  { id: "docx", label: "DOCX", detail: "Word document" },
-  { id: "odt", label: "ODT", detail: "Open document" },
-  { id: "html", label: "HTML", detail: "Web page" },
-  { id: "md", label: "Markdown", detail: "Plain text markup" },
-  { id: "txt", label: "Plain text", detail: "Simple text" },
-];
-
 const fileFilters = [
-  { name: "Documents", extensions: ["pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt"] },
+  {
+    name: "Documents",
+    extensions: ["pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt"],
+  },
 ];
 
 function formatBytes(bytes: number) {
@@ -37,10 +34,21 @@ function formatBytes(bytes: number) {
 
 export function ConversionWorkspace() {
   const [document, setDocument] = useState<DocumentInfo | null>(null);
+  const [capabilities, setCapabilities] = useState<ConversionCapability[]>([]);
   const [target, setTarget] = useState("epub");
+  const [plannedJob, setPlannedJob] = useState<ConversionJob | null>(null);
   const [status, setStatus] = useState<"idle" | "converting" | "done" | "error">("idle");
   const [message, setMessage] = useState("Choose a document to begin.");
   const [outputPath, setOutputPath] = useState("");
+
+  // Load initial global capabilities for preview before document selection
+  useEffect(() => {
+    void listConversionCapabilities().then((allCaps) => {
+      if (!document) {
+        setCapabilities(allCaps);
+      }
+    });
+  }, [document]);
 
   const suggestedName = useMemo(() => {
     if (!document) return "converted-document";
@@ -56,40 +64,81 @@ export function ConversionWorkspace() {
       setDocument(info);
       setOutputPath("");
       setStatus("idle");
-      setMessage(info.supported ? "Ready to convert." : `.${info.extension || "unknown"} is not supported yet.`);
+
+      // Query capabilities specific to this document's format
+      const caps = await listConversionCapabilities(info.extension);
+      setCapabilities(caps);
+
+      if (caps.length > 0) {
+        // Pick first target if current target is not in valid targets
+        const validTargets = caps.map((c) => c.targetFormat);
+        const nextTarget = validTargets.includes(target) ? target : validTargets[0];
+        setTarget(nextTarget);
+
+        // Plan the job ahead of execution
+        try {
+          const job = await planConversionJob(info.path, nextTarget);
+          setPlannedJob(job);
+          setMessage(`Ready to convert. ${caps.length} target format${caps.length === 1 ? "" : "s"} available.`);
+        } catch {
+          setPlannedJob(null);
+          setMessage("Ready to convert.");
+        }
+      } else {
+        setPlannedJob(null);
+        setMessage(`.${info.extension || "unknown"} is not supported for conversion.`);
+      }
     } catch (error) {
       setStatus("error");
       setMessage(String(error));
+    }
+  }
+
+  async function handleTargetSelect(newTarget: string) {
+    setTarget(newTarget);
+    if (document) {
+      try {
+        const job = await planConversionJob(document.path, newTarget);
+        setPlannedJob(job);
+      } catch {
+        setPlannedJob(null);
+      }
     }
   }
 
   async function convert() {
     if (!document) return chooseDocument();
-    if (!document.supported) return;
+    if (capabilities.length === 0) return;
 
     const output = await save({
       defaultPath: `${suggestedName}.${target}`,
-      filters: [{ name: formats.find((format) => format.id === target)?.label ?? target, extensions: [target] }],
+      filters: [
+        {
+          name: formatLabel(target),
+          extensions: [target],
+        },
+      ],
     });
     if (!output) return;
 
     setStatus("converting");
-    setMessage("Converting your document…");
+    setMessage("Planning and executing conversion…");
     try {
-      const result = await invoke<ConversionResult>("convert_document", {
-        inputPath: document.path,
-        outputPath: output,
-        outputFormat: target,
-      });
-      setOutputPath(result.outputPath);
+      // Plan job with concrete destination path
+      const jobToRun = await planConversionJob(document.path, target, output);
+      setMessage(`Converting with ${jobToRun.engine}…`);
+
+      // Execute through native capability boundary
+      const completedJob = await executeConversionJob(jobToRun);
+      setPlannedJob(completedJob);
+      setOutputPath(completedJob.outputPath);
       setStatus("done");
-      setMessage(`Converted with ${result.engine}.`);
+      setMessage(`Converted successfully with ${completedJob.engine}.`);
     } catch (error) {
       setStatus("error");
       setMessage(String(error));
     }
   }
-
   return (
     <section className="tools-view">
       <div className="view-heading">
@@ -118,23 +167,48 @@ export function ConversionWorkspace() {
         <div className="target-card">
           <div className="card-heading"><span className="step">02</span><span>Convert to</span></div>
           <div className="format-grid">
-            {formats.map((format) => (
-              <button key={format.id} className={`format-option ${target === format.id ? "selected" : ""}`} onClick={() => setTarget(format.id)}>
-                <strong>{format.label}</strong><span>{format.detail}</span>
+            {capabilities.map((cap) => (
+              <button
+                key={`${cap.sourceFormat}-${cap.targetFormat}`}
+                type="button"
+                className={`format-option ${target === cap.targetFormat ? "selected" : ""}`}
+                onClick={() => void handleTargetSelect(cap.targetFormat)}
+              >
+                <strong>{formatLabel(cap.targetFormat)}</strong>
+                <span>{formatDetail(cap.targetFormat)} · {cap.label}</span>
               </button>
             ))}
+            {document && capabilities.length === 0 && (
+              <p style={{ gridColumn: "1 / -1", color: "#8c8e83", fontSize: "12px", margin: "16px 0" }}>
+                No conversion targets available for .{document.extension}.
+              </p>
+            )}
           </div>
         </div>
       </section>
       <section className="action-row">
         <div className={`conversion-message ${status}`}><span>{status === "done" ? "✓" : status === "error" ? "!" : "•"}</span>{message}</div>
-        <button className="convert-button" onClick={convert} disabled={status === "converting" || (!!document && !document.supported)}>
-          {status === "converting" ? "Converting…" : document ? `Convert to ${target.toUpperCase()}` : "Select a document"}
+        <button
+          type="button"
+          className="convert-button"
+          onClick={() => void convert()}
+          disabled={status === "converting" || (!!document && capabilities.length === 0)}
+        >
+          {status === "converting"
+            ? "Converting…"
+            : document
+            ? `Convert to ${target.toUpperCase()}`
+            : "Select a document"}
           <span>→</span>
         </button>
       </section>
-      {outputPath && <p className="output-path">Saved to <code>{outputPath}</code></p>}
-      <p className="tools-note">Powered by native tools · PDF text extraction · Pandoc document conversion</p>
+      {outputPath && (
+        <p className="output-path">
+          Saved to <code>{outputPath}</code>
+          {plannedJob && <span> · {plannedJob.engine}</span>}
+        </p>
+      )}
+      <p className="tools-note">Powered by native tools · Poppler text extraction · Pandoc document conversion</p>
     </section>
   );
 }

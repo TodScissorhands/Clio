@@ -27,10 +27,16 @@
   - **Annotations Panel Enhancements**: Inline note editor with Save / Cancel; loading indicator during async retrieval; visual active indicator (`current`) for annotations matching current reading position; error-resilient delete and jump navigation.
   - **Persistence Error Handling**: Addressed external review finding. Creation, update, and deletion failures now surface clear reader error notifications via `onState("error", ...)` instead of silently swallowing in empty catch blocks, preserving user selection and input state.
   - **PDF Text-Layer Investigation**: Evaluated PDF.js `TextLayer` integration in `PdfEngine`. Documented that full TextLayer overlay requires scale-factor transform synchronization and font-loading lifecycle coordination; preserved existing non-durable `pdf-page-text` locator without claiming fake durability or destabilizing canvas rendering.
+- **Milestone 8A — Conversion Capability Architecture**:
+  - **Typed Capability Model**: Rust `conversion` module (`src-tauri/src/conversion.rs`) and TypeScript module (`src/tools/conversion.ts`) with `OperationKind` (`convert`, `extract-text`), `ConversionEngine` (`poppler`, `pandoc`, `poppler-pandoc`), `ConversionCapability`, and `CapabilityRegistry`. Replaced hard-coded static branching with an explicit capability registry reflecting verified conversion engines.
+  - **Planned Job Architecture**: `ConversionJob` with lifecycle status (`planned`, `running`, `completed`, `failed`), explicit input/output paths, operation kind, and timestamps. Decoupled from document catalog and SQLite storage (pure in-memory job planning).
+  - **Safe Path Boundary**: Canonical source validation, input == output collision rejection (including canonical path resolution), output parent directory verification, UUID-based unique temporary file guards (`TempFileGuard`) ensuring zero file leakage even upon process failure, and structured process argument passing without shell interpolation.
+  - **Conversion Workspace Integration**: `ConversionWorkspace.tsx` dynamically queries native capabilities for the selected document's extension, renders only verified target formats with engine metadata, pre-plans conversion jobs, executes them through the capability boundary, and displays granular engine/output status.
+  - **Safe PDF Operations Investigation**: Researched local PDF manipulation tools (`pdfunite`, `pdfseparate`, `lopdf`); verified host Poppler utilities and staged `merge-pdf` as the first candidate for Milestone 8B.
 
 ## Current work
 
-Pass 3C is complete. The annotation interaction and EPUB highlight workflow is functional and verified. The next milestone is format expansion or conversion pipeline improvements.
+Milestone 8A is complete. The conversion capability architecture and planned job model are functional and verified. The next milestone is Milestone 8B (Safe PDF Operations: PDF Merge).
 - Filesystem/user-controlled sources remain authoritative.
 - A raw filesystem path is not universal document identity.
 - `DocumentRecord` uses an opaque UUID independent of any raw path.
@@ -45,7 +51,7 @@ Pass 3C is complete. The annotation interaction and EPUB highlight workflow is f
 
 ## Explicitly deferred
 
-PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
+Milestone 8B Safe PDF Operations (merge, page extraction), PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
 
 ## Blocked / requires triage
 
@@ -53,4 +59,4 @@ The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains 
 
 ## Recently verified
 
-Pass 3C (Annotation Interaction + Highlight UX): `bun test` 92/92 pass (6 files; 46 tests in locator suite covering note editing, clearing, deletion, EPUB CFI highlight extraction, and document isolation); `bun run build` clean (tsc + Vite); `cargo test` 11/11 pass (schema v3 migration, CRUD with locator, note update, deletion failure handling); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
+Milestone 8A (Conversion Capability Architecture): `bun test` 100/100 pass (7 files; new conversion test suite covering capability modeling, format metadata, and job state transitions); `bun run build` clean (tsc + Vite); `cargo test` 15/15 pass (including capability registry filtering, format normalization, job planning validation, and temp file guard cleanup); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
