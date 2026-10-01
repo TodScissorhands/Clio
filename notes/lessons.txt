@@ -1,0 +1,129 @@
+LESSONS FOR LEARNING THIS PROJECT
+
+1) Learn the shape of the app first
+
+This project has two main parts:
+
+- `src/` = the UI you see and click
+- `src-tauri/` = the native Rust backend
+
+If you remember only one thing, remember this split.
+
+2) Understand the run loop
+
+The main command you use while building is:
+
+`bun tauri dev`
+
+That command starts the app in development mode.
+
+When you close the app window, the program may still be running in the terminal.
+Press `Ctrl+C` in the terminal to fully stop it.
+
+3) Learn the three most important source files
+
+- `src/main.tsx` starts the React app.
+- `src/App.tsx` contains the visible interface.
+- `src-tauri/src/lib.rs` contains the Rust commands that do native work.
+
+If you understand those three files, you understand most of the project.
+
+4) Learn how the UI talks to Rust
+
+The UI does not do native work directly.
+
+Instead:
+
+- React calls `invoke(...)`
+- Rust exposes a function with `#[tauri::command]`
+- Tauri connects them
+
+That is the basic bridge.
+
+5) Keep the user flow simple
+
+For this project, the user flow should stay clear:
+
+- choose a file
+- inspect it
+- choose an output format
+- convert it
+- save the output
+
+Do not mix too many actions into one screen at the start.
+
+6) Separate reading from conversion
+
+Your app has two jobs:
+
+- reader: open and display documents cleanly
+- converter: turn files into easier formats
+
+Keep those ideas separate in your head.
+That will make the project easier to grow later.
+
+7) Start with safe edits
+
+When learning, change one small thing at a time:
+
+- a label
+- a button color
+- a status message
+- a file format option
+
+Then run the app again and confirm it still works.
+
+8) Use Readest as a reference, not a template to copy blindly
+
+Readest is useful because it shows:
+
+- how a reader app is organized
+- how document state is handled
+- how native features are connected
+
+But your app does not need all of its complexity.
+
+Use it to study ideas, not to duplicate everything.
+
+9) Remember what each tool is for
+
+- `bun tauri dev` = run the app
+- `bun run build` = check the frontend
+- `cargo check --manifest-path src-tauri/Cargo.toml` = check the backend
+- `bun tauri build` = package the app
+
+10) What to ignore for now
+
+These are generated or build files:
+
+- `node_modules/`
+- `dist/`
+- `src-tauri/target/`
+
+You usually do not edit them directly.
+
+11) Good order for learning
+
+Study in this order:
+
+1. `package.json`
+2. `src/main.tsx`
+3. `src/App.tsx`
+4. `src/App.css`
+5. `src-tauri/src/main.rs`
+6. `src-tauri/src/lib.rs`
+7. `src-tauri/Cargo.toml`
+
+12) The main goal
+
+Your goal is not to learn everything about Tauri first.
+
+Your goal is to learn just enough to:
+
+- open the app
+- understand where the UI lives
+- understand where the backend lives
+- make one small change safely
+- run it again and see the result
+
+That is the correct starting point.
