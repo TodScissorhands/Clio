@@ -1,8 +1,8 @@
 # Clio
 
-Clio is an early-stage local-first desktop document workbench built with Tauri, React, TypeScript, and Rust. It currently focuses on selecting a local document, inspecting its basic metadata, and converting it with locally installed command-line tools.
+Clio is an early-stage local-first desktop document workbench built with Tauri, React, TypeScript, and Rust. It currently provides a native conversion workspace and a read-only PDF/EPUB reader foundation.
 
-The project is intentionally not a full document reader or library manager yet. The filesystem remains the source of truth; the application does not upload or copy documents into a cloud service.
+The filesystem remains the source of truth; the application does not upload or copy documents into a cloud service.
 
 ## Current status
 
@@ -12,15 +12,18 @@ Implemented:
 - Basic inspection of a selected file: path, filename, extension, size, and extension-based support status.
 - Conversion requests from the React UI to Rust through Tauri commands.
 - Local conversion using Poppler's `pdftotext` and Pandoc.
-- A responsive single-screen conversion UI with status and output-path feedback.
+- A responsive conversion workspace reachable from the Tools section.
+- A Reader surface with PDF.js-backed PDF rendering and foliate-js-backed EPUB rendering.
+- Reader page navigation, PDF zoom, current-page text extraction/search foundation, EPUB search foundation, EPUB table of contents, keyboard navigation, and reader themes.
+- A storage boundary using `DocumentRecord`, `SourceRef`, and `StorageLocator` concepts for future library/indexing work.
 
 Not implemented yet:
 
-- A document library, indexing, collections, search, or metadata database.
-- PDF or EPUB reading and rendering.
+- A document library, indexing, collections, search across the filesystem, or metadata database.
+- SQLite or persistent catalog storage.
 - Page-level PDF manipulation.
-- Reading progress, bookmarks, thumbnails, or keyboard navigation.
-- DOCX, PPTX, XLSX, image, or spreadsheet-specific workflows.
+- Reading progress persistence, bookmarks, annotations, thumbnails, or durable locators.
+- DOCX, PPTX, XLSX, image, or spreadsheet-specific reader workflows.
 - Bundled conversion engines; Pandoc and Poppler are external system dependencies.
 
 This is a prototype baseline, not a feature-complete release.
@@ -42,36 +45,32 @@ Support is currently based on the filename extension, not deep format validation
 - Pandoc for non-PDF inputs.
 
 Pandoc's installed version and the source/target combination determine whether a particular conversion succeeds. The current UI does not expose a per-format capability matrix.
-
 ## Architecture
 
 ```text
-React + TypeScript (src/)
-        │ Tauri invoke()
+Clio shell (src/App.tsx)
+├── Library placeholder
+├── Reader shell (src/reader/ReaderShell.tsx)
+│   ├── PDF engine adapter (PDF.js)
+│   └── EPUB engine adapter (foliate-js)
+├── Tools / conversion workspace
+└── Settings placeholder
+        │
+        ├── Tauri invoke() → native dialogs and file-byte access
         ▼
 Rust commands (src-tauri/src/lib.rs)
-        │
-        ├── native file dialogs through Tauri plugins
         └── local pdftotext / pandoc processes
 ```
 
-- `src/App.tsx` contains the current screen and user flow.
-- `src/App.css` contains the current visual design and responsive layout.
-- `src-tauri/src/lib.rs` exposes `inspect_document` and `convert_document`.
-- `src-tauri/tauri.conf.json` configures the desktop window and packaging.
-- `src-tauri/capabilities/default.json` grants the current window's Tauri permissions.
+- `src/App.tsx` owns minimal application navigation and opens reader documents.
+- `src/reader/ReaderShell.tsx` owns reader controls, status, search, contents, themes, and responsive layout.
+- `src/reader/PdfEngine.tsx` owns PDF.js loading, canvas rendering, page navigation, zoom, and text extraction.
+- `src/reader/EpubEngine.tsx` owns foliate-js loading, ZIP resource access, EPUB navigation, TOC, search, and content security policy handling.
+- `src/storage/documentStorage.ts` owns the current Tauri path-to-bytes adapter behind `StorageLocator`.
+- `src/tools/ConversionWorkspace.tsx` preserves the existing conversion flow.
+- `src-tauri/src/lib.rs` exposes `inspect_document`, `read_document_bytes`, and `convert_document`.
 
 ## Development setup
-
-### Prerequisites
-
-- [Bun](https://bun.sh/)
-- Rust and Cargo
-- Tauri's platform prerequisites for your operating system
-- [Pandoc](https://pandoc.org/)
-- Poppler's `pdftotext` command
-
-Pandoc and Poppler are only used locally. They are not JavaScript or Rust package dependencies and are not bundled by this repository.
 
 ### Install and run
 

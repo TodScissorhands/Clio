@@ -1,0 +1,311 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { ReaderDocument, ReaderDocumentRecord } from "../reader/types";
+import {
+  isReaderFormat,
+  normalizeFormat,
+  validateAnnotationLocator,
+  type Annotation,
+  type AnnotationKind,
+  type AnnotationLocator,
+  type Bookmark,
+  type DocumentId,
+  type DocumentRecord,
+  type LibraryRoot,
+  type ReadingPosition,
+  type ReadingState,
+  type SourceRef,
+  type StorageLocator,
+  type StoredDocument,
+} from "./domain";
+
+export type LibraryScanResult = {
+  rootId: string;
+  scanned: number;
+  inserted: number;
+  added: number;
+  updated: number;
+  missing: number;
+  errors: string[];
+};
+
+type NativeScanError = {
+  path?: string;
+  message?: string;
+};
+
+type NativeScanResult = {
+  rootId?: string;
+  scanned?: number;
+  inserted?: number;
+  added?: number;
+  updated?: number;
+  missing?: number;
+  errors?: Array<NativeScanError | string>;
+};
+type NativeRoot = {
+  id: string;
+  label: string;
+  kind: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type NativeDocument = {
+  id?: string;
+  name?: string;
+  format?: string;
+  extension?: string;
+  sizeBytes?: number;
+  size?: number;
+  firstSeenAt?: string;
+  updatedAt?: string;
+  source?: SourceRef;
+  rootId?: string;
+  relativePath?: string;
+  availability?: string;
+  record?: NativeDocument;
+};
+type NativeReaderOpen = {
+  record: NativeDocument;
+  source?: SourceRef;
+  locator?: StorageLocator;
+  token?: string;
+  document?: NativeDocument;
+};
+
+export interface DocumentStorage {
+  open(locator: StorageLocator): Promise<Blob>;
+}
+
+export class TauriDocumentStorage implements DocumentStorage {
+  async open(locator: StorageLocator): Promise<Blob> {
+    if (locator.kind !== "desktop-token") {
+      throw new Error(`Storage source ${locator.kind} is not available on this platform yet.`);
+    }
+
+    const bytes = await invoke<number[]>("read_document_bytes", { token: locator.value });
+    return new Blob([Uint8Array.from(bytes)]);
+  }
+}
+
+
+function nativeRecord(native: NativeDocument, fallback?: NativeDocument): DocumentRecord {
+  const value = native.record ?? native;
+  const source = fallback ?? native;
+  const timestamp = new Date().toISOString();
+  return {
+    id: value.id ?? source.id ?? crypto.randomUUID(),
+    name: value.name ?? source.name ?? "Untitled document",
+    format: normalizeFormat(value.format ?? value.extension ?? source.format ?? source.extension),
+    sizeBytes: Number(value.sizeBytes ?? value.size ?? source.sizeBytes ?? source.size ?? 0),
+    firstSeenAt: value.firstSeenAt ?? timestamp,
+    updatedAt: value.updatedAt ?? timestamp,
+  };
+}
+
+function nativeSource(native: NativeDocument, fallbackRootId?: string): SourceRef {
+  const source = native.source ?? native.record?.source;
+  if (source?.kind === "library") return source;
+  const rootId = native.rootId ?? native.record?.rootId ?? fallbackRootId;
+  const relativePath = native.relativePath ?? native.record?.relativePath;
+  if (!rootId || !relativePath) {
+    throw new Error("Library document response did not include a safe library source.");
+  }
+  return { kind: "library", rootId, relativePath };
+}
+function normalizeRoot(native: NativeRoot): LibraryRoot {
+  return {
+    id: native.id,
+    label: native.label,
+    kind: "filesystem-directory",
+    status: native.status === "missing" || native.status === "disabled" ? native.status : "active",
+    createdAt: native.createdAt,
+    updatedAt: native.updatedAt,
+  };
+}
+
+function normalizeStoredDocument(native: NativeDocument, rootId?: string): StoredDocument {
+  return {
+    record: nativeRecord(native),
+    source: nativeSource(native, rootId),
+    availability: native.availability === "missing" ? "missing" : "present",
+  };
+}
+
+function normalizeScanResult(value: NativeScanResult | null | undefined): LibraryScanResult {
+  return {
+    rootId: value?.rootId ?? "",
+    scanned: Number(value?.scanned ?? 0),
+    inserted: Number(value?.inserted ?? value?.added ?? 0),
+    added: Number(value?.added ?? value?.inserted ?? 0),
+    updated: Number(value?.updated ?? 0),
+    missing: Number(value?.missing ?? 0),
+    errors: Array.isArray(value?.errors)
+      ? value.errors.map((error) =>
+          typeof error === "string"
+            ? error
+            : error && typeof error === "object" && typeof error.message === "string"
+              ? error.message
+              : "A document could not be indexed."
+        )
+      : [],
+  };
+}
+
+function readerLocator(opened: NativeReaderOpen): StorageLocator {
+  if (opened.locator) return opened.locator;
+  if (opened.token) return { kind: "desktop-token", value: opened.token, access: "session" };
+  throw new Error("Reader response did not include an authorized storage locator.");
+}
+
+function readerDocument(record: DocumentRecord, locator: StorageLocator, storage: DocumentStorage): Promise<ReaderDocument> {
+  const format = isReaderFormat(record.format) ? record.format : null;
+  if (!format) {
+    throw new Error(`Clio Reader cannot open .${record.format || "unknown"} files. PDF and EPUB are supported.`);
+  }
+  const readerRecord: ReaderDocumentRecord = {
+    id: record.id,
+    name: record.name,
+    format,
+    size: record.sizeBytes,
+  };
+  return storage.open(locator).then((bytes) => ({ record: readerRecord, bytes }));
+}
+
+export async function listLibraryRoots(): Promise<LibraryRoot[]> {
+  const roots = await invoke<NativeRoot[]>("library_root_list");
+  return roots.map(normalizeRoot);
+}
+
+export async function addLibraryRoot(path: string, label?: string): Promise<LibraryRoot> {
+  const root = await invoke<NativeRoot>("library_root_add", { path, label: label ?? null });
+  return normalizeRoot(root);
+}
+
+export async function removeLibraryRoot(rootId: string): Promise<void> {
+  await invoke("library_root_remove", { rootId });
+}
+
+export async function scanLibraryRoot(rootId: string): Promise<LibraryScanResult> {
+  const result = await invoke<NativeScanResult>("library_root_scan", { rootId });
+  return normalizeScanResult(result);
+}
+
+export async function listLibraryDocuments(rootId?: string, includeMissing = true): Promise<StoredDocument[]> {
+  const documents = await invoke<NativeDocument[]>("library_document_list", {
+    rootId: rootId ?? null,
+    includeMissing,
+  });
+  return documents.map((document) => normalizeStoredDocument(document, rootId));
+}
+
+export async function openLibraryReaderDocument(documentId: DocumentId, storage: DocumentStorage): Promise<ReaderDocument> {
+  const authorization = await invoke<NativeReaderOpen>("library_document_open", { documentId });
+  return readerDocument(nativeRecord(authorization.record), readerLocator(authorization), storage);
+}
+
+export async function openSelectedReaderDocument(path: string, storage: DocumentStorage): Promise<ReaderDocument> {
+  const authorization = await invoke<NativeReaderOpen>("reader_open_selected", { path });
+  return readerDocument(nativeRecord(authorization.record), readerLocator(authorization), storage);
+}
+
+
+export async function getReadingState(documentId: DocumentId): Promise<ReadingState | null> {
+  return invoke<ReadingState | null>("reading_state_get", { documentId });
+}
+
+export async function setReadingState(state: ReadingState): Promise<void> {
+  await invoke("reading_state_set", { state });
+}
+
+export async function createBookmark(
+  documentId: DocumentId,
+  position: ReadingPosition,
+  title?: string
+): Promise<Bookmark> {
+  return invoke<Bookmark>("bookmark_create", {
+    documentId,
+    position,
+    title: title ?? null,
+  });
+}
+
+export async function listBookmarks(documentId: DocumentId): Promise<Bookmark[]> {
+  return invoke<Bookmark[]>("bookmark_list", { documentId });
+}
+
+export async function deleteBookmark(bookmarkId: string): Promise<void> {
+  await invoke("bookmark_delete", { bookmarkId });
+}
+
+type NativeAnnotationDto = {
+  id: string;
+  documentId: string;
+  kind: string;
+  position: ReadingPosition;
+  selectedText?: string | null;
+  note?: string | null;
+  locator?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function deserializeAnnotation(native: NativeAnnotationDto): Annotation {
+  let locator: AnnotationLocator | undefined;
+  if (native.locator) {
+    try {
+      const parsed: unknown = JSON.parse(native.locator);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        validateAnnotationLocator(parsed as AnnotationLocator) === null
+      ) {
+        locator = parsed as AnnotationLocator;
+      }
+    } catch {
+      // Malformed persisted locator data must not silently become a valid locator
+      locator = undefined;
+    }
+  }
+
+  return {
+    id: native.id,
+    documentId: native.documentId,
+    kind: native.kind as AnnotationKind,
+    position: native.position,
+    selectedText: native.selectedText ?? undefined,
+    note: native.note ?? undefined,
+    locator,
+    createdAt: native.createdAt,
+    updatedAt: native.updatedAt,
+  };
+}
+
+export async function createAnnotation(
+  documentId: DocumentId,
+  kind: AnnotationKind,
+  position: ReadingPosition,
+  selectedText?: string,
+  note?: string,
+  locator?: AnnotationLocator
+): Promise<Annotation> {
+  const locatorJson = locator ? JSON.stringify(locator) : null;
+  const native = await invoke<NativeAnnotationDto>("annotation_create", {
+    documentId,
+    kind,
+    position,
+    selectedText: selectedText ?? null,
+    note: note ?? null,
+    locator: locatorJson,
+  });
+  return deserializeAnnotation(native);
+}
+
+export async function listAnnotations(documentId: DocumentId): Promise<Annotation[]> {
+  const list = await invoke<NativeAnnotationDto[]>("annotation_list", { documentId });
+  return list.map(deserializeAnnotation);
+}
+export async function deleteAnnotation(annotationId: string): Promise<void> {
+  await invoke("annotation_delete", { annotationId });
+}
