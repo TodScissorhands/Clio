@@ -67,6 +67,7 @@ export type StoredDocument = {
   record: DocumentRecord;
   source: SourceRef;
   availability: "present" | "missing";
+  readingState?: ReadingState | null;
 };
 
 export type LibraryRoot = {

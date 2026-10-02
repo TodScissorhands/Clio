@@ -69,6 +69,8 @@ type NativeDocument = {
   record?: NativeDocument;
   metadata?: DocumentMetadata | null;
   collections?: string[];
+  readingState?: ReadingState | null;
+  reading_state?: ReadingState | null;
 };
 type NativeReaderOpen = {
   record: NativeDocument;
@@ -141,10 +143,12 @@ function normalizeRoot(native: NativeRoot): LibraryRoot {
 }
 
 function normalizeStoredDocument(native: NativeDocument, rootId?: string): StoredDocument {
+  const readingState = (native.readingState ?? native.reading_state ?? null) as ReadingState | null;
   return {
     record: nativeRecord(native),
     source: nativeSource(native, rootId),
     availability: native.availability === "missing" ? "missing" : "present",
+    readingState,
   };
 }
 
@@ -215,6 +219,14 @@ export async function listLibraryDocuments(rootId?: string, includeMissing = tru
   return documents.map((document) => normalizeStoredDocument(document, rootId));
 }
 
+export async function removeLibraryDocument(documentId: DocumentId): Promise<void> {
+  await invoke("library_document_remove", { documentId });
+}
+
+export async function getLibraryDocumentPath(documentId: DocumentId): Promise<string> {
+  return invoke<string>("library_document_path", { documentId });
+}
+
 export async function openLibraryReaderDocument(documentId: DocumentId, storage: DocumentStorage): Promise<ReaderDocument> {
   const authorization = await invoke<NativeReaderOpen>("library_document_open", { documentId });
   return readerDocument(nativeRecord(authorization.record), readerLocator(authorization), storage);
@@ -232,6 +244,10 @@ export async function getReadingState(documentId: DocumentId): Promise<ReadingSt
 
 export async function setReadingState(state: ReadingState): Promise<void> {
   await invoke("reading_state_set", { state });
+}
+
+export async function listReadingStates(): Promise<ReadingState[]> {
+  return invoke<ReadingState[]>("reading_state_list");
 }
 
 export async function createBookmark(

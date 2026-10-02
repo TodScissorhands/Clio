@@ -1,4 +1,5 @@
 import { getDocumentDisplayTitle, type FormatId, type ReadingState, type StoredDocument } from "../storage/domain";
+import type { LibraryScope } from "../navigation/navigation";
 export type FormatFilterOption = "all" | "pdf" | "epub" | "other";
 
 export type SortOption =
@@ -72,6 +73,83 @@ export function filterDocuments(
   });
 }
 
+export function isDescendantPath(filePath: string, folderPath: string): boolean {
+  const normFile = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const normFolder = folderPath.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!normFolder) return true;
+  return normFile === normFolder || normFile.startsWith(normFolder + "/");
+}
+
+export function filterDocumentsByScope(
+  documents: StoredDocument[],
+  scope: LibraryScope,
+  searchQuery = ""
+): StoredDocument[] {
+  return documents.filter((doc) => {
+    switch (scope.kind) {
+      case "all":
+        break;
+      case "root":
+        if (doc.source.kind !== "library" || doc.source.rootId !== scope.rootId) {
+          return false;
+        }
+        break;
+      case "folder":
+        if (
+          doc.source.kind !== "library" ||
+          doc.source.rootId !== scope.rootId ||
+          !isDescendantPath(doc.source.relativePath, scope.relativePath)
+        ) {
+          return false;
+        }
+        break;
+      case "collection":
+        if (!doc.record.collections || !doc.record.collections.includes(scope.collectionId)) {
+          return false;
+        }
+        break;
+      case "search":
+        if (!matchesSearch(doc, scope.query)) {
+          return false;
+        }
+        break;
+    }
+
+    if (searchQuery.trim().length > 0 && !matchesSearch(doc, searchQuery)) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+export function deriveContinueDocuments(
+  documents: StoredDocument[],
+  maxCount = 6
+): StoredDocument[] {
+  const started = documents.filter((d) => {
+    if (d.availability === "missing") return false;
+    const state = d.readingState;
+    if (!state || !state.lastOpenedAt) return false;
+    switch (state.position.kind) {
+      case "pdf-page":
+        return state.position.page >= 1;
+      case "epub-cfi":
+        return Boolean(state.position.cfi || (state.position.progression && state.position.progression > 0));
+      case "text-scroll":
+        return state.position.progression > 0;
+    }
+  });
+
+  started.sort((a, b) => {
+    const timeA = a.readingState?.lastOpenedAt ?? "";
+    const timeB = b.readingState?.lastOpenedAt ?? "";
+    return timeB.localeCompare(timeA);
+  });
+
+  return started.slice(0, maxCount);
+}
+
 export function sortDocuments(
   documents: StoredDocument[],
   sort: SortOption,
@@ -95,8 +173,8 @@ export function sortDocuments(
         return cmp !== 0 ? cmp : titleA.localeCompare(titleB);
       }
       case "recent": {
-        const timeA = readingStates?.[a.record.id]?.lastOpenedAt ?? a.record.updatedAt;
-        const timeB = readingStates?.[b.record.id]?.lastOpenedAt ?? b.record.updatedAt;
+        const timeA = readingStates?.[a.record.id]?.lastOpenedAt ?? a.readingState?.lastOpenedAt ?? a.record.updatedAt;
+        const timeB = readingStates?.[b.record.id]?.lastOpenedAt ?? b.readingState?.lastOpenedAt ?? b.record.updatedAt;
         const cmp = timeB.localeCompare(timeA);
         return cmp !== 0 ? cmp : titleA.localeCompare(titleB);
       }

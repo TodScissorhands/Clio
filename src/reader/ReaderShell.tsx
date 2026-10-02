@@ -30,10 +30,11 @@ import type {
 } from "./types";
 import "./ReaderShell.css";
 
-type ReaderShellProps = {
+export type ReaderShellProps = {
   document: ReaderDocument | null;
-  onOpen(): void;
+  onOpen?: () => void;
   openDisabled?: boolean;
+  onBack?: () => void;
 };
 
 function formatBytes(bytes: number) {
@@ -55,7 +56,7 @@ function TocList({ items, onSelect }: { items: ReaderTocItem[]; onSelect(item: R
   );
 }
 
-export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderShellProps) {
+export function ReaderShell({ document, onOpen, openDisabled = false, onBack }: ReaderShellProps) {
   const engineRef = useRef<ReaderEngineHandle | null>(null);
   const [theme, setTheme] = useState<ReaderTheme>("light");
   const [progress, setProgress] = useState<ReaderProgress>({ current: 1 });
@@ -397,10 +398,13 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
           clearSearch();
           return;
         }
+        if (onBack) {
+          onBack();
+          return;
+        }
         setControlsVisible((visible) => !visible);
         return;
       }
-
       if (isInput) return;
 
       if (event.key === "ArrowLeft") void engineRef.current?.previous();
@@ -427,7 +431,7 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [annotationsOpen, bookmarksOpen, clearSearch, document, editingAnnotationId, pendingTextSelection, query, searchResult, tocOpen, toggleBookmark]);
+  }, [annotationsOpen, bookmarksOpen, clearSearch, document, editingAnnotationId, onBack, pendingTextSelection, query, searchResult, tocOpen, toggleBookmark]);
 
   const Engine: ReaderEngineComponent | null =
     document?.record.format === "pdf"
@@ -448,8 +452,29 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
           {document && <span>{document.record.format.toUpperCase()} · {formatBytes(document.record.size)}</span>}
         </div>
         <div className="reader-header-actions">
-          <button className="reader-secondary-button" onClick={onOpen} disabled={openDisabled}>Open document</button>
-          <button className="reader-secondary-button reader-mobile-toggle" onClick={() => setControlsVisible((visible) => !visible)}>{controlsVisible ? "Hide controls" : "Show controls"}</button>
+          {onBack && (
+            <button
+              type="button"
+              className="reader-secondary-button reader-back-button"
+              onClick={onBack}
+              title="Back to Library (Esc)"
+              aria-label="Back to Library"
+            >
+              ← Library
+            </button>
+          )}
+          {onOpen && (
+            <button className="reader-secondary-button" onClick={onOpen} disabled={openDisabled}>
+              Open document
+            </button>
+          )}
+          <button
+            type="button"
+            className="reader-secondary-button reader-mobile-toggle"
+            onClick={() => setControlsVisible((visible) => !visible)}
+          >
+            {controlsVisible ? "Hide controls" : "Show controls"}
+          </button>
         </div>
       </header>
 

@@ -620,6 +620,19 @@ impl LibraryDb {
             doc_collections.entry(doc_id).or_default().push(col_id);
         }
 
+        let mut rs_stmt = connection
+            .prepare("SELECT document_id, position_kind, page, cfi, progression, last_opened_at, updated_at FROM reading_state")
+            .map_err(db_error)?;
+        let mut doc_reading_states: std::collections::HashMap<String, ReadingState> =
+            std::collections::HashMap::new();
+        let rs_rows = rs_stmt
+            .query_map([], reading_state_from_row)
+            .map_err(db_error)?;
+        for r in rs_rows {
+            let state = r.map_err(db_error)?;
+            doc_reading_states.insert(state.document_id.clone(), state);
+        }
+
         let mut statement = connection
             .prepare(
                 "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
@@ -638,9 +651,30 @@ impl LibraryDb {
         rows.map(|row| {
             let doc = row.map_err(db_error)?;
             let collections = doc_collections.get(&doc.id).cloned().unwrap_or_default();
-            Ok(doc.into_dto(collections))
+            let reading_state = doc_reading_states.remove(&doc.id);
+            Ok(doc.into_dto(collections, reading_state))
         })
         .collect()
+    }
+
+    pub fn remove_document(&self, document_id: &str) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        transaction
+            .execute("DELETE FROM documents WHERE id = ?1", [document_id])
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)
+    }
+
+    pub fn list_reading_states(&self) -> Result<Vec<ReadingState>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT document_id, position_kind, page, cfi, progression, last_opened_at, updated_at FROM reading_state")
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], reading_state_from_row)
+            .map_err(db_error)?;
+        rows.map(|r| r.map_err(db_error)).collect()
     }
 
     pub fn open_library_document<F>(
@@ -1178,10 +1212,24 @@ impl LibraryDb {
         let rows = statement
             .query_map([collection_id], document_from_row)
             .map_err(db_error)?;
+        let mut rs_stmt = connection
+            .prepare("SELECT document_id, position_kind, page, cfi, progression, last_opened_at, updated_at FROM reading_state")
+            .map_err(db_error)?;
+        let mut doc_reading_states: std::collections::HashMap<String, ReadingState> =
+            std::collections::HashMap::new();
+        let rs_rows = rs_stmt
+            .query_map([], reading_state_from_row)
+            .map_err(db_error)?;
+        for r in rs_rows {
+            let state = r.map_err(db_error)?;
+            doc_reading_states.insert(state.document_id.clone(), state);
+        }
+
         rows.map(|row| {
             let doc = row.map_err(db_error)?;
             let collections = doc_collections.get(&doc.id).cloned().unwrap_or_default();
-            Ok(doc.into_dto(collections))
+            let reading_state = doc_reading_states.remove(&doc.id);
+            Ok(doc.into_dto(collections, reading_state))
         })
         .collect()
     }
@@ -1364,6 +1412,7 @@ pub struct DocumentDto {
     pub availability: String,
     pub metadata: Option<DocumentMetadata>,
     pub collections: Vec<String>,
+    pub reading_state: Option<ReadingState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1743,6 +1792,13 @@ pub fn library_document_path(
 ) -> Result<String, String> {
     db.document_path(&document_id)
 }
+#[tauri::command]
+pub fn library_document_remove(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+) -> Result<(), String> {
+    db.remove_document(&document_id)
+}
 
 #[tauri::command]
 pub fn reading_state_get(
@@ -1750,6 +1806,10 @@ pub fn reading_state_get(
     document_id: String,
 ) -> Result<Option<ReadingState>, String> {
     db.get_reading_state(&document_id)
+}
+#[tauri::command]
+pub fn reading_state_list(db: State<'_, LibraryDb>) -> Result<Vec<ReadingState>, String> {
+    db.list_reading_states()
 }
 
 #[tauri::command]
@@ -2154,7 +2214,11 @@ struct DocumentRow {
 }
 
 impl DocumentRow {
-    fn into_dto(self, collections: Vec<String>) -> DocumentDto {
+    fn into_dto(
+        self,
+        collections: Vec<String>,
+        reading_state: Option<ReadingState>,
+    ) -> DocumentDto {
         DocumentDto {
             id: self.id,
             name: self.name,
@@ -2171,6 +2235,7 @@ impl DocumentRow {
             availability: self.availability,
             metadata: self.metadata,
             collections,
+            reading_state,
         }
     }
 }
@@ -3734,6 +3799,64 @@ mod tests {
         }
 
         // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_document_remove_catalog_only_and_batched_reading_states() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("clio-doc-remove-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        let file_path = temp_dir.join("book.pdf");
+        fs::write(&file_path, b"%PDF sample file bytes").expect("write file");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan");
+
+        let docs = db.list_documents(Some(&root.id), false).expect("list");
+        assert_eq!(docs.len(), 1);
+        let doc_id = &docs[0].id;
+
+        // Set reading state
+        db.set_reading_state(ReadingState {
+            document_id: doc_id.clone(),
+            position: ReadingPosition::PdfPage { page: 5 },
+            last_opened_at: "2026-10-03T10:00:00Z".to_string(),
+            updated_at: "2026-10-03T10:00:00Z".to_string(),
+        })
+        .expect("set state");
+
+        // Verify batched reading_state query
+        let all_states = db.list_reading_states().expect("list reading states");
+        assert_eq!(all_states.len(), 1);
+        assert_eq!(all_states[0].document_id, *doc_id);
+
+        // Verify list_documents returns reading_state attached directly (no N+1)
+        let docs_with_state = db.list_documents(Some(&root.id), false).expect("list");
+        assert!(docs_with_state[0].reading_state.is_some());
+        match docs_with_state[0].reading_state.as_ref().unwrap().position {
+            ReadingPosition::PdfPage { page } => assert_eq!(page, 5),
+            _ => panic!("Expected PdfPage"),
+        }
+
+        // Remove document from catalog
+        db.remove_document(doc_id).expect("remove doc from library");
+
+        // Catalog now has 0 documents
+        let docs_after = db.list_documents(Some(&root.id), false).expect("list");
+        assert_eq!(docs_after.len(), 0);
+
+        // Reading state was cascaded
+        let states_after = db.list_reading_states().expect("list states");
+        assert_eq!(states_after.len(), 0);
+
+        // CRUCIAL: Underlying filesystem file MUST still exist!
+        assert!(file_path.exists());
+        assert_eq!(fs::read(&file_path).unwrap(), b"%PDF sample file bytes");
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

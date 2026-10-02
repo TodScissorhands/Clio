@@ -1,99 +1,56 @@
 # Project Map
 
-This is a source-oriented guide to the current prototype. The project is a Tauri 2 desktop application with a React/TypeScript frontend and a Rust backend.
+This is a source-oriented guide to Clio's application architecture. The project is a Tauri 2 desktop application with a React 19/TypeScript frontend and a Rust native backend backed by SQLite.
 
-## What the project currently does
+## Core Interaction Flow
 
-The implemented application has four shell areas:
-
-1. **Library placeholder** — explains the future local library direction.
-2. **Reader** — opens local PDF and EPUB files through the native picker and reads them without uploading or copying them to a cloud service.
-3. **Tools** — preserves the original conversion flow.
-4. **Settings placeholder** — reserves space for local preferences and permissions.
-
-The reader flow is:
-
-1. The user chooses a PDF or EPUB through the native file picker.
-2. React invokes Rust's `inspect_document` command.
-3. React invokes Rust's `read_document_bytes` command through `StorageLocator`.
-4. `ReaderShell` selects the PDF.js or foliate-js engine by format.
-5. The engine renders locally and reports progress, search, contents, and loading/error state.
-
-The tools flow remains:
-
-1. The user chooses a local document.
-2. React invokes Rust's `inspect_document` command.
-3. The UI displays filename, extension, size, and extension-based support status.
-4. The user chooses an output format and destination.
-5. React invokes Rust's `convert_document` command.
-6. Rust runs local `pdftotext` and/or `pandoc`, then returns the saved output path and engine name.
-
-## How to run it
-
-From the repository root:
-
-```bash
-bun install
-bun tauri dev
+```text
+Library → Document → Reading / Contextual Actions
 ```
 
-The conversion path requires `pandoc` and `pdftotext` to be installed on the host. See [`COMMANDS.md`](./COMMANDS.md) for checks and build commands.
+1. **Library Home**: The default landing surface. Contains:
+   - Single contextual toolbar (`src/library/LibraryToolbar.tsx`): handles sidebar toggle, scope title/breadcrumb, catalog search, presentation toggle (Grid/List), and switches to the Selection Action Bar when documents are selected.
+   - Collapsible sidebar (`src/library/LibrarySidebar.tsx`): manages flat Collections and hierarchical Folders derived from library roots.
+   - Continue section (`src/library/ContinueSection.tsx`): displays the top ~6 started reading items with reading progress bars.
+   - Full catalog presentation (`src/library/DocumentGrid.tsx` and `DocumentList.tsx`): handles distinct selection and activation models.
+2. **Document Reading**:
+   - Clicking a document navigates to the document reading route (`src/reader/ReaderShell.tsx`).
+   - The reading surface fills the viewport, restoring the exact last-read position (PDF page, EPUB CFI, TextScroll progression).
+   - Back button returns to the previous Library state, restoring scope, scroll position, search query, and selection.
+3. **Contextual Document Actions**:
+   - Ellipsis and context menus (`src/library/DocumentContextMenu.tsx` and `src/commands/documentCommands.ts`) provide contextual actions: Open, Add to collection, Convert…, Extract pages…, Reveal in file manager, Properties, and Remove from library.
 
-## Frontend
+## Frontend Subsystems (`src/`)
 
-The visible shell is in [`src/App.tsx`](./src/App.tsx). It provides:
+- `src/App.tsx`: Top-level application shell, routing state (`AppRoute`), restoration stack, and native window bridge.
+- `src/navigation/navigation.ts`: Route definitions (`AppRoute`, `LibraryScope`, `LibraryRestorationState`, `DEFAULT_LIBRARY_SCOPE`).
+- `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars.
+- `src/library/`: Library components, filtering (`libraryFilter.ts`), thumbnail generation, properties modal, and collection modals.
+- `src/reader/`:
+  - `ReaderShell.tsx`: Unified reader chrome, toolbar, zoom, search, TOC, bookmarks, and annotations.
+  - `PdfEngine.tsx`: PDF.js-backed rendering and navigation.
+  - `EpubEngine.tsx`: foliate-js-backed pagination, themes, and highlight overlays.
+  - `TextEngine.tsx`: Plain text and Markdown reader with heading TOC extraction and TextScroll progression.
+  - `readingState.ts`: Debounced reading state coordinator.
+- `src/tools/`:
+  - `ConversionWorkspace.tsx`: Local conversion, PDF merge, and PDF page extraction tool workspace.
+- `src/storage/`:
+  - `domain.ts`: Core data types (`DocumentRecord`, `SourceRef`, `StorageLocator`, `ReadingPosition`, `Bookmark`, `Annotation`, `Collection`).
+  - `documentStorage.ts`: Tauri IPC client adapter for SQLite catalog operations.
 
-- navigation for Library, Reader, Tools, and Settings;
-- a reader surface in [`src/reader/ReaderShell.tsx`](./src/reader/ReaderShell.tsx);
-- the existing conversion workspace in [`src/tools/ConversionWorkspace.tsx`](./src/tools/ConversionWorkspace.tsx);
-- placeholders for the future library and settings surfaces.
+## Backend Subsystems (`src-tauri/`)
 
-The reader subsystem contains:
+- `src-tauri/src/main.rs`: Native desktop launcher.
+- `src-tauri/src/lib.rs`: Tauri command registration, plugin initialization, and native IPC boundary.
+- `src-tauri/src/storage.rs`: SQLite database (`LibraryDb`), migrations, scanning, reading-state persistence, collections, bookmarks, annotations, thumbnails, and canonical path resolution.
+- `src-tauri/src/conversion.rs`: Capability registry, Pandoc and Poppler tool execution, overwrite policies, and PDF manipulation (merge & extraction).
 
-- `ReaderShell.tsx` for common chrome, progress, search, contents, themes, keyboard behavior, and responsive layout;
-- `PdfEngine.tsx` for PDF.js loading, canvas rendering, page navigation, zoom, text extraction, and search;
-- `EpubEngine.tsx` for foliate-js loading, ZIP resource access, pagination, navigation, TOC, search, themes, and restrictive resource handling;
-- `types.ts` for `ReaderEngineHandle`, `DocumentRecord`, `SourceRef`, and `StorageLocator`.
+## Key Commands
 
-The frontend uses:
-
-- `@tauri-apps/api/core` for `invoke`;
-- `@tauri-apps/plugin-dialog` for native open/save dialogs;
-- React state for shell, reader, and conversion UI state;
-- `StorageLocator` through `TauriDocumentStorage` rather than direct filesystem access in reader components.
-
-## Backend
-
-[`src-tauri/src/main.rs`](./src-tauri/src/main.rs) is the native launcher. [`src-tauri/src/lib.rs`](./src-tauri/src/lib.rs) contains:
-
-- extension-based document inspection;
-- `read_document_bytes` for the current desktop reader storage adapter;
-- `convert_document`;
-- process execution for `pdftotext` and `pandoc`;
-- Tauri plugin initialization and command registration.
-
-The backend does not parse document formats itself. It delegates conversion to locally installed tools. The current PDF conversion path extracts text first, so it does not preserve a PDF's full layout, images, or page structure.
-
-## Configuration
-
-| File | Purpose |
-| --- | --- |
-| [`package.json`](./package.json) | Bun scripts and frontend dependencies |
-| [`bun.lock`](./bun.lock) | Locked JavaScript dependency graph |
-| [`vite.config.ts`](./vite.config.ts) | Vite and Tauri development-server settings |
-| [`tsconfig.json`](./tsconfig.json) | TypeScript compiler settings for `src/` |
-| [`src-tauri/Cargo.toml`](./src-tauri/Cargo.toml) | Rust package and Tauri dependencies |
-| [`src-tauri/Cargo.lock`](./src-tauri/Cargo.lock) | Locked Rust dependency graph |
-| [`src-tauri/tauri.conf.json`](./src-tauri/tauri.conf.json) | Window, build, and bundle configuration |
-| [`src-tauri/capabilities/default.json`](./src-tauri/capabilities/default.json) | Permissions for the main window |
-| [`src-tauri/icons/`](./src-tauri/icons/) | Desktop and platform bundle icons |
-
-## Current format boundary
-
-The reader currently opens `pdf` and `epub`. PDF uses PDF.js; EPUB uses foliate-js with `@zip.js/zip.js`.
-
-The conversion backend recognizes `pdf`, `epub`, `docx`, `odt`, `rtf`, `html`, `htm`, `md`, and `txt` input extensions. The UI offers `pdf`, `epub`, `docx`, `odt`, `html`, `md`, and `txt` outputs. This is a conversion prototype, not a capability guarantee for every source/target pair.
-
-## What is intentionally not here yet
-
-The product direction includes reading, indexing, collections, search, progress, bookmarks, thumbnails, PDF operations, and additional office/image workflows. The reader foundation is now present, but library indexing, persistence, durable reading state, annotations, and page-level manipulation remain planned. Add them through explicit format-specific and storage-aware capabilities rather than assuming they follow from the current reader or generic conversion command.
+```bash
+bun test                                     # Run frontend test suite
+bun run build                                # TypeScript typecheck and Vite build
+cargo test --manifest-path src-tauri/Cargo.toml   # Run native backend tests
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+```

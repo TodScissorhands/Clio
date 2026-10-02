@@ -42,10 +42,18 @@ type PendingOverwrite = { job: ConversionJob; label: string };
 
 export interface ConversionWorkspaceProps {
   initialDocument?: StoredDocument | null;
+  initialMode?: "convert" | "merge" | "extract";
+  initialMergeDocuments?: StoredDocument[];
+  onClose?: () => void;
 }
 
-export function ConversionWorkspace({ initialDocument }: ConversionWorkspaceProps = {}) {
-  const [mode, setMode] = useState<"convert" | "merge" | "extract">("convert");
+export function ConversionWorkspace({
+  initialDocument,
+  initialMode,
+  initialMergeDocuments,
+  onClose,
+}: ConversionWorkspaceProps = {}) {
+  const [mode, setMode] = useState<"convert" | "merge" | "extract">(initialMode ?? "convert");
   const [document, setDocument] = useState<DocumentInfo | null>(null);
   const [capabilities, setCapabilities] = useState<ConversionCapability[]>([]);
   const [target, setTarget] = useState("epub");
@@ -85,6 +93,36 @@ export function ConversionWorkspace({ initialDocument }: ConversionWorkspaceProp
       cancelled = true;
     };
   }, [initialDocument]);
+  useEffect(() => {
+    if (!initialMergeDocuments || initialMergeDocuments.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const infos: DocumentInfo[] = [];
+      for (const doc of initialMergeDocuments) {
+        try {
+          const path = await invoke<string>("library_document_path", {
+            documentId: doc.record.id,
+          });
+          const info = await invoke<DocumentInfo>("inspect_document", { path });
+          if (info.extension.toLowerCase() === "pdf") {
+            infos.push(info);
+          }
+        } catch {}
+      }
+      if (!cancelled && infos.length > 0) {
+        setMergeFiles(infos);
+        setMode("merge");
+        setMessage(
+          infos.length >= 2
+            ? `Ready to merge ${infos.length} PDFs.`
+            : "Add at least 2 PDF files to merge."
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialMergeDocuments]);
 
   const suggestedName = useMemo(
     () => (document ? document.name.replace(/\.[^.]+$/, "") || document.name : "converted-document"),
@@ -345,7 +383,8 @@ export function ConversionWorkspace({ initialDocument }: ConversionWorkspaceProp
           <h1>Document Tools</h1>
           <p>Local-only format conversion, PDF merging, and page extraction.</p>
         </div>
-        <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
+        <div className="tools-header-actions-group">
+          <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
           <button
             type="button"
             className={`mode-btn ${mode === "convert" ? "selected" : ""}`}
@@ -393,6 +432,17 @@ export function ConversionWorkspace({ initialDocument }: ConversionWorkspaceProp
           >
             Extract Pages
           </button>
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              className="tools-modal-close-btn"
+              onClick={onClose}
+              aria-label="Close dialog"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
       <section className="conversion-workspace" aria-label="Document conversion workspace">
