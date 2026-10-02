@@ -873,13 +873,16 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
     }
 }
 
-fn validate_and_prepare_job(job: &ConversionJob) -> Result<(Vec<PathBuf>, PathBuf), String> {
+fn validate_and_prepare_job(job: &mut ConversionJob) -> Result<(Vec<PathBuf>, PathBuf), String> {
     // ── Step 1: Validate and re-canonicalize source paths ─────────────────
     let raw_inputs: Vec<PathBuf> = if job.source_paths.is_empty() {
         vec![PathBuf::from(&job.source_path)]
     } else {
         job.source_paths.iter().map(PathBuf::from).collect()
     };
+    if raw_inputs.is_empty() {
+        return Err("No source files specified in job.".to_string());
+    }
 
     let mut canonical_inputs: Vec<PathBuf> = Vec::with_capacity(raw_inputs.len());
     for raw in &raw_inputs {
@@ -888,79 +891,92 @@ fn validate_and_prepare_job(job: &ConversionJob) -> Result<(Vec<PathBuf>, PathBu
         canonical_inputs.push(canonical);
     }
 
-    // ── Step 2: Validate capability exists on this host ───────────────────
-    let registry = CapabilityRegistry::new();
-    let source_format = normalize_format(&job.source_format);
-    let target_format = normalize_format(&job.target_format);
+    // ── Step 2: Authoritatively derive source format from canonical source ─
+    let actual_source_format = if job.operation == OperationKind::MergePdf {
+        if canonical_inputs.len() < 2 {
+            return Err("PDF merge requires at least 2 source files.".to_string());
+        }
+        for c in &canonical_inputs {
+            let fmt = extension_from_path(c);
+            if fmt != "pdf" {
+                return Err(format!(
+                    "Source file '{}' is not a PDF (found: .{}).",
+                    c.display(),
+                    if fmt.is_empty() { "none" } else { &fmt }
+                ));
+            }
+        }
+        let claimed_source_format = normalize_format(&job.source_format);
+        if claimed_source_format != "pdf" {
+            return Err(format!(
+                "Source format mismatch: MergePdf requires 'pdf', but job claimed '.{claimed_source_format}'."
+            ));
+        }
+        "pdf".to_string()
+    } else {
+        if canonical_inputs.len() > 1 {
+            return Err(format!(
+                "Operation '{:?}' only supports a single source file.",
+                job.operation
+            ));
+        }
+        let derived_fmt = extension_from_path(&canonical_inputs[0]);
+        if derived_fmt.is_empty() {
+            return Err("Source file has no extension.".into());
+        }
+        let claimed_source_format = normalize_format(&job.source_format);
+        if claimed_source_format != derived_fmt {
+            return Err(format!(
+                "Source format mismatch: document is '.{derived_fmt}', but job claimed '.{claimed_source_format}'."
+            ));
+        }
+        if job.operation == OperationKind::ExtractPages && derived_fmt != "pdf" {
+            return Err(format!(
+                "Source file '{}' is not a PDF (found: .{}).",
+                canonical_inputs[0].display(),
+                derived_fmt
+            ));
+        }
+        derived_fmt
+    };
 
-    // Every operation except Convert requires a specific capability lookup.
-    match job.operation {
-        OperationKind::MergePdf => {
-            registry
-                .find_capability_for_operation(
-                    &source_format,
-                    &target_format,
-                    OperationKind::MergePdf,
-                )
-                .ok_or_else(|| {
-                    "PDF merge capability is not available on this system.".to_string()
-                })?;
-        }
-        OperationKind::ExtractPages => {
-            registry
-                .find_capability_for_operation(
-                    &source_format,
-                    &target_format,
-                    OperationKind::ExtractPages,
-                )
-                .ok_or_else(|| {
-                    "PDF page extraction capability is not available on this system.".to_string()
-                })?;
-        }
-        OperationKind::ExtractText | OperationKind::Convert => {
-            registry
-                .find_capability(&source_format, &target_format)
-                .ok_or_else(|| {
-                    format!(
-                        "No conversion capability available from .{source_format} to .{target_format}."
-                    )
-                })?;
-        }
-        OperationKind::RotatePages => {
-            return Err("PDF page rotation is not supported on this system. \
-                 qpdf is required but not installed."
-                .to_string());
-        }
+    // ── Step 3: Target format & exact capability and engine resolution ─────
+    let registry = CapabilityRegistry::new();
+    let target_format = normalize_format(&job.target_format);
+    if target_format.is_empty() {
+        return Err("Target format is required.".to_string());
     }
 
-    // Validate that the engine matches the operation (prevents frontend from
-    // swapping engines to reach unintended code paths).
-    let expected_engine = match job.operation {
-        OperationKind::MergePdf | OperationKind::ExtractPages | OperationKind::ExtractText => {
-            ConversionEngine::Poppler
-        }
-        OperationKind::Convert => {
-            // Accept any engine the registry assigned; the capability lookup
-            // above already confirmed a valid engine exists.
-            job.engine
-        }
-        OperationKind::RotatePages => {
-            return Err("RotatePages has no supported engine.".to_string());
-        }
-    };
-    if job.engine != expected_engine && job.operation != OperationKind::Convert {
+    let capability = registry
+        .find_capability_for_operation(&actual_source_format, &target_format, job.operation)
+        .ok_or_else(|| {
+            if job.operation == OperationKind::RotatePages {
+                "PDF page rotation is not supported on this system. qpdf is required but not installed.".to_string()
+            } else {
+                format!(
+                    "No conversion capability available for operation '{:?}' from '.{actual_source_format}' to '.{target_format}'.",
+                    job.operation
+                )
+            }
+        })?;
+
+    if job.engine != capability.engine {
         return Err(format!(
-            "Engine mismatch: operation {:?} cannot use engine {:?}.",
-            job.operation, job.engine
+            "Engine mismatch: job specified engine '{:?}', but registered capability requires '{:?}'.",
+            job.engine, capability.engine
         ));
     }
 
-    // ── Step 3: Validate output path ──────────────────────────────────────
+    // Update job formats to canonical normalized forms
+    job.source_format = actual_source_format;
+    job.target_format = target_format;
+
+    // ── Step 4: Validate output path ──────────────────────────────────────
     let output = PathBuf::from(&job.output_path);
     let input_refs: Vec<&Path> = canonical_inputs.iter().map(|p| p.as_path()).collect();
     validate_output_path(&input_refs, &output, job.overwrite)?;
 
-    // ── Step 4: Operation-specific parameter validation ───────────────────
+    // ── Step 5: Operation-specific parameter validation ───────────────────
     if job.operation == OperationKind::ExtractPages {
         let pages = job
             .page_selection
@@ -995,9 +1011,6 @@ fn validate_and_prepare_job(job: &ConversionJob) -> Result<(Vec<PathBuf>, PathBu
             if !seen.insert(c.clone()) {
                 return Err(format!("Duplicate source file detected: {}", c.display()));
             }
-        }
-        if canonical_inputs.len() < 2 {
-            return Err("PDF merge requires at least 2 source files.".to_string());
         }
     }
 
@@ -1991,6 +2004,410 @@ mod tests {
         .expect("plan third extraction");
         execute_job(&mut exec_job3).expect("overwrite extraction");
         assert_eq!(exec_job3.status, JobStatus::Completed);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    // ── Exact capability & engine binding tests (tampered WebView simulation) ──
+
+    #[test]
+    fn test_tampered_job_pdf_to_md_with_correct_engine_succeeds() {
+        // TEST 1: Valid PDF → MD conversion job with the correct engine (PopplerPandoc).
+        // Expected: accepted, planned, executable.
+        if !is_tool_installed("pdftotext") || !is_tool_installed("pandoc") {
+            return;
+        }
+
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t1-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("sample.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write sample pdf");
+        let output = temp_dir.join("sample.md");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "md",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan job");
+
+        assert_eq!(job.operation, OperationKind::Convert);
+        assert_eq!(job.engine, ConversionEngine::PopplerPandoc);
+
+        execute_job(&mut job).expect("execute valid job");
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(output.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_pdf_to_md_with_wrong_engine_rejected() {
+        // TEST 2: Same valid PDF → MD job but engine changed to Pandoc (bypassing PopplerPandoc).
+        // Expected: rejected with Engine mismatch error.
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t2-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("sample.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write sample pdf");
+        let output = temp_dir.join("sample.md");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "md",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan job");
+
+        // Tamper with engine: claim Pandoc instead of PopplerPandoc
+        job.engine = ConversionEngine::Pandoc;
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Engine mismatch"),
+            "Expected 'Engine mismatch' in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("Pandoc") && msg.contains("PopplerPandoc"),
+            "Expected both engines in message, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_source_format_docx_on_pdf_file_rejected() {
+        // TEST 3: Actual PDF source but source_format changed to DOCX.
+        // Expected: rejected with Source format mismatch error.
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t3-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("sample.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write sample pdf");
+        let output = temp_dir.join("sample.md");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "md",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan job");
+
+        // Tamper with source_format: relabel .pdf file as docx
+        job.source_format = "docx".into();
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Source format mismatch"),
+            "Expected 'Source format mismatch' in message, got: {msg}"
+        );
+        assert!(
+            msg.contains(".pdf") && msg.contains(".docx"),
+            "Expected .pdf and .docx in message, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_source_format_html_on_pdf_file_rejected() {
+        // TEST 4: Actual PDF source but source_format changed to HTML.
+        // Expected: rejected with Source format mismatch error.
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t4-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("sample.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write sample pdf");
+        let output = temp_dir.join("sample.md");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "md",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan job");
+
+        // Tamper with source_format: relabel .pdf file as html
+        job.source_format = "html".into();
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Source format mismatch"),
+            "Expected 'Source format mismatch' in message, got: {msg}"
+        );
+        assert!(
+            msg.contains(".pdf") && msg.contains(".html"),
+            "Expected .pdf and .html in message, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_unsupported_target_format_rejected() {
+        // TEST 5: Valid conversion with target format changed to an unsupported target.
+        // Expected: rejected with No conversion capability available error.
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t5-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("sample.md");
+        fs::write(&source, b"# Markdown").expect("write sample md");
+        let output = temp_dir.join("sample.xyz");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "html",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan job");
+
+        // Tamper with target_format: unsupported target format "xyz"
+        job.target_format = "xyz".into();
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("No conversion capability available"),
+            "Expected capability error, got: {msg}"
+        );
+        assert!(msg.contains(".xyz"), "Expected .xyz in message, got: {msg}");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_merge_pdf_operation_changed_to_convert_rejected() {
+        // TEST 6: Valid MergePdf job with operation changed to Convert.
+        // Expected: rejected because Convert pdf -> pdf does not exist (or multiple inputs for Convert).
+        if !is_tool_installed("pdfunite") {
+            return;
+        }
+
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t6-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let p1 = temp_dir.join("p1.pdf");
+        let p2 = temp_dir.join("p2.pdf");
+        fs::write(&p1, MINIMAL_PDF).expect("write p1");
+        fs::write(&p2, MINIMAL_PDF).expect("write p2");
+
+        let two_files = vec![
+            p1.to_string_lossy().into_owned(),
+            p2.to_string_lossy().into_owned(),
+        ];
+        let mut job = plan_merge_job(&registry, &two_files, None, false).expect("plan merge");
+
+        // Tamper with operation: change MergePdf to Convert
+        job.operation = OperationKind::Convert;
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Convert"),
+            "Expected 'Convert' mentioned in error, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_extract_pages_operation_changed_to_convert_rejected() {
+        // TEST 7: Valid ExtractPages job with operation changed to Convert.
+        // Expected: rejected because Convert pdf -> pdf does not exist.
+        if !is_tool_installed("pdfseparate")
+            || !is_tool_installed("pdfunite")
+            || !is_tool_installed("pdfinfo")
+        {
+            return;
+        }
+
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-t7-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("source.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write source pdf");
+
+        let mut job =
+            plan_extract_pages_job(&registry, &source.to_string_lossy(), &[1], None, false)
+                .expect("plan extract pages");
+
+        // Tamper with operation: change ExtractPages to Convert
+        job.operation = OperationKind::Convert;
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains(
+                "No conversion capability available for operation 'Convert' from '.pdf' to '.pdf'"
+            ),
+            "Expected missing capability for Convert pdf->pdf, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tampered_job_rotate_pages_rejected_no_capability() {
+        // TEST 8: RotatePages job with no registered capability.
+        // Expected: rejected because RotatePages has no capability registered.
+        let temp_dir = std::env::temp_dir().join(format!("clio-t8-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("source.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write source pdf");
+
+        let mut job = ConversionJob {
+            id: Uuid::new_v4().to_string(),
+            source_path: source.to_string_lossy().into(),
+            source_paths: vec![source.to_string_lossy().into()],
+            source_format: "pdf".into(),
+            target_format: "pdf".into(),
+            output_path: temp_dir.join("rotated.pdf").to_string_lossy().into(),
+            operation: OperationKind::RotatePages,
+            engine: ConversionEngine::Poppler,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: Some(vec![1]),
+            overwrite: false,
+        };
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("rotation"),
+            "Expected 'rotation' in error message, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_htm_html_normalization_and_tamper_rejection() {
+        // TEST 9: Ensure htm/html normalization still behaves correctly.
+        if !is_tool_installed("pandoc") {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("clio-t9-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let htm_source = temp_dir.join("document.htm");
+        fs::write(&htm_source, b"<p>Hello Clio</p>").expect("write htm");
+        let output = temp_dir.join("document.docx");
+
+        // 1. Legitimate job on .htm file with source_format="htm" executes successfully
+        let mut job_htm = ConversionJob {
+            id: Uuid::new_v4().to_string(),
+            source_path: htm_source.to_string_lossy().into(),
+            source_paths: vec![htm_source.to_string_lossy().into()],
+            source_format: "htm".into(),
+            target_format: "docx".into(),
+            output_path: output.to_string_lossy().into(),
+            operation: OperationKind::Convert,
+            engine: ConversionEngine::Pandoc,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        execute_job(&mut job_htm).expect("htm execute");
+        assert_eq!(job_htm.status, JobStatus::Completed);
+        assert_eq!(job_htm.source_format, "html"); // canonical normalized
+        assert!(output.exists());
+
+        // 2. Legitimate job on .htm file with source_format="html" also matches
+        let output2 = temp_dir.join("document2.docx");
+        let mut job_html = ConversionJob {
+            id: Uuid::new_v4().to_string(),
+            source_path: htm_source.to_string_lossy().into(),
+            source_paths: vec![htm_source.to_string_lossy().into()],
+            source_format: "html".into(),
+            target_format: "docx".into(),
+            output_path: output2.to_string_lossy().into(),
+            operation: OperationKind::Convert,
+            engine: ConversionEngine::Pandoc,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        execute_job(&mut job_html).expect("html execute");
+        assert_eq!(job_html.status, JobStatus::Completed);
+        assert_eq!(job_html.source_format, "html");
+
+        // 3. Tampered job claiming source_format="docx" on .htm file is rejected
+        let mut job_tampered = ConversionJob {
+            id: Uuid::new_v4().to_string(),
+            source_path: htm_source.to_string_lossy().into(),
+            source_paths: vec![htm_source.to_string_lossy().into()],
+            source_format: "docx".into(),
+            target_format: "docx".into(),
+            output_path: temp_dir.join("tampered.docx").to_string_lossy().into(),
+            operation: OperationKind::Convert,
+            engine: ConversionEngine::Pandoc,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        let err = execute_job(&mut job_tampered);
+        assert!(err.is_err());
+        assert_eq!(job_tampered.status, JobStatus::Failed);
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Source format mismatch"),
+            "Expected 'Source format mismatch', got: {msg}"
+        );
+        assert!(
+            msg.contains(".html") && msg.contains(".docx"),
+            "Expected .html and .docx in message, got: {msg}"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
