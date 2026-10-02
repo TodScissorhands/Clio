@@ -12,8 +12,8 @@ pub enum OperationKind {
     Convert,
     ExtractText,
     MergePdf,
+    ExtractPages,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConversionEngine {
@@ -25,7 +25,7 @@ pub enum ConversionEngine {
 impl ConversionEngine {
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::Poppler => "Poppler (pdftotext / pdfunite)",
+            Self::Poppler => "Poppler (pdftotext / pdfunite / pdfseparate)",
             Self::Pandoc => "Pandoc",
             Self::PopplerPandoc => "Poppler + Pandoc",
         }
@@ -68,8 +68,16 @@ pub struct ConversionJob {
     pub error: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_selection: Option<Vec<u32>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct PageSelection {
+    pub pages: Vec<u32>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversionResult {
@@ -120,6 +128,21 @@ impl CapabilityRegistry {
                 engine: ConversionEngine::Poppler,
                 label: "PDF Merge (Poppler)".into(),
                 description: "Merge multiple PDF documents into a single PDF".into(),
+            });
+        }
+
+        // PDF page extraction via Poppler (pdfseparate + pdfunite + pdfinfo)
+        if is_tool_installed("pdfseparate")
+            && is_tool_installed("pdfunite")
+            && is_tool_installed("pdfinfo")
+        {
+            caps.push(ConversionCapability {
+                source_format: "pdf".into(),
+                target_format: "pdf".into(),
+                operation: OperationKind::ExtractPages,
+                engine: ConversionEngine::Poppler,
+                label: "PDF Page Extraction (Poppler)".into(),
+                description: "Extract page range or selection into a new PDF".into(),
             });
         }
 
@@ -196,6 +219,7 @@ impl CapabilityRegistry {
                 c.source_format == src
                     && c.target_format == tgt
                     && c.operation != OperationKind::MergePdf
+                    && c.operation != OperationKind::ExtractPages
             })
             .cloned()
     }
@@ -226,7 +250,11 @@ impl CapabilityRegistry {
         let mut targets: Vec<String> = self
             .capabilities
             .iter()
-            .filter(|c| c.source_format == src && c.operation != OperationKind::MergePdf)
+            .filter(|c| {
+                c.source_format == src
+                    && c.operation != OperationKind::MergePdf
+                    && c.operation != OperationKind::ExtractPages
+            })
             .map(|c| c.target_format.clone())
             .collect();
         targets.sort();
@@ -353,6 +381,136 @@ impl Drop for TempFileGuard {
     }
 }
 
+pub struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    pub fn new(prefix: &str) -> Result<Self, String> {
+        let unique_name = format!("{prefix}-{}", Uuid::new_v4());
+        let path = std::env::temp_dir().join(unique_name);
+        fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create temporary directory: {e}"))?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+pub fn get_pdf_page_count(path: &Path) -> Result<u32, String> {
+    let output = Command::new("pdfinfo")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("Could not inspect PDF metadata with pdfinfo: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("pdfinfo failed: {}", err.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Pages:") {
+            if let Ok(count) = rest.trim().parse::<u32>() {
+                if count > 0 {
+                    return Ok(count);
+                }
+            }
+        }
+    }
+    Err("Could not determine page count from PDF metadata.".to_string())
+}
+
+pub fn parse_page_selection(input: &str, max_pages: u32) -> Result<Vec<u32>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Page selection cannot be empty.".into());
+    }
+
+    let mut pages = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw_part in trimmed.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return Err(
+                "Empty entry in page selection (e.g. trailing or consecutive comma).".into(),
+            );
+        }
+
+        if part.contains('-') {
+            if part.starts_with('-') {
+                return Err("Negative page numbers or leading dashes are not allowed.".into());
+            }
+            if part.ends_with('-') {
+                return Err("Open-ended page ranges are not allowed.".into());
+            }
+            let sub_parts: Vec<&str> = part.split('-').map(str::trim).collect();
+            if sub_parts.len() != 2 {
+                return Err(format!("Malformed page range: '{part}'."));
+            }
+
+            let start = sub_parts[0]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid start page number in range: '{}'.", sub_parts[0]))?;
+            let end = sub_parts[1]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid end page number in range: '{}'.", sub_parts[1]))?;
+
+            if start == 0 || end == 0 {
+                return Err("Page numbers are 1-based; page 0 is invalid.".into());
+            }
+            if start > end {
+                return Err(format!(
+                    "Impossible page range: start page ({start}) cannot be greater than end page ({end})."
+                ));
+            }
+            if end > max_pages {
+                return Err(format!(
+                    "Page {end} exceeds document's total page count ({max_pages})."
+                ));
+            }
+
+            for p in start..=end {
+                if !seen.insert(p) {
+                    return Err(format!("Duplicate page {p} in page selection."));
+                }
+                pages.push(p);
+            }
+        } else {
+            let p = part
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid page number: '{part}'."))?;
+            if p == 0 {
+                return Err("Page numbers are 1-based; page 0 is invalid.".into());
+            }
+            if p > max_pages {
+                return Err(format!(
+                    "Page {p} exceeds document's total page count ({max_pages})."
+                ));
+            }
+            if !seen.insert(p) {
+                return Err(format!("Duplicate page {p} in page selection."));
+            }
+            pages.push(p);
+        }
+    }
+
+    if pages.is_empty() {
+        return Err("Page selection cannot be empty.".into());
+    }
+
+    Ok(pages)
+}
+
 pub fn plan_job(
     registry: &CapabilityRegistry,
     source_path_str: &str,
@@ -408,6 +566,7 @@ pub fn plan_job(
         error: None,
         created_at: timestamp(),
         completed_at: None,
+        page_selection: None,
     })
 }
 
@@ -490,6 +649,87 @@ pub fn plan_merge_job(
         error: None,
         created_at: timestamp(),
         completed_at: None,
+        page_selection: None,
+    })
+}
+
+pub fn plan_extract_pages_job(
+    registry: &CapabilityRegistry,
+    source_path_str: &str,
+    pages: &[u32],
+    output_path_opt: Option<&str>,
+) -> Result<ConversionJob, String> {
+    if pages.is_empty() {
+        return Err("No pages selected for extraction.".into());
+    }
+
+    let source_path = Path::new(source_path_str);
+    let canonical_source = canonical_regular_file(source_path)?;
+    let format = extension_from_path(&canonical_source);
+    if format != "pdf" {
+        return Err(format!(
+            "Source file '{}' is not a PDF (found: .{}).",
+            canonical_source.display(),
+            if format.is_empty() { "none" } else { &format }
+        ));
+    }
+
+    let max_pages = get_pdf_page_count(&canonical_source)?;
+    let mut seen = std::collections::HashSet::new();
+    for &p in pages {
+        if p == 0 {
+            return Err("Page numbers are 1-based; page 0 is invalid.".into());
+        }
+        if p > max_pages {
+            return Err(format!(
+                "Page {p} exceeds document's total page count ({max_pages})."
+            ));
+        }
+        if !seen.insert(p) {
+            return Err(format!("Duplicate page {p} in page selection."));
+        }
+    }
+
+    let capability = registry
+        .find_capability_for_operation("pdf", "pdf", OperationKind::ExtractPages)
+        .ok_or_else(|| {
+            "PDF page extraction capability is not available on this system (requires Poppler pdfseparate, pdfunite, and pdfinfo)."
+                .to_string()
+        })?;
+
+    let output_path = match output_path_opt {
+        Some(custom) if !custom.trim().is_empty() => PathBuf::from(custom.trim()),
+        _ => {
+            let stem = canonical_source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("document");
+            let default_name = format!("{stem}-extracted.pdf");
+            canonical_source
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(default_name)
+        }
+    };
+
+    validate_output_destination(&canonical_source, &output_path)?;
+
+    let source_str = canonical_source.to_string_lossy().into_owned();
+
+    Ok(ConversionJob {
+        id: Uuid::new_v4().to_string(),
+        source_path: source_str.clone(),
+        source_paths: vec![source_str],
+        source_format: "pdf".into(),
+        target_format: "pdf".into(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        operation: capability.operation,
+        engine: capability.engine,
+        status: JobStatus::Planned,
+        error: None,
+        created_at: timestamp(),
+        completed_at: None,
+        page_selection: Some(pages.to_vec()),
     })
 }
 
@@ -509,6 +749,72 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
     job.status = JobStatus::Running;
 
     let result = match job.operation {
+        OperationKind::ExtractPages => {
+            let pages = job
+                .page_selection
+                .as_ref()
+                .ok_or_else(|| "Page selection is missing from extract-pages job.".to_string())?;
+            if pages.is_empty() {
+                return Err("No pages selected for extraction.".to_string());
+            }
+
+            let temp_dir_guard = TempDirGuard::new("clio-extract")?;
+            let temp_dir = temp_dir_guard.path();
+            let input = &inputs[0];
+
+            if pages.len() == 1 {
+                let p = pages[0];
+                let p_str = p.to_string();
+                let pattern = temp_dir.join(format!("page_{p}_%d.pdf"));
+                let mut cmd = Command::new("pdfseparate");
+                cmd.arg("-f")
+                    .arg(&p_str)
+                    .arg("-l")
+                    .arg(&p_str)
+                    .arg(input)
+                    .arg(&pattern);
+                run_command(&mut cmd, "Poppler (pdfseparate)")?;
+
+                let generated_page = temp_dir.join(format!("page_{p}_{p}.pdf"));
+                if !generated_page.exists() {
+                    return Err(format!(
+                        "Extracted page file was not generated for page {p}."
+                    ));
+                }
+                fs::copy(&generated_page, output)
+                    .map_err(|e| format!("Could not write extracted PDF output: {e}"))?;
+            } else {
+                let mut unique_pages = pages.clone();
+                unique_pages.sort_unstable();
+                unique_pages.dedup();
+
+                for &p in &unique_pages {
+                    let p_str = p.to_string();
+                    let pattern = temp_dir.join(format!("page_{p}_%d.pdf"));
+                    let mut cmd = Command::new("pdfseparate");
+                    cmd.arg("-f")
+                        .arg(&p_str)
+                        .arg("-l")
+                        .arg(&p_str)
+                        .arg(input)
+                        .arg(&pattern);
+                    run_command(&mut cmd, "Poppler (pdfseparate)")?;
+                }
+
+                let mut cmd = Command::new("pdfunite");
+                for &p in pages {
+                    let page_file = temp_dir.join(format!("page_{p}_{p}.pdf"));
+                    if !page_file.exists() {
+                        return Err(format!("Extracted page file was not found for page {p}."));
+                    }
+                    cmd.arg(&page_file);
+                }
+                cmd.arg(output);
+                run_command(&mut cmd, "Poppler (pdfunite)")?;
+            }
+
+            Ok(())
+        }
         OperationKind::MergePdf => {
             let mut cmd = Command::new("pdfunite");
             for input in &inputs {
@@ -606,6 +912,39 @@ pub fn conversion_plan_merge_job(
 }
 
 #[tauri::command]
+pub fn conversion_parse_page_selection(
+    source_path: String,
+    range_string: String,
+) -> Result<Vec<u32>, String> {
+    let source = Path::new(&source_path);
+    let canonical = canonical_regular_file(source)?;
+    let max_pages = get_pdf_page_count(&canonical)?;
+    parse_page_selection(&range_string, max_pages)
+}
+
+#[tauri::command]
+pub fn conversion_pdf_page_count(source_path: String) -> Result<u32, String> {
+    let source = Path::new(&source_path);
+    let canonical = canonical_regular_file(source)?;
+    get_pdf_page_count(&canonical)
+}
+
+#[tauri::command]
+pub fn conversion_plan_extract_pages_job(
+    source_path: String,
+    page_selection: Vec<u32>,
+    output_path: Option<String>,
+) -> Result<ConversionJob, String> {
+    let registry = CapabilityRegistry::new();
+    plan_extract_pages_job(
+        &registry,
+        &source_path,
+        &page_selection,
+        output_path.as_deref(),
+    )
+}
+
+#[tauri::command]
 pub fn conversion_execute_job(mut job: ConversionJob) -> Result<ConversionJob, String> {
     execute_job(&mut job)?;
     Ok(job)
@@ -640,17 +979,37 @@ mod tests {
         let all = registry.list_capabilities(None);
         assert!(!all.is_empty());
 
-        // 2. Filter by PDF: should offer txt (extract-text) and md, html, docx, odt, epub (poppler-pandoc)
-        // 2. Filter by PDF: should offer txt (extract-text) and md, html, docx, odt, epub (poppler-pandoc), plus merge if pdfunite installed
+        // 2. Filter by PDF: txt (extract-text), md/html/docx/odt/epub (poppler-pandoc), plus
+        //    merge (pdfunite) and extract-pages (pdfseparate+pdfunite+pdfinfo) when available.
         let pdf_caps = registry.list_capabilities(Some("pdf"));
+        let extract_pages_available = is_tool_installed("pdfseparate")
+            && is_tool_installed("pdfunite")
+            && is_tool_installed("pdfinfo");
+        let expected_pdf_caps = if is_tool_installed("pdfunite") {
+            if extract_pages_available {
+                8
+            } else {
+                7
+            }
+        } else {
+            if extract_pages_available {
+                7
+            } else {
+                6
+            }
+        };
+        assert_eq!(pdf_caps.len(), expected_pdf_caps);
         if is_tool_installed("pdfunite") {
-            assert_eq!(pdf_caps.len(), 7);
             let merge_cap =
                 registry.find_capability_for_operation("pdf", "pdf", OperationKind::MergePdf);
             assert!(merge_cap.is_some());
             assert_eq!(merge_cap.unwrap().operation, OperationKind::MergePdf);
-        } else {
-            assert_eq!(pdf_caps.len(), 6);
+        }
+        if extract_pages_available {
+            let extract_cap =
+                registry.find_capability_for_operation("pdf", "pdf", OperationKind::ExtractPages);
+            assert!(extract_cap.is_some());
+            assert_eq!(extract_cap.unwrap().operation, OperationKind::ExtractPages);
         }
         let targets = registry.supported_targets_for("pdf");
         assert!(targets.contains(&"txt".to_string()));
@@ -834,6 +1193,150 @@ mod tests {
         assert_eq!(exec_job.status, JobStatus::Completed);
         assert!(Path::new(&exec_job.output_path).exists());
         let meta = fs::metadata(&exec_job.output_path).expect("read merged metadata");
+        assert!(meta.len() > 0);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_parse_page_selection_valid() {
+        // Single page
+        assert_eq!(parse_page_selection("1", 10).unwrap(), vec![1]);
+        assert_eq!(parse_page_selection("10", 10).unwrap(), vec![10]);
+
+        // Range
+        assert_eq!(parse_page_selection("1-3", 10).unwrap(), vec![1, 2, 3]);
+
+        // Multiple items
+        assert_eq!(
+            parse_page_selection("1-3,7,10-12", 20).unwrap(),
+            vec![1, 2, 3, 7, 10, 11, 12]
+        );
+
+        // Arbitrary ordering preserved
+        assert_eq!(parse_page_selection("5,2,8", 10).unwrap(), vec![5, 2, 8]);
+
+        // Reversed ranges are an error (start > end)
+        assert!(parse_page_selection("5-3", 10).is_err());
+
+        // Whitespace tolerance
+        assert_eq!(
+            parse_page_selection(" 1 - 3 , 5 ", 10).unwrap(),
+            vec![1, 2, 3, 5]
+        );
+    }
+
+    #[test]
+    fn test_parse_page_selection_errors() {
+        // Empty input
+        assert!(parse_page_selection("", 10).is_err());
+        assert!(parse_page_selection("  ", 10).is_err());
+
+        // Zero page
+        assert!(parse_page_selection("0", 10).is_err());
+        assert!(parse_page_selection("0-3", 10).is_err());
+        assert!(parse_page_selection("1-0", 10).is_err());
+
+        // Out of range
+        assert!(parse_page_selection("11", 10).is_err());
+        assert!(parse_page_selection("8-11", 10).is_err());
+
+        // Duplicates within ranges
+        assert!(parse_page_selection("1-3,2", 10).is_err());
+
+        // Duplicate single pages
+        assert!(parse_page_selection("5,5", 10).is_err());
+
+        // Malformed
+        assert!(parse_page_selection("abc", 10).is_err());
+        assert!(parse_page_selection("1-2-3", 10).is_err());
+        assert!(parse_page_selection(",1", 10).is_err());
+        assert!(parse_page_selection("1,", 10).is_err());
+        assert!(parse_page_selection("-1", 10).is_err());
+        assert!(parse_page_selection("1-", 10).is_err());
+    }
+
+    #[test]
+    fn test_plan_extract_pages_job_validation_and_construction() {
+        let registry = CapabilityRegistry::new();
+        if !is_tool_installed("pdfseparate")
+            || !is_tool_installed("pdfunite")
+            || !is_tool_installed("pdfinfo")
+        {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("clio-extract-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        // Write a minimal valid PDF (1 page) so pdfinfo can read it
+        let source = temp_dir.join("source.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write source pdf");
+        let source_str = source.to_string_lossy().into_owned();
+
+        // 1. Valid single-page plan
+        let job = plan_extract_pages_job(&registry, &source_str, &[1], None)
+            .expect("plan single-page extraction");
+        assert_eq!(job.operation, OperationKind::ExtractPages);
+        assert_eq!(job.engine, ConversionEngine::Poppler);
+        assert_eq!(job.source_format, "pdf");
+        assert_eq!(job.target_format, "pdf");
+        assert_eq!(job.status, JobStatus::Planned);
+        assert!(job.page_selection.as_ref().unwrap() == &vec![1u32]);
+        assert!(job.output_path.ends_with("source-extracted.pdf"));
+
+        // 2. Custom output path
+        let custom_out = temp_dir.join("out-custom.pdf");
+        let job_custom = plan_extract_pages_job(
+            &registry,
+            &source_str,
+            &[1],
+            Some(&custom_out.to_string_lossy()),
+        )
+        .expect("plan custom output");
+        assert_eq!(job_custom.output_path, custom_out.to_string_lossy());
+
+        // 3. Empty pages rejected
+        assert!(plan_extract_pages_job(&registry, &source_str, &[], None).is_err());
+
+        // 4. Duplicate page rejected
+        assert!(plan_extract_pages_job(&registry, &source_str, &[1, 1], None).is_err());
+
+        // 5. Out-of-range page rejected
+        assert!(plan_extract_pages_job(&registry, &source_str, &[999], None).is_err());
+
+        // 6. Zero page rejected
+        assert!(plan_extract_pages_job(&registry, &source_str, &[0], None).is_err());
+
+        // 7. Non-PDF source rejected
+        let txt_file = temp_dir.join("doc.txt");
+        fs::write(&txt_file, b"hello").expect("write txt");
+        assert!(
+            plan_extract_pages_job(&registry, &txt_file.to_string_lossy(), &[1], None).is_err()
+        );
+
+        // 8. Non-existent source rejected
+        assert!(
+            plan_extract_pages_job(&registry, "/tmp/nonexistent_clio_test.pdf", &[1], None)
+                .is_err()
+        );
+
+        // 9. Output/source canonical collision rejected
+        assert!(plan_extract_pages_job(&registry, &source_str, &[1], Some(&source_str)).is_err());
+
+        // 10. Integration: execute actual extraction
+        let exec_out = temp_dir.join("exec-out.pdf");
+        let mut exec_job = plan_extract_pages_job(
+            &registry,
+            &source_str,
+            &[1],
+            Some(&exec_out.to_string_lossy()),
+        )
+        .expect("plan exec job");
+        execute_job(&mut exec_job).expect("execute extraction");
+        assert_eq!(exec_job.status, JobStatus::Completed);
+        assert!(exec_out.exists());
+        let meta = fs::metadata(&exec_out).expect("read extracted metadata");
         assert!(meta.len() > 0);
 
         let _ = fs::remove_dir_all(&temp_dir);

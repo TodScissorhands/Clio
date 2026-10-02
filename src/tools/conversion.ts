@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type OperationKind = "convert" | "extract-text" | "merge-pdf";
+export type OperationKind = "convert" | "extract-text" | "merge-pdf" | "extract-pages";
 
 export type ConversionEngine = "poppler" | "pandoc" | "poppler-pandoc";
 
@@ -28,6 +28,7 @@ export type ConversionJob = {
   error?: string | null;
   createdAt: string;
   completedAt?: string | null;
+  pageSelection?: number[] | null;
 };
 
 export type ConversionResult = {
@@ -97,6 +98,32 @@ export async function planMergeJob(
 
 export async function executeConversionJob(job: ConversionJob): Promise<ConversionJob> {
   return invoke<ConversionJob>("conversion_execute_job", { job });
+}
+
+export async function getPdfPageCount(sourcePath: string): Promise<number> {
+  return invoke<number>("conversion_pdf_page_count", { sourcePath });
+}
+
+export async function parsePagesFromRange(
+  sourcePath: string,
+  rangeString: string
+): Promise<number[]> {
+  return invoke<number[]>("conversion_parse_page_selection", {
+    sourcePath,
+    rangeString,
+  });
+}
+
+export async function planExtractPagesJob(
+  sourcePath: string,
+  pageSelection: number[],
+  outputPath?: string
+): Promise<ConversionJob> {
+  return invoke<ConversionJob>("conversion_plan_extract_pages_job", {
+    sourcePath,
+    pageSelection,
+    outputPath: outputPath ?? null,
+  });
 }
 
 export async function convertDocument(

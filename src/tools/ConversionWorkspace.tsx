@@ -5,8 +5,11 @@ import {
   executeConversionJob,
   formatDetail,
   formatLabel,
+  getPdfPageCount,
   listConversionCapabilities,
+  parsePagesFromRange,
   planConversionJob,
+  planExtractPagesJob,
   planMergeJob,
   type ConversionCapability,
   type ConversionJob,
@@ -33,7 +36,7 @@ function formatBytes(bytes: number) {
 }
 
 export function ConversionWorkspace() {
-  const [mode, setMode] = useState<"convert" | "merge">("convert");
+  const [mode, setMode] = useState<"convert" | "merge" | "extract">("convert");
   const [document, setDocument] = useState<DocumentInfo | null>(null);
   const [capabilities, setCapabilities] = useState<ConversionCapability[]>([]);
   const [target, setTarget] = useState("epub");
@@ -42,6 +45,10 @@ export function ConversionWorkspace() {
   const [message, setMessage] = useState("Choose a document to begin.");
   const [outputPath, setOutputPath] = useState("");
   const [mergeFiles, setMergeFiles] = useState<DocumentInfo[]>([]);
+  const [pageCount, setPageCount] = useState<number | null>(null);
+  const [pageRange, setPageRange] = useState("");
+  const [parsedPages, setParsedPages] = useState<number[] | null>(null);
+  const [pageRangeError, setPageRangeError] = useState<string | null>(null);
 
   // Load initial global capabilities for preview before document selection
   useEffect(() => {
@@ -72,6 +79,15 @@ export function ConversionWorkspace() {
       setDocument(info);
       setOutputPath("");
       setStatus("idle");
+      // Reset extract state when document changes
+      setPageRange("");
+      setParsedPages(null);
+      setPageRangeError(null);
+      setPageCount(null);
+      // Fetch page count for PDFs (for extract mode)
+      if (info.extension.toLowerCase() === "pdf") {
+        void getPdfPageCount(info.path).then(setPageCount).catch(() => setPageCount(null));
+      }
 
       // Query capabilities specific to this document's format
       const caps = await listConversionCapabilities(info.extension);
@@ -232,6 +248,45 @@ export function ConversionWorkspace() {
       setMessage(String(error));
     }
   }
+
+  async function handlePageRangeChange(value: string) {
+    setPageRange(value);
+    setParsedPages(null);
+    setPageRangeError(null);
+    if (!document || !value.trim()) return;
+    try {
+      const pages = await parsePagesFromRange(document.path, value);
+      setParsedPages(pages);
+      setPageRangeError(null);
+    } catch (error) {
+      setPageRangeError(String(error));
+    }
+  }
+
+  async function extractPages() {
+    if (!document || !parsedPages || parsedPages.length === 0) return;
+    const stem = document.name.replace(/\.[^.]+$/, "") || "document";
+    const output = await save({
+      defaultPath: `${stem}-extracted.pdf`,
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (!output) return;
+    setStatus("converting");
+    setMessage(`Extracting ${parsedPages.length} page${parsedPages.length === 1 ? "" : "s"}…`);
+    try {
+      const jobToRun = await planExtractPagesJob(document.path, parsedPages, output);
+      const completedJob = await executeConversionJob(jobToRun);
+      setPlannedJob(completedJob);
+      setOutputPath(completedJob.outputPath);
+      setStatus("done");
+      setMessage(
+        `Extracted ${parsedPages.length} page${parsedPages.length === 1 ? "" : "s"} successfully. Source PDF is not modified.`
+      );
+    } catch (error) {
+      setStatus("error");
+      setMessage(String(error));
+    }
+  }
   return (
     <section className="tools-view">
       <div className="view-heading">
@@ -315,7 +370,7 @@ export function ConversionWorkspace() {
               </div>
             </div>
           </>
-        ) : (
+        ) : mode === "merge" ? (
           <>
             <div className="source-card">
               <div className="card-heading">
@@ -417,6 +472,63 @@ export function ConversionWorkspace() {
               </div>
             </div>
           </>
+        ) : (
+          <>
+            <div className="source-card">
+              <div className="card-heading"><span className="step">01</span><span>Source PDF</span></div>
+              {document && document.extension.toLowerCase() === "pdf" ? (
+                <div className="selected-file">
+                  <div className="file-icon">PDF</div>
+                  <div className="file-info">
+                    <strong>{document.name}</strong>
+                    <span>
+                      {formatBytes(document.size)}
+                      {pageCount !== null ? ` · ${pageCount} page${pageCount === 1 ? "" : "s"}` : ""}
+                    </span>
+                  </div>
+                  <button className="quiet-button" onClick={chooseDocument} disabled={status === "converting"}>Replace</button>
+                </div>
+              ) : (
+                <button className="drop-zone" onClick={chooseDocument}>
+                  <span className="plus">+</span><strong>Choose a PDF document</strong>
+                  <small>Only PDF files are supported for page extraction</small>
+                </button>
+              )}
+            </div>
+            <div className="connector" aria-hidden="true"><span>→</span></div>
+            <div className="target-card">
+              <div className="card-heading"><span className="step">02</span><span>Page Selection</span></div>
+              <div className="extract-selection-box">
+                <label htmlFor="page-range-input" className="extract-label">
+                  Pages to extract
+                  {pageCount !== null && (
+                    <span className="extract-page-hint"> (document has {pageCount} page{pageCount === 1 ? "" : "s"})</span>
+                  )}
+                </label>
+                <input
+                  id="page-range-input"
+                  type="text"
+                  className={`extract-range-input${pageRangeError ? " input-error" : parsedPages ? " input-ok" : ""}`}
+                  placeholder="e.g. 1-3,7,10-12"
+                  value={pageRange}
+                  onChange={(e) => void handlePageRangeChange(e.target.value)}
+                  disabled={!document || document.extension.toLowerCase() !== "pdf" || status === "converting"}
+                  aria-describedby="page-range-feedback"
+                />
+                <p
+                  id="page-range-feedback"
+                  className={`extract-feedback${pageRangeError ? " extract-feedback-error" : ""}`}
+                >
+                  {pageRangeError
+                    ? pageRangeError
+                    : parsedPages
+                    ? `${parsedPages.length} page${parsedPages.length === 1 ? "" : "s"} selected: ${parsedPages.slice(0, 10).join(", ")}${parsedPages.length > 10 ? "…" : ""}`
+                    : "Enter pages or ranges separated by commas (e.g. 1-3,7,10-12)."}
+                </p>
+                <p className="extract-note">The source PDF is not modified. A new file is created.</p>
+              </div>
+            </div>
+          </>
         )}
       </section>
       <section className="action-row">
@@ -435,7 +547,7 @@ export function ConversionWorkspace() {
               : "Select a document"}
             <span>→</span>
           </button>
-        ) : (
+        ) : mode === "merge" ? (
           <button
             type="button"
             className="convert-button"
@@ -447,6 +559,27 @@ export function ConversionWorkspace() {
               : mergeFiles.length >= 2
               ? `Merge ${mergeFiles.length} PDFs`
               : "Select at least 2 PDFs"}
+            <span>→</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="convert-button"
+            onClick={() => void extractPages()}
+            disabled={
+              status === "converting" ||
+              !document ||
+              document.extension.toLowerCase() !== "pdf" ||
+              !parsedPages ||
+              parsedPages.length === 0 ||
+              !!pageRangeError
+            }
+          >
+            {status === "converting"
+              ? "Extracting…"
+              : parsedPages && parsedPages.length > 0
+              ? `Extract ${parsedPages.length} page${parsedPages.length === 1 ? "" : "s"}`
+              : "Enter page selection"}
             <span>→</span>
           </button>
         )}
