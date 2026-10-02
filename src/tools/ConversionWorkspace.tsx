@@ -305,72 +305,59 @@ export function ConversionWorkspace() {
 
   return (
     <section className="tools-view">
-      <div className="view-heading">
-        <div>
-          <p className="eyebrow">Local document tools</p>
-          <h1>
-            {mode === "convert"
-              ? "Convert with confidence."
-              : mode === "merge"
-              ? "Merge PDFs safely."
-              : "Extract PDF pages."}
-          </h1>
-          <p className="view-intro">
-            {mode === "convert"
-              ? "Use the existing native conversion workflow without leaving Clio."
-              : mode === "merge"
-              ? "Combine multiple PDF documents in exact order using local Poppler utilities."
-              : "Extract a page selection from a PDF into a new file. The source PDF is not modified."}
-          </p>
-          <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
-            <button
-              type="button"
-              className={`mode-btn ${mode === "convert" ? "selected" : ""}`}
-              onClick={() => {
-                setMode("convert");
-                setStatus("idle");
-                setPendingOverwrite(null);
-                setMessage(document ? "Ready to convert." : "Choose a document to begin.");
-                setOutputPath("");
-              }}
-            >
-              Convert Document
-            </button>
-            <button
-              type="button"
-              className={`mode-btn ${mode === "merge" ? "selected" : ""}`}
-              onClick={() => {
-                setMode("merge");
-                setStatus("idle");
-                setPendingOverwrite(null);
-                setMessage(
-                  mergeFiles.length >= 2
-                    ? `Ready to merge ${mergeFiles.length} PDFs.`
-                    : "Add at least 2 PDF files to merge."
-                );
-                setOutputPath("");
-              }}
-            >
-              Merge PDF
-            </button>
-            <button
-              type="button"
-              className={`mode-btn ${mode === "extract" ? "selected" : ""}`}
-              onClick={() => {
-                setMode("extract");
-                setStatus("idle");
-                setPendingOverwrite(null);
-                setMessage(
-                  document?.extension?.toLowerCase() === "pdf"
-                    ? "Enter a page selection, then choose where to save."
-                    : "Choose a PDF document to extract pages from."
-                );
-                setOutputPath("");
-              }}
-            >
-              Extract Pages
-            </button>
-          </div>
+      <div className="tools-header">
+        <div className="tools-title-group">
+          <h1>Document Tools</h1>
+          <p>Local-only format conversion, PDF merging, and page extraction.</p>
+        </div>
+        <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
+          <button
+            type="button"
+            className={`mode-btn ${mode === "convert" ? "selected" : ""}`}
+            onClick={() => {
+              setMode("convert");
+              setStatus("idle");
+              setPendingOverwrite(null);
+              setMessage(document ? "Ready to convert." : "Choose a document to begin.");
+              setOutputPath("");
+            }}
+          >
+            Convert
+          </button>
+          <button
+            type="button"
+            className={`mode-btn ${mode === "merge" ? "selected" : ""}`}
+            onClick={() => {
+              setMode("merge");
+              setStatus("idle");
+              setPendingOverwrite(null);
+              setMessage(
+                mergeFiles.length >= 2
+                  ? `Ready to merge ${mergeFiles.length} PDFs.`
+                  : "Add at least 2 PDF files to merge."
+              );
+              setOutputPath("");
+            }}
+          >
+            Merge PDF
+          </button>
+          <button
+            type="button"
+            className={`mode-btn ${mode === "extract" ? "selected" : ""}`}
+            onClick={() => {
+              setMode("extract");
+              setStatus("idle");
+              setPendingOverwrite(null);
+              setMessage(
+                document?.extension?.toLowerCase() === "pdf"
+                  ? "Enter a page selection, then choose where to save."
+                  : "Choose a PDF document to extract pages from."
+              );
+              setOutputPath("");
+            }}
+          >
+            Extract Pages
+          </button>
         </div>
       </div>
       <section className="conversion-workspace" aria-label="Document conversion workspace">
@@ -378,8 +365,7 @@ export function ConversionWorkspace() {
           <>
             <div className="source-card">
               <div className="card-heading">
-                <span className="step">01</span>
-                <span>Source document</span>
+                <span>Input Document</span>
               </div>
               {document ? (
                 <div className="selected-file">
@@ -407,8 +393,7 @@ export function ConversionWorkspace() {
             </div>
             <div className="target-card">
               <div className="card-heading">
-                <span className="step">02</span>
-                <span>Convert to</span>
+                <span>Target Format</span>
               </div>
               <div className="format-grid">
                 {capabilities.map((cap) => (
@@ -425,7 +410,7 @@ export function ConversionWorkspace() {
                   </button>
                 ))}
                 {document && capabilities.length === 0 && (
-                  <p style={{ gridColumn: "1 / -1", color: "#8c8e83", fontSize: "12px", margin: "16px 0" }}>
+                  <p className="no-targets-msg">
                     No conversion targets available for .{document.extension}.
                   </p>
                 )}
@@ -436,8 +421,7 @@ export function ConversionWorkspace() {
           <>
             <div className="source-card">
               <div className="card-heading">
-                <span className="step">01</span>
-                <span>PDF Source Documents ({mergeFiles.length})</span>
+                <span>PDF Inputs ({mergeFiles.length})</span>
               </div>
               {mergeFiles.length > 0 ? (
                 <>
@@ -516,8 +500,7 @@ export function ConversionWorkspace() {
             </div>
             <div className="target-card">
               <div className="card-heading">
-                <span className="step">02</span>
-                <span>Output Destination</span>
+                <span>Merge Output</span>
               </div>
               <div className="merge-target-box">
                 <span className="merge-target-badge">PDF (Merged)</span>
@@ -534,7 +517,6 @@ export function ConversionWorkspace() {
           <>
             <div className="source-card">
               <div className="card-heading">
-                <span className="step">01</span>
                 <span>Source PDF</span>
               </div>
               {document && document.extension.toLowerCase() === "pdf" ? (
@@ -570,8 +552,7 @@ export function ConversionWorkspace() {
             </div>
             <div className="target-card">
               <div className="card-heading">
-                <span className="step">02</span>
-                <span>Page Selection</span>
+                <span>Pages to Extract</span>
               </div>
               <div className="extract-selection-box">
                 <label htmlFor="page-range-input" className="extract-label">

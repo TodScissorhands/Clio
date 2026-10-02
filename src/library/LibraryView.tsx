@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { Collection, LibraryRoot, ReadingState, StoredDocument } from "../storage/domain";
 import { formatBytes, getDocumentDisplayTitle, hasCapability } from "../storage/domain";
 import { getDocumentThumbnail } from "../storage/documentStorage";
@@ -118,12 +118,40 @@ export function LibraryView({
   const [sortBy, setSortBy] = useState<SortOption>("recent");
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
 
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Global search shortcut: "/" or "Ctrl/Cmd+K" focuses search input; "Escape" clears/blurs
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      const isInput = targetTag === "input" || targetTag === "textarea" || targetTag === "select";
+
+      if (e.key === "Escape") {
+        if (searchInputRef.current === document.activeElement) {
+          setSearchQuery("");
+          searchInputRef.current?.blur();
+        }
+        return;
+      }
+
+      if (isInput) return;
+
+      if (e.key === "/" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   // Inline collection creation / rename state
   const [isCreatingCollection, setIsCreatingCollection] = useState(false);
   const [newCollectionName, setNewCollectionName] = useState("");
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-
   // Calculate format counts for filter chips within active scope
   const formatCounts = useMemo(() => {
     let scoped = documents;
@@ -227,17 +255,11 @@ export function LibraryView({
         </div>
       </header>
 
-      {/* Global Alerts / Messages */}
+      {/* Actionable Error Alert */}
       {error && (
         <div className="library-alert error" role="alert">
           <span className="library-alert-icon">⚠</span>
           <span className="library-alert-text">{error}</span>
-        </div>
-      )}
-      {message && (
-        <div className="library-alert info" aria-live="polite">
-          <span className="library-alert-icon">ℹ</span>
-          <span className="library-alert-text">{message}</span>
         </div>
       )}
 
@@ -497,6 +519,7 @@ export function LibraryView({
                 🔍
               </span>
               <input
+                ref={searchInputRef}
                 id={searchInputId}
                 type="text"
                 className="library-search-input"
@@ -504,13 +527,21 @@ export function LibraryView({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
+              {!searchQuery && (
+                <kbd className="search-shortcut-hint" aria-hidden="true" title="Press / to search">
+                  /
+                </kbd>
+              )}
               {searchQuery && (
                 <button
                   type="button"
                   className="search-clear-btn"
-                  onClick={() => setSearchQuery("")}
+                  onClick={() => {
+                    setSearchQuery("");
+                    searchInputRef.current?.focus();
+                  }}
                   aria-label="Clear search query"
-                  title="Clear search"
+                  title="Clear search (Esc)"
                 >
                   ✕
                 </button>
@@ -584,8 +615,8 @@ export function LibraryView({
             </div>
           </div>
 
-          {/* Active Scope / Filter Info */}
-          {(selectedRoot || selectedCollection || hasSearch || hasFilter) && (
+          {/* Active Scope / Filter Info & Status */}
+          {(selectedRoot || selectedCollection || hasSearch || hasFilter || message) && (
             <div className="catalog-status-bar">
               <div className="scope-indicator">
                 {selectedRoot && (
@@ -638,6 +669,11 @@ export function LibraryView({
                     >
                       ✕
                     </button>
+                  </span>
+                )}
+                {message && !error && (
+                  <span className="scope-pill status-note-pill" title={message}>
+                    {message}
                   </span>
                 )}
               </div>

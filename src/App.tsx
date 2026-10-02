@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ReaderShell } from "./reader/ReaderShell";
 import type { ReaderDocument } from "./reader/types";
@@ -30,14 +30,135 @@ type AppView = "library" | "reader" | "tools" | "settings";
 const readerFileFilters = [{ name: "Readable documents", extensions: ["pdf", "epub", "txt", "md", "markdown"] }];
 const storage = new TauriDocumentStorage();
 
-function PlaceholderView({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
+type AppTheme = "system" | "light" | "dark";
 
+interface SettingsViewProps {
+  appTheme: AppTheme;
+  onThemeChange: (theme: AppTheme) => void;
+  rootCount: number;
+  docCount: number;
+  collectionCount: number;
+}
+
+function SettingsView({
+  appTheme,
+  onThemeChange,
+  rootCount,
+  docCount,
+  collectionCount,
+}: SettingsViewProps) {
   return (
-    <section className="placeholder-view">
-      <p className="eyebrow">Clio workspace</p>
-      <h1>{title}</h1>
-      <p>{description}</p>
-      {action}
+    <section className="settings-view" aria-label="Settings">
+      <header className="settings-header">
+        <h1>Settings</h1>
+        <p>Preferences, local library overview, and keyboard navigation.</p>
+      </header>
+
+      <div className="settings-sections">
+        {/* Appearance Section */}
+        <div className="settings-section">
+          <h2 className="settings-section-title">Appearance</h2>
+          <p className="settings-section-desc">
+            Choose how Clio looks on your device. Follow your system theme or explicitly lock to light or dark.
+          </p>
+          <div className="theme-switcher" role="radiogroup" aria-label="Application theme">
+            <button
+              type="button"
+              className={`theme-btn ${appTheme === "system" ? "selected" : ""}`}
+              onClick={() => onThemeChange("system")}
+              role="radio"
+              aria-checked={appTheme === "system"}
+            >
+              System
+            </button>
+            <button
+              type="button"
+              className={`theme-btn ${appTheme === "light" ? "selected" : ""}`}
+              onClick={() => onThemeChange("light")}
+              role="radio"
+              aria-checked={appTheme === "light"}
+            >
+              Light
+            </button>
+            <button
+              type="button"
+              className={`theme-btn ${appTheme === "dark" ? "selected" : ""}`}
+              onClick={() => onThemeChange("dark")}
+              role="radio"
+              aria-checked={appTheme === "dark"}
+            >
+              Dark
+            </button>
+          </div>
+        </div>
+
+        {/* Library & Storage Overview */}
+        <div className="settings-section">
+          <h2 className="settings-section-title">Local Library & Storage</h2>
+          <p className="settings-section-desc">
+            Files remain strictly in user-controlled filesystem directories without cloud sync or remote accounts.
+          </p>
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-number">{rootCount}</div>
+              <div className="stat-label">Indexed Directories</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-number">{docCount}</div>
+              <div className="stat-label">Discovered Files</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-number">{collectionCount}</div>
+              <div className="stat-label">Collections</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Keyboard Shortcuts Reference */}
+        <div className="settings-section">
+          <h2 className="settings-section-title">Keyboard Navigation</h2>
+          <p className="settings-section-desc">
+            Clio provides quick keyboard shortcuts across the application for high-efficiency reading and browsing.
+          </p>
+          <table className="shortcut-table">
+            <tbody>
+              <tr>
+                <td><kbd className="key-badge">/</kbd> or <kbd className="key-badge">Ctrl</kbd>+<kbd className="key-badge">K</kbd></td>
+                <td>Focus library search</td>
+              </tr>
+              <tr>
+                <td><kbd className="key-badge">Esc</kbd></td>
+                <td>Clear search or close reader panel</td>
+              </tr>
+              <tr>
+                <td><kbd className="key-badge">←</kbd> / <kbd className="key-badge">→</kbd> or <kbd className="key-badge">J</kbd> / <kbd className="key-badge">K</kbd></td>
+                <td>Previous / Next page in reader</td>
+              </tr>
+              <tr>
+                <td><kbd className="key-badge">Ctrl</kbd>+<kbd className="key-badge">+</kbd> / <kbd className="key-badge">Ctrl</kbd>+<kbd className="key-badge">-</kbd></td>
+                <td>Zoom in / Zoom out (PDF)</td>
+              </tr>
+              <tr>
+                <td><kbd className="key-badge">Ctrl</kbd>+<kbd className="key-badge">0</kbd></td>
+                <td>Reset zoom to 100%</td>
+              </tr>
+              <tr>
+                <td><kbd className="key-badge">Ctrl</kbd>+<kbd className="key-badge">B</kbd></td>
+                <td>Toggle page bookmark</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* About Clio */}
+        <div className="settings-section">
+          <h2 className="settings-section-title">About Clio</h2>
+          <p className="settings-section-desc">
+            Clio is a local-first, offline-capable document library, reader, and conversion workbench.
+            Native tools (Pandoc and Poppler) run locally without sending any data over the network.
+          </p>
+        </div>
+      </div>
     </section>
   );
 }
@@ -52,6 +173,37 @@ function App() {
   const [view, setView] = useState<AppView>("library");
   const [readerDocument, setReaderDocument] = useState<ReaderDocument | null>(null);
   const [readerOpenError, setReaderOpenError] = useState("");
+  const [appTheme, setAppTheme] = useState<AppTheme>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("clio-app-theme");
+        if (saved === "light" || saved === "dark" || saved === "system") {
+          return saved;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return "system";
+  });
+
+  function handleThemeChange(nextTheme: AppTheme) {
+    setAppTheme(nextTheme);
+    try {
+      localStorage.setItem("clio-app-theme", nextTheme);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (appTheme === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", appTheme);
+    }
+  }, [appTheme]);
   const [roots, setRoots] = useState<LibraryRoot[]>([]);
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -310,7 +462,15 @@ function App() {
         )}
         {view === "reader" && <><div className="reader-open-error-wrap">{readerOpenError && <p className="reader-open-error" role="alert">{readerOpenError}</p>}</div><ReaderShell document={readerDocument} onOpen={() => void chooseReaderDocument()} openDisabled={libraryPending || readerPending} /></>}
         {view === "tools" && <ConversionWorkspace />}
-        {view === "settings" && <PlaceholderView title="Settings will stay local." description="Reader preferences, storage permissions, and application behavior will live here as Clio grows." />}
+        {view === "settings" && (
+          <SettingsView
+            appTheme={appTheme}
+            onThemeChange={handleThemeChange}
+            rootCount={roots.length}
+            docCount={documents.length}
+            collectionCount={collections.length}
+          />
+        )}
       </main>
       <footer className="app-footer"><span>Clio · local document workbench</span><span>Files stay in directories you control</span></footer>
     </div>
