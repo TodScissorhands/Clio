@@ -6,6 +6,8 @@ use std::{
 };
 use uuid::Uuid;
 
+// ─── Domain types ─────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationKind {
@@ -13,7 +15,13 @@ pub enum OperationKind {
     ExtractText,
     MergePdf,
     ExtractPages,
+    /// Architecture placeholder. No native tool provides reliable per-page
+    /// rotation on this host without an inappropriate external dependency
+    /// (qpdf not installed; gs selective rotation is unreliable).
+    /// Registered in the registry only when a suitable backend is available.
+    RotatePages,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConversionEngine {
@@ -52,11 +60,20 @@ pub enum JobStatus {
     Failed,
 }
 
+/// A validated, immutable description of work to perform.
+///
+/// All paths stored here are canonical. The backend never blindly trusts
+/// frontend-supplied fields at execution time; `execute_job` re-validates
+/// the job against the current file system and capability registry before
+/// touching any file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversionJob {
     pub id: String,
+    /// Canonical path of the primary source file.
     pub source_path: String,
+    /// Canonical paths of all source files (populated for merge; mirrors
+    /// `source_path` for single-source operations).
     #[serde(default)]
     pub source_paths: Vec<String>,
     pub source_format: String,
@@ -70,6 +87,12 @@ pub struct ConversionJob {
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_selection: Option<Vec<u32>>,
+    /// When `false` (the default), execution is rejected if the output file
+    /// already exists and is not the same file as any source. When `true`,
+    /// an existing unrelated output file is replaced. Source/output aliasing
+    /// is always rejected regardless of this flag.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,12 +101,15 @@ pub struct ConversionJob {
 pub struct PageSelection {
     pub pages: Vec<u32>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversionResult {
     pub output_path: String,
     pub engine: String,
 }
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
 pub fn normalize_format(format_or_ext: &str) -> String {
     let trimmed = format_or_ext
@@ -104,6 +130,8 @@ pub fn is_tool_installed(tool: &str) -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+// ─── Capability Registry ──────────────────────────────────────────────────────
 
 pub struct CapabilityRegistry {
     capabilities: Vec<ConversionCapability>,
@@ -145,6 +173,11 @@ impl CapabilityRegistry {
                 description: "Extract page range or selection into a new PDF".into(),
             });
         }
+
+        // RotatePages: NOT registered. qpdf is not installed on this host and
+        // gs per-page selective rotation is unreliable. The variant exists in
+        // OperationKind so the architecture is ready, but no capability is
+        // advertised until a reliable backend (e.g. qpdf) is available.
 
         // 1. PDF conversions
         // PDF -> TXT: direct extraction via Poppler
@@ -220,6 +253,7 @@ impl CapabilityRegistry {
                     && c.target_format == tgt
                     && c.operation != OperationKind::MergePdf
                     && c.operation != OperationKind::ExtractPages
+                    && c.operation != OperationKind::RotatePages
             })
             .cloned()
     }
@@ -254,6 +288,7 @@ impl CapabilityRegistry {
                 c.source_format == src
                     && c.operation != OperationKind::MergePdf
                     && c.operation != OperationKind::ExtractPages
+                    && c.operation != OperationKind::RotatePages
             })
             .map(|c| c.target_format.clone())
             .collect();
@@ -262,6 +297,8 @@ impl CapabilityRegistry {
         targets
     }
 }
+
+// ─── Path helpers ─────────────────────────────────────────────────────────────
 
 fn canonical_regular_file(path: &Path) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path)
@@ -282,7 +319,6 @@ fn extension_from_path(path: &Path) -> String {
 }
 
 fn timestamp() -> String {
-    // Standard ISO 8601 UTC timestamp approximation
     let now = std::time::SystemTime::now();
     let duration = now
         .duration_since(std::time::UNIX_EPOCH)
@@ -311,21 +347,45 @@ fn civil_date(days: i64) -> (i64, i64, i64) {
     (year, m, d)
 }
 
-fn validate_output_destination(input: &Path, output: &Path) -> Result<(), String> {
-    if input == output {
-        return Err("Choose a different location for the converted file.".into());
-    }
-
-    // Check canonical equality if output already exists
-    if output.exists() {
-        if let (Ok(can_in), Ok(can_out)) = (fs::canonicalize(input), fs::canonicalize(output)) {
-            if can_in == can_out {
-                return Err("Choose a different location for the converted file.".into());
+/// Validate that `output` is a safe destination for a job whose inputs include
+/// `inputs`.
+///
+/// Rules (in priority order):
+/// 1. The output path must never be the same canonical file as any input —
+///    this is an unconditional rejection regardless of the overwrite flag.
+/// 2. If the output already exists and `overwrite` is `false`, reject.
+/// 3. The output's parent directory must exist and be a directory.
+fn validate_output_path(inputs: &[&Path], output: &Path, overwrite: bool) -> Result<(), String> {
+    // Rule 1: source/output alias is always forbidden
+    for &input in inputs {
+        // Compare by string first (fast, works when output doesn't exist yet)
+        if input == output {
+            return Err(
+                "Output path is the same as a source file. Choose a different destination.".into(),
+            );
+        }
+        // Compare canonical paths when both exist
+        if output.exists() {
+            if let (Ok(can_in), Ok(can_out)) = (fs::canonicalize(input), fs::canonicalize(output)) {
+                if can_in == can_out {
+                    return Err(
+                        "Output path is the same as a source file. Choose a different destination."
+                            .into(),
+                    );
+                }
             }
         }
     }
 
-    // Verify output parent directory exists and is accessible
+    // Rule 2: overwrite guard
+    if output.exists() && !overwrite {
+        return Err(format!(
+            "Output file already exists: {}. Enable overwrite to replace it.",
+            output.display()
+        ));
+    }
+
+    // Rule 3: parent directory must exist
     let parent = output
         .parent()
         .ok_or_else(|| "Invalid output destination path.".to_string())?;
@@ -339,6 +399,13 @@ fn validate_output_destination(input: &Path, output: &Path) -> Result<(), String
     Ok(())
 }
 
+/// Planner-time validation: checks only source/output aliasing and parent
+/// directory existence. The "output already exists" check is deferred to
+/// execution time, where the job's actual `overwrite` flag is applied.
+fn validate_output_destination(input: &Path, output: &Path) -> Result<(), String> {
+    validate_output_path(&[input], output, true)
+}
+
 fn run_command(command: &mut Command, tool: &str) -> Result<(), String> {
     let output = command
         .output()
@@ -348,7 +415,7 @@ fn run_command(command: &mut Command, tool: &str) -> Result<(), String> {
     }
     let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(format!(
-        "{tool} could not convert this file{}",
+        "{tool} could not process this file{}",
         if details.is_empty() {
             ".".into()
         } else {
@@ -357,14 +424,16 @@ fn run_command(command: &mut Command, tool: &str) -> Result<(), String> {
     ))
 }
 
+// ─── Temporary file helpers ───────────────────────────────────────────────────
+
 struct TempFileGuard {
     path: PathBuf,
 }
 
 impl TempFileGuard {
     fn new(prefix: &str, ext: &str) -> Self {
-        let unique_name = format!("{prefix}-{}.{ext}", Uuid::new_v4());
-        let path = std::env::temp_dir().join(unique_name);
+        let name = format!("{prefix}-{}.{ext}", Uuid::new_v4());
+        let path = std::env::temp_dir().join(name);
         Self { path }
     }
 
@@ -406,6 +475,8 @@ impl Drop for TempDirGuard {
         }
     }
 }
+
+// ─── PDF utilities ────────────────────────────────────────────────────────────
 
 pub fn get_pdf_page_count(path: &Path) -> Result<u32, String> {
     let output = Command::new("pdfinfo")
@@ -511,11 +582,20 @@ pub fn parse_page_selection(input: &str, max_pages: u32) -> Result<Vec<u32>, Str
     Ok(pages)
 }
 
+// ─── Job planners ─────────────────────────────────────────────────────────────
+
+/// Plan a single-source format conversion job.
+///
+/// `overwrite` controls whether execution is allowed to replace an existing
+/// output file. The planner itself always rejects source/output aliasing and
+/// invalid output directories; it only defers the "output exists" check to
+/// execution time when `overwrite` might be true.
 pub fn plan_job(
     registry: &CapabilityRegistry,
     source_path_str: &str,
     target_format_str: &str,
     output_path_opt: Option<&str>,
+    overwrite: bool,
 ) -> Result<ConversionJob, String> {
     let source_path = Path::new(source_path_str);
     let canonical_source = canonical_regular_file(source_path)?;
@@ -550,6 +630,8 @@ pub fn plan_job(
         }
     };
 
+    // Always reject source/output aliasing and missing parent at plan time.
+    // The overwrite check (output exists) is enforced at execute time.
     validate_output_destination(&canonical_source, &output_path)?;
 
     let source_path_str = canonical_source.to_string_lossy().into_owned();
@@ -567,13 +649,16 @@ pub fn plan_job(
         created_at: timestamp(),
         completed_at: None,
         page_selection: None,
+        overwrite,
     })
 }
 
+/// Plan a PDF merge job from multiple source files.
 pub fn plan_merge_job(
     registry: &CapabilityRegistry,
     source_paths_slice: &[String],
     output_path_opt: Option<&str>,
+    overwrite: bool,
 ) -> Result<ConversionJob, String> {
     if source_paths_slice.len() < 2 {
         return Err("PDF merge requires at least 2 source PDF files.".into());
@@ -625,7 +710,7 @@ pub fn plan_merge_job(
         }
     };
 
-    // Validate output destination does not alias or overwrite any input
+    // Always reject source/output aliasing and missing parent at plan time.
     for input in &canonical_sources {
         validate_output_destination(input, &output_path)?;
     }
@@ -650,14 +735,17 @@ pub fn plan_merge_job(
         created_at: timestamp(),
         completed_at: None,
         page_selection: None,
+        overwrite,
     })
 }
 
+/// Plan a PDF page extraction job.
 pub fn plan_extract_pages_job(
     registry: &CapabilityRegistry,
     source_path_str: &str,
     pages: &[u32],
     output_path_opt: Option<&str>,
+    overwrite: bool,
 ) -> Result<ConversionJob, String> {
     if pages.is_empty() {
         return Err("No pages selected for extraction.".into());
@@ -693,7 +781,8 @@ pub fn plan_extract_pages_job(
     let capability = registry
         .find_capability_for_operation("pdf", "pdf", OperationKind::ExtractPages)
         .ok_or_else(|| {
-            "PDF page extraction capability is not available on this system (requires Poppler pdfseparate, pdfunite, and pdfinfo)."
+            "PDF page extraction capability is not available on this system \
+             (requires Poppler pdfseparate, pdfunite, and pdfinfo)."
                 .to_string()
         })?;
 
@@ -730,33 +819,196 @@ pub fn plan_extract_pages_job(
         created_at: timestamp(),
         completed_at: None,
         page_selection: Some(pages.to_vec()),
+        overwrite,
     })
 }
 
-pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
-    let output = Path::new(&job.output_path);
+// ─── Job execution ────────────────────────────────────────────────────────────
 
-    let inputs: Vec<PathBuf> = if job.source_paths.is_empty() {
+/// Execute a conversion job.
+///
+/// # Security model
+///
+/// The WebView can supply a `ConversionJob` to the Tauri command boundary.
+/// This function MUST NOT blindly trust the frontend-supplied job fields.
+/// Before any file operation begins, it:
+///
+/// 1. Re-canonicalizes every source path and verifies each is a regular file.
+/// 2. Verifies the operation and engine match a registered capability on the
+///    current host.
+/// 3. Re-validates the output path (existence, aliasing, parent directory).
+/// 4. For page-selection operations, re-validates the selection against the
+///    current page count of the document.
+///
+/// This means a tampered or stale job cannot force an unsupported operation,
+/// reach an unexpected output path, or bypass the overwrite policy.
+pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
+    let validation_result = validate_and_prepare_job(job);
+    let (canonical_inputs, output_buf) = match validation_result {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            job.status = JobStatus::Failed;
+            job.error = Some(err.clone());
+            job.completed_at = Some(timestamp());
+            return Err(err);
+        }
+    };
+
+    job.status = JobStatus::Running;
+
+    let result = execute_operation(job, &canonical_inputs, &output_buf);
+
+    job.completed_at = Some(timestamp());
+    match result {
+        Ok(()) => {
+            job.status = JobStatus::Completed;
+            job.error = None;
+            Ok(())
+        }
+        Err(err) => {
+            job.status = JobStatus::Failed;
+            job.error = Some(err.clone());
+            Err(err)
+        }
+    }
+}
+
+fn validate_and_prepare_job(job: &ConversionJob) -> Result<(Vec<PathBuf>, PathBuf), String> {
+    // ── Step 1: Validate and re-canonicalize source paths ─────────────────
+    let raw_inputs: Vec<PathBuf> = if job.source_paths.is_empty() {
         vec![PathBuf::from(&job.source_path)]
     } else {
         job.source_paths.iter().map(PathBuf::from).collect()
     };
 
-    for input in &inputs {
-        validate_output_destination(input, output)?;
+    let mut canonical_inputs: Vec<PathBuf> = Vec::with_capacity(raw_inputs.len());
+    for raw in &raw_inputs {
+        let canonical = canonical_regular_file(raw)
+            .map_err(|e| format!("Source file is no longer accessible: {e}"))?;
+        canonical_inputs.push(canonical);
     }
 
-    job.status = JobStatus::Running;
+    // ── Step 2: Validate capability exists on this host ───────────────────
+    let registry = CapabilityRegistry::new();
+    let source_format = normalize_format(&job.source_format);
+    let target_format = normalize_format(&job.target_format);
 
-    let result = match job.operation {
+    // Every operation except Convert requires a specific capability lookup.
+    match job.operation {
+        OperationKind::MergePdf => {
+            registry
+                .find_capability_for_operation(
+                    &source_format,
+                    &target_format,
+                    OperationKind::MergePdf,
+                )
+                .ok_or_else(|| {
+                    "PDF merge capability is not available on this system.".to_string()
+                })?;
+        }
         OperationKind::ExtractPages => {
-            let pages = job
-                .page_selection
-                .as_ref()
-                .ok_or_else(|| "Page selection is missing from extract-pages job.".to_string())?;
-            if pages.is_empty() {
-                return Err("No pages selected for extraction.".to_string());
+            registry
+                .find_capability_for_operation(
+                    &source_format,
+                    &target_format,
+                    OperationKind::ExtractPages,
+                )
+                .ok_or_else(|| {
+                    "PDF page extraction capability is not available on this system.".to_string()
+                })?;
+        }
+        OperationKind::ExtractText | OperationKind::Convert => {
+            registry
+                .find_capability(&source_format, &target_format)
+                .ok_or_else(|| {
+                    format!(
+                        "No conversion capability available from .{source_format} to .{target_format}."
+                    )
+                })?;
+        }
+        OperationKind::RotatePages => {
+            return Err("PDF page rotation is not supported on this system. \
+                 qpdf is required but not installed."
+                .to_string());
+        }
+    }
+
+    // Validate that the engine matches the operation (prevents frontend from
+    // swapping engines to reach unintended code paths).
+    let expected_engine = match job.operation {
+        OperationKind::MergePdf | OperationKind::ExtractPages | OperationKind::ExtractText => {
+            ConversionEngine::Poppler
+        }
+        OperationKind::Convert => {
+            // Accept any engine the registry assigned; the capability lookup
+            // above already confirmed a valid engine exists.
+            job.engine
+        }
+        OperationKind::RotatePages => {
+            return Err("RotatePages has no supported engine.".to_string());
+        }
+    };
+    if job.engine != expected_engine && job.operation != OperationKind::Convert {
+        return Err(format!(
+            "Engine mismatch: operation {:?} cannot use engine {:?}.",
+            job.operation, job.engine
+        ));
+    }
+
+    // ── Step 3: Validate output path ──────────────────────────────────────
+    let output = PathBuf::from(&job.output_path);
+    let input_refs: Vec<&Path> = canonical_inputs.iter().map(|p| p.as_path()).collect();
+    validate_output_path(&input_refs, &output, job.overwrite)?;
+
+    // ── Step 4: Operation-specific parameter validation ───────────────────
+    if job.operation == OperationKind::ExtractPages {
+        let pages = job
+            .page_selection
+            .as_ref()
+            .ok_or_else(|| "Page selection is missing from extract-pages job.".to_string())?;
+        if pages.is_empty() {
+            return Err("No pages selected for extraction.".to_string());
+        }
+        // Re-validate page selection against the actual current document.
+        let source = &canonical_inputs[0];
+        let max_pages = get_pdf_page_count(source)?;
+        let mut seen = std::collections::HashSet::new();
+        for &p in pages {
+            if p == 0 {
+                return Err("Page numbers are 1-based; page 0 is invalid.".to_string());
             }
+            if p > max_pages {
+                return Err(format!(
+                    "Page {p} exceeds document's current page count ({max_pages})."
+                ));
+            }
+            if !seen.insert(p) {
+                return Err(format!("Duplicate page {p} in page selection."));
+            }
+        }
+    }
+
+    // For MergePdf validate no duplicate canonical sources
+    if job.operation == OperationKind::MergePdf {
+        let mut seen = std::collections::HashSet::new();
+        for c in &canonical_inputs {
+            if !seen.insert(c.clone()) {
+                return Err(format!("Duplicate source file detected: {}", c.display()));
+            }
+        }
+        if canonical_inputs.len() < 2 {
+            return Err("PDF merge requires at least 2 source files.".to_string());
+        }
+    }
+
+    Ok((canonical_inputs, output))
+}
+
+/// Inner: performs the actual file operation. Called only after full validation.
+fn execute_operation(job: &ConversionJob, inputs: &[PathBuf], output: &Path) -> Result<(), String> {
+    match job.operation {
+        OperationKind::ExtractPages => {
+            let pages = job.page_selection.as_ref().unwrap(); // validated above
 
             let temp_dir_guard = TempDirGuard::new("clio-extract")?;
             let temp_dir = temp_dir_guard.path();
@@ -784,6 +1036,7 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
                 fs::copy(&generated_page, output)
                     .map_err(|e| format!("Could not write extracted PDF output: {e}"))?;
             } else {
+                // Extract unique pages (deduplication already validated, this is a safety net)
                 let mut unique_pages = pages.clone();
                 unique_pages.sort_unstable();
                 unique_pages.dedup();
@@ -801,6 +1054,7 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
                     run_command(&mut cmd, "Poppler (pdfseparate)")?;
                 }
 
+                // Assemble in the requested order (which may differ from sort order)
                 let mut cmd = Command::new("pdfunite");
                 for &p in pages {
                     let page_file = temp_dir.join(format!("page_{p}_{p}.pdf"));
@@ -813,16 +1067,19 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
                 run_command(&mut cmd, "Poppler (pdfunite)")?;
             }
 
+            // temp_dir_guard drops here → temp directory and all fragments cleaned up
             Ok(())
         }
+
         OperationKind::MergePdf => {
             let mut cmd = Command::new("pdfunite");
-            for input in &inputs {
+            for input in inputs {
                 cmd.arg(input);
             }
             cmd.arg(output);
             run_command(&mut cmd, "Poppler (pdfunite)")
         }
+
         OperationKind::ExtractText => {
             let input = &inputs[0];
             run_command(
@@ -830,6 +1087,7 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
                 "Poppler (pdftotext)",
             )
         }
+
         OperationKind::Convert => match job.engine {
             ConversionEngine::Poppler => {
                 let input = &inputs[0];
@@ -859,25 +1117,17 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
                         .arg(output),
                     "Pandoc",
                 )
+                // temp_guard drops here → intermediate txt cleaned up
             }
         },
-    };
-    job.completed_at = Some(timestamp());
-    match result {
-        Ok(()) => {
-            job.status = JobStatus::Completed;
-            job.error = None;
-            Ok(())
-        }
-        Err(err) => {
-            job.status = JobStatus::Failed;
-            job.error = Some(err.clone());
-            Err(err)
+
+        OperationKind::RotatePages => {
+            Err("PDF page rotation is not supported on this system.".to_string())
         }
     }
 }
 
-// ─── Tauri Command Handlers ──────────────────────────────────────────────────
+// ─── Tauri Command Handlers ───────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn conversion_capabilities(
@@ -892,6 +1142,7 @@ pub fn conversion_plan_job(
     source_path: String,
     target_format: String,
     output_path: Option<String>,
+    overwrite: Option<bool>,
 ) -> Result<ConversionJob, String> {
     let registry = CapabilityRegistry::new();
     plan_job(
@@ -899,6 +1150,7 @@ pub fn conversion_plan_job(
         &source_path,
         &target_format,
         output_path.as_deref(),
+        overwrite.unwrap_or(false),
     )
 }
 
@@ -906,9 +1158,15 @@ pub fn conversion_plan_job(
 pub fn conversion_plan_merge_job(
     source_paths: Vec<String>,
     output_path: Option<String>,
+    overwrite: Option<bool>,
 ) -> Result<ConversionJob, String> {
     let registry = CapabilityRegistry::new();
-    plan_merge_job(&registry, &source_paths, output_path.as_deref())
+    plan_merge_job(
+        &registry,
+        &source_paths,
+        output_path.as_deref(),
+        overwrite.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -934,6 +1192,7 @@ pub fn conversion_plan_extract_pages_job(
     source_path: String,
     page_selection: Vec<u32>,
     output_path: Option<String>,
+    overwrite: Option<bool>,
 ) -> Result<ConversionJob, String> {
     let registry = CapabilityRegistry::new();
     plan_extract_pages_job(
@@ -941,9 +1200,15 @@ pub fn conversion_plan_extract_pages_job(
         &source_path,
         &page_selection,
         output_path.as_deref(),
+        overwrite.unwrap_or(false),
     )
 }
 
+/// Execute a previously planned job.
+///
+/// The job fields supplied by the frontend are fully re-validated inside
+/// `execute_job` before any file operations occur. The frontend cannot
+/// bypass the planner's security checks by submitting a crafted job.
 #[tauri::command]
 pub fn conversion_execute_job(mut job: ConversionJob) -> Result<ConversionJob, String> {
     execute_job(&mut job)?;
@@ -957,7 +1222,13 @@ pub fn convert_document(
     output_format: String,
 ) -> Result<ConversionResult, String> {
     let registry = CapabilityRegistry::new();
-    let mut job = plan_job(&registry, &input_path, &output_format, Some(&output_path))?;
+    let mut job = plan_job(
+        &registry,
+        &input_path,
+        &output_format,
+        Some(&output_path),
+        false,
+    )?;
     execute_job(&mut job)?;
     Ok(ConversionResult {
         output_path: job.output_path,
@@ -965,7 +1236,7 @@ pub fn convert_document(
     })
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -975,12 +1246,18 @@ mod tests {
     fn test_capability_registry_initialization_and_filtering() {
         let registry = CapabilityRegistry::new();
 
-        // 1. All capabilities list
+        // 1. All capabilities list is non-empty
         let all = registry.list_capabilities(None);
         assert!(!all.is_empty());
 
-        // 2. Filter by PDF: txt (extract-text), md/html/docx/odt/epub (poppler-pandoc), plus
-        //    merge (pdfunite) and extract-pages (pdfseparate+pdfunite+pdfinfo) when available.
+        // 2. RotatePages is never advertised (no backend on this host)
+        assert!(
+            all.iter()
+                .all(|c| c.operation != OperationKind::RotatePages),
+            "RotatePages must not appear in capabilities without qpdf"
+        );
+
+        // 3. Filter by PDF: txt + 5×convert + merge? + extract-pages?
         let pdf_caps = registry.list_capabilities(Some("pdf"));
         let extract_pages_available = is_tool_installed("pdfseparate")
             && is_tool_installed("pdfunite")
@@ -991,12 +1268,10 @@ mod tests {
             } else {
                 7
             }
+        } else if extract_pages_available {
+            7
         } else {
-            if extract_pages_available {
-                7
-            } else {
-                6
-            }
+            6
         };
         assert_eq!(pdf_caps.len(), expected_pdf_caps);
         if is_tool_installed("pdfunite") {
@@ -1011,6 +1286,8 @@ mod tests {
             assert!(extract_cap.is_some());
             assert_eq!(extract_cap.unwrap().operation, OperationKind::ExtractPages);
         }
+
+        // 4. Manipulation ops do not appear in supported_targets_for
         let targets = registry.supported_targets_for("pdf");
         assert!(targets.contains(&"txt".to_string()));
         assert!(targets.contains(&"md".to_string()));
@@ -1019,6 +1296,7 @@ mod tests {
         assert!(targets.contains(&"odt".to_string()));
         assert!(targets.contains(&"epub".to_string()));
         assert!(!targets.contains(&"pdf".to_string())); // No identity or self-convert
+
         let md_caps = registry.list_capabilities(Some(".MD")); // Case and leading dot normalized
         assert_eq!(md_caps.len(), 5);
         let md_targets = registry.supported_targets_for("md");
@@ -1027,7 +1305,7 @@ mod tests {
         assert!(!md_targets.contains(&"md".to_string())); // No md -> md
         assert!(!md_targets.contains(&"pdf".to_string())); // No unbacked pdf output
 
-        // 4. Unsupported source
+        // 5. Unsupported source
         let unknown = registry.list_capabilities(Some("xyz"));
         assert!(unknown.is_empty());
         assert!(!registry.is_supported_source("xyz"));
@@ -1051,34 +1329,59 @@ mod tests {
         fs::write(&source_file, b"# Test Markdown").expect("write sample");
 
         // 1. Valid plan with auto-generated output path
-        let job =
-            plan_job(&registry, &source_file.to_string_lossy(), "html", None).expect("plan job");
-
+        let job = plan_job(
+            &registry,
+            &source_file.to_string_lossy(),
+            "html",
+            None,
+            false,
+        )
+        .expect("plan job");
         assert_eq!(job.source_format, "md");
         assert_eq!(job.target_format, "html");
         assert_eq!(job.engine, ConversionEngine::Pandoc);
         assert_eq!(job.status, JobStatus::Planned);
         assert!(job.output_path.ends_with("sample.html"));
+        assert!(!job.overwrite);
 
-        // 2. Reject unsupported target (e.g. md -> pdf which has no pdf engine)
-        let unbacked = plan_job(&registry, &source_file.to_string_lossy(), "pdf", None);
+        // 2. Plan with overwrite=true propagates the flag
+        let job_ow = plan_job(
+            &registry,
+            &source_file.to_string_lossy(),
+            "html",
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(job_ow.overwrite);
+
+        // 3. Reject unsupported target (e.g. md -> pdf which has no pdf engine)
+        let unbacked = plan_job(
+            &registry,
+            &source_file.to_string_lossy(),
+            "pdf",
+            None,
+            false,
+        );
         assert!(unbacked.is_err());
 
-        // 3. Reject same input and output path
+        // 4. Reject same input and output path
         let same_path = plan_job(
             &registry,
             &source_file.to_string_lossy(),
             "html",
             Some(&source_file.to_string_lossy()),
+            false,
         );
         assert!(same_path.is_err());
 
-        // 4. Reject non-existent source
+        // 5. Reject non-existent source
         let non_existent = plan_job(
             &registry,
             &temp_dir.join("missing.md").to_string_lossy(),
             "html",
             None,
+            false,
         );
         assert!(non_existent.is_err());
 
@@ -1093,8 +1396,364 @@ mod tests {
             assert!(guard.path().exists());
             guard.path().to_path_buf()
         }; // guard drops here
-
         assert!(!path.exists(), "temp file must be deleted on drop");
+    }
+
+    #[test]
+    fn test_temp_dir_guard_cleanup() {
+        let (dir_path, file_path) = {
+            let guard = TempDirGuard::new("clio-test-dir-guard").expect("create temp dir");
+            let fpath = guard.path().join("inner.txt");
+            fs::write(&fpath, b"content").expect("write inner file");
+            assert!(guard.path().exists());
+            assert!(fpath.exists());
+            (guard.path().to_path_buf(), fpath)
+        }; // guard drops here
+        assert!(!dir_path.exists(), "temp dir must be removed on drop");
+        assert!(!file_path.exists(), "files inside temp dir must be removed");
+    }
+
+    // ── Overwrite policy ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_overwrite_policy() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-ow-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let input = temp_dir.join("input.txt");
+        let output = temp_dir.join("output.txt");
+        fs::write(&input, b"input").expect("write input");
+
+        // 1. Output does not exist → always allowed
+        assert!(validate_output_path(&[input.as_path()], &output, false).is_ok());
+        assert!(validate_output_path(&[input.as_path()], &output, true).is_ok());
+
+        // 2. Output exists + overwrite=false → rejected
+        fs::write(&output, b"existing").expect("write existing output");
+        let err = validate_output_path(&[input.as_path()], &output, false);
+        assert!(
+            err.is_err(),
+            "must reject existing output when overwrite=false"
+        );
+        assert!(err.unwrap_err().contains("already exists"));
+
+        // 3. Output exists + overwrite=true → allowed
+        assert!(validate_output_path(&[input.as_path()], &output, true).is_ok());
+
+        // 4. Source/output alias → always rejected, even with overwrite=true
+        let alias_err = validate_output_path(&[input.as_path()], &input, true);
+        assert!(
+            alias_err.is_err(),
+            "source/output alias must always be rejected"
+        );
+
+        // 5. Missing parent directory → rejected
+        let missing_parent = temp_dir.join("nonexistent").join("out.txt");
+        assert!(validate_output_path(&[input.as_path()], &missing_parent, false).is_err());
+        assert!(validate_output_path(&[input.as_path()], &missing_parent, true).is_err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_overwrite_through_execute_job() {
+        // This test exercises the overwrite policy through the full execute_job
+        // boundary, using a real Pandoc conversion.
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-ow-exec-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source = temp_dir.join("doc.md");
+        let output = temp_dir.join("doc.html");
+        fs::write(&source, b"# Hello").expect("write source");
+
+        // First run — output absent, overwrite=false → success
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "html",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan");
+        execute_job(&mut job).expect("first execute");
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(output.exists());
+
+        // Second run — output exists, overwrite=false → rejected at execute time
+        let mut job2 = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "html",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan second");
+        let err = execute_job(&mut job2);
+        assert!(
+            err.is_err(),
+            "execute must reject existing output when overwrite=false"
+        );
+        assert_eq!(job2.status, JobStatus::Failed);
+        assert!(job2.error.is_some());
+
+        // Third run — overwrite=true → succeeds
+        let mut job3 = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "html",
+            Some(&output.to_string_lossy()),
+            true,
+        )
+        .expect("plan third");
+        execute_job(&mut job3).expect("overwrite execute");
+        assert_eq!(job3.status, JobStatus::Completed);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    // ── Execution boundary hardening ──────────────────────────────────────────
+
+    #[test]
+    fn test_execute_job_rejects_rotate_pages() {
+        // RotatePages has no capability and must always fail at execute time.
+        let temp_dir = std::env::temp_dir().join(format!("clio-rot-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create");
+        let src = temp_dir.join("s.pdf");
+        fs::write(&src, b"%PDF-1.4 dummy").expect("write");
+
+        let mut job = ConversionJob {
+            id: "fake-rotate".into(),
+            source_path: src.to_string_lossy().into(),
+            source_paths: vec![src.to_string_lossy().into()],
+            source_format: "pdf".into(),
+            target_format: "pdf".into(),
+            output_path: temp_dir.join("out.pdf").to_string_lossy().into(),
+            operation: OperationKind::RotatePages,
+            engine: ConversionEngine::Poppler,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("rotation"));
+        assert_eq!(job.status, JobStatus::Failed);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_execute_job_rejects_nonexistent_source() {
+        let mut job = ConversionJob {
+            id: "test".into(),
+            source_path: "/tmp/clio_nonexistent_source_99999.md".into(),
+            source_paths: vec!["/tmp/clio_nonexistent_source_99999.md".into()],
+            source_format: "md".into(),
+            target_format: "html".into(),
+            output_path: "/tmp/clio_nonexistent_out_99999.html".into(),
+            operation: OperationKind::Convert,
+            engine: ConversionEngine::Pandoc,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job.error.is_some());
+    }
+
+    #[test]
+    fn test_execute_job_rejects_unsupported_operation_engine_combo() {
+        // Submitting a job with Pandoc engine for a MergePdf operation must fail
+        // at the capability re-validation step.
+        let temp_dir = std::env::temp_dir().join(format!("clio-eng-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create");
+        let src = temp_dir.join("s.pdf");
+        fs::write(&src, b"%PDF-1.4").expect("write");
+
+        let mut job = ConversionJob {
+            id: "crafted".into(),
+            source_path: src.to_string_lossy().into(),
+            source_paths: vec![src.to_string_lossy().into(), src.to_string_lossy().into()],
+            source_format: "pdf".into(),
+            target_format: "pdf".into(),
+            output_path: temp_dir.join("out.pdf").to_string_lossy().into(),
+            operation: OperationKind::MergePdf,
+            engine: ConversionEngine::Pandoc, // wrong engine
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    // ── Job lifecycle ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_job_lifecycle_completed() {
+        let registry = CapabilityRegistry::new();
+        let temp_dir = std::env::temp_dir().join(format!("clio-lc-ok-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create");
+
+        let source = temp_dir.join("doc.md");
+        let output = temp_dir.join("doc.html");
+        fs::write(&source, b"# Hello").expect("write");
+
+        let mut job = plan_job(
+            &registry,
+            &source.to_string_lossy(),
+            "html",
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(job.status, JobStatus::Planned);
+        assert!(job.completed_at.is_none());
+
+        execute_job(&mut job).expect("execute");
+
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(job.completed_at.is_some());
+        assert!(job.error.is_none());
+        assert!(output.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_job_lifecycle_failed() {
+        // Force a failure by pointing at a non-existent source.
+        let mut job = ConversionJob {
+            id: "fail".into(),
+            source_path: "/tmp/clio_no_such_source.md".into(),
+            source_paths: vec!["/tmp/clio_no_such_source.md".into()],
+            source_format: "md".into(),
+            target_format: "html".into(),
+            output_path: "/tmp/clio_no_such_output.html".into(),
+            operation: OperationKind::Convert,
+            engine: ConversionEngine::Pandoc,
+            status: JobStatus::Planned,
+            error: None,
+            created_at: timestamp(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+
+        assert_eq!(job.status, JobStatus::Planned);
+        let err = execute_job(&mut job);
+        assert!(err.is_err());
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job.error.is_some(), "failed job must have error message");
+        // completed_at is set even on failure (records when the job ended)
+        assert!(job.completed_at.is_some());
+    }
+
+    // ── Temporary file safety ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_pages_temp_dir_cleaned_up_on_success() {
+        if !is_tool_installed("pdfseparate")
+            || !is_tool_installed("pdfunite")
+            || !is_tool_installed("pdfinfo")
+        {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("clio-tmp-ok-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create");
+        let source = temp_dir.join("source.pdf");
+        fs::write(&source, MINIMAL_PDF).expect("write");
+
+        let output = temp_dir.join("extracted.pdf");
+        let registry = CapabilityRegistry::new();
+        let mut job = plan_extract_pages_job(
+            &registry,
+            &source.to_string_lossy(),
+            &[1],
+            Some(&output.to_string_lossy()),
+            false,
+        )
+        .expect("plan");
+
+        execute_job(&mut job).expect("execute");
+        assert!(output.exists());
+
+        // Count temp dirs created by Clio in /tmp — there should be none
+        // named clio-extract-* after the job completes.
+        let tmp = std::env::temp_dir();
+        let leaked: Vec<_> = fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("clio-extract-") && !name.starts_with("clio-extract-test-")
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "temp extraction dirs must be cleaned up: {:?}",
+            leaked
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    // ── Page selection parser ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_page_selection_valid() {
+        assert_eq!(parse_page_selection("1", 10).unwrap(), vec![1]);
+        assert_eq!(parse_page_selection("10", 10).unwrap(), vec![10]);
+        assert_eq!(parse_page_selection("1-3", 10).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            parse_page_selection("1-3,7,10-12", 20).unwrap(),
+            vec![1, 2, 3, 7, 10, 11, 12]
+        );
+        assert_eq!(parse_page_selection("5,2,8", 10).unwrap(), vec![5, 2, 8]);
+        assert!(parse_page_selection("5-3", 10).is_err());
+        assert_eq!(
+            parse_page_selection(" 1 - 3 , 5 ", 10).unwrap(),
+            vec![1, 2, 3, 5]
+        );
+    }
+
+    #[test]
+    fn test_parse_page_selection_errors() {
+        assert!(parse_page_selection("", 10).is_err());
+        assert!(parse_page_selection("  ", 10).is_err());
+        assert!(parse_page_selection("0", 10).is_err());
+        assert!(parse_page_selection("0-3", 10).is_err());
+        assert!(parse_page_selection("1-0", 10).is_err());
+        assert!(parse_page_selection("11", 10).is_err());
+        assert!(parse_page_selection("8-11", 10).is_err());
+        assert!(parse_page_selection("1-3,2", 10).is_err());
+        assert!(parse_page_selection("5,5", 10).is_err());
+        assert!(parse_page_selection("abc", 10).is_err());
+        assert!(parse_page_selection("1-2-3", 10).is_err());
+        assert!(parse_page_selection(",1", 10).is_err());
+        assert!(parse_page_selection("1,", 10).is_err());
+        assert!(parse_page_selection("-1", 10).is_err());
+        assert!(parse_page_selection("1-", 10).is_err());
     }
 
     const MINIMAL_PDF: &[u8] = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 3 3]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n162\n%%EOF\n";
@@ -1119,12 +1778,11 @@ mod tests {
         fs::write(&p3, MINIMAL_PDF).expect("write p3");
         fs::write(&txt_file, b"not a pdf").expect("write txt");
 
-        // 1. Valid two-file merge planning
         let two_files = vec![
             p1.to_string_lossy().into_owned(),
             p2.to_string_lossy().into_owned(),
         ];
-        let job2 = plan_merge_job(&registry, &two_files, None).expect("plan two-file merge");
+        let job2 = plan_merge_job(&registry, &two_files, None, false).expect("plan two-file merge");
         assert_eq!(job2.operation, OperationKind::MergePdf);
         assert_eq!(job2.engine, ConversionEngine::Poppler);
         assert_eq!(job2.status, JobStatus::Planned);
@@ -1132,48 +1790,54 @@ mod tests {
         assert_eq!(job2.target_format, "pdf");
         assert_eq!(job2.source_paths.len(), 2);
         assert!(job2.output_path.ends_with("doc1-merged.pdf"));
+        assert!(!job2.overwrite);
 
-        // 2. Valid multi-file merge planning (3 files)
         let three_files = vec![
             p1.to_string_lossy().into_owned(),
             p2.to_string_lossy().into_owned(),
             p3.to_string_lossy().into_owned(),
         ];
         let custom_out = temp_dir.join("custom_merged.pdf");
-        let job3 = plan_merge_job(&registry, &three_files, Some(&custom_out.to_string_lossy()))
-            .expect("plan three-file merge");
+        let job3 = plan_merge_job(
+            &registry,
+            &three_files,
+            Some(&custom_out.to_string_lossy()),
+            true,
+        )
+        .expect("plan three-file merge");
         assert_eq!(job3.source_paths.len(), 3);
         assert_eq!(job3.output_path, custom_out.to_string_lossy());
+        assert!(job3.overwrite);
 
-        // 3. Fewer than two inputs rejected
+        // Fewer than two inputs rejected
         let one_file = vec![p1.to_string_lossy().into_owned()];
-        assert!(plan_merge_job(&registry, &one_file, None).is_err());
+        assert!(plan_merge_job(&registry, &one_file, None, false).is_err());
         let zero_files: Vec<String> = vec![];
-        assert!(plan_merge_job(&registry, &zero_files, None).is_err());
+        assert!(plan_merge_job(&registry, &zero_files, None, false).is_err());
 
-        // 4. Non-PDF input rejected
+        // Non-PDF input rejected
         let mixed = vec![
             p1.to_string_lossy().into_owned(),
             txt_file.to_string_lossy().into_owned(),
         ];
-        let res_mixed = plan_merge_job(&registry, &mixed, None);
+        let res_mixed = plan_merge_job(&registry, &mixed, None, false);
         assert!(res_mixed.is_err());
         assert!(res_mixed.unwrap_err().contains("not a PDF"));
 
-        // 5. Duplicate input rejected
+        // Duplicate input rejected
         let dupes = vec![
             p1.to_string_lossy().into_owned(),
             p1.to_string_lossy().into_owned(),
         ];
-        let res_dupes = plan_merge_job(&registry, &dupes, None);
+        let res_dupes = plan_merge_job(&registry, &dupes, None, false);
         assert!(res_dupes.is_err());
         assert!(res_dupes.unwrap_err().contains("Duplicate input"));
 
-        // 6. Input/output canonical collision rejected
-        let collision = plan_merge_job(&registry, &two_files, Some(&p1.to_string_lossy()));
+        // Input/output canonical collision rejected
+        let collision = plan_merge_job(&registry, &two_files, Some(&p1.to_string_lossy()), false);
         assert!(collision.is_err());
 
-        // 7. Missing input rejected
+        // Missing input rejected
         let missing = vec![
             p1.to_string_lossy().into_owned(),
             temp_dir
@@ -1181,13 +1845,19 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         ];
-        assert!(plan_merge_job(&registry, &missing, None).is_err());
+        assert!(plan_merge_job(&registry, &missing, None, false).is_err());
 
-        // 8. Invalid output directory rejected
+        // Invalid output directory rejected
         let bad_out = temp_dir.join("nonexistent_folder").join("out.pdf");
-        assert!(plan_merge_job(&registry, &two_files, Some(&bad_out.to_string_lossy())).is_err());
+        assert!(plan_merge_job(
+            &registry,
+            &two_files,
+            Some(&bad_out.to_string_lossy()),
+            false
+        )
+        .is_err());
 
-        // 9. Integration execution with actual pdfunite
+        // Integration execution with actual pdfunite
         let mut exec_job = job2;
         execute_job(&mut exec_job).expect("execute pdfunite merge");
         assert_eq!(exec_job.status, JobStatus::Completed);
@@ -1195,65 +1865,14 @@ mod tests {
         let meta = fs::metadata(&exec_job.output_path).expect("read merged metadata");
         assert!(meta.len() > 0);
 
+        // Overwrite=false rejects second execution on same output
+        let mut exec_job2 =
+            plan_merge_job(&registry, &three_files, Some(&exec_job.output_path), false)
+                .expect("plan merge 2");
+        assert!(execute_job(&mut exec_job2).is_err());
+        assert_eq!(exec_job2.status, JobStatus::Failed);
+
         let _ = fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn test_parse_page_selection_valid() {
-        // Single page
-        assert_eq!(parse_page_selection("1", 10).unwrap(), vec![1]);
-        assert_eq!(parse_page_selection("10", 10).unwrap(), vec![10]);
-
-        // Range
-        assert_eq!(parse_page_selection("1-3", 10).unwrap(), vec![1, 2, 3]);
-
-        // Multiple items
-        assert_eq!(
-            parse_page_selection("1-3,7,10-12", 20).unwrap(),
-            vec![1, 2, 3, 7, 10, 11, 12]
-        );
-
-        // Arbitrary ordering preserved
-        assert_eq!(parse_page_selection("5,2,8", 10).unwrap(), vec![5, 2, 8]);
-
-        // Reversed ranges are an error (start > end)
-        assert!(parse_page_selection("5-3", 10).is_err());
-
-        // Whitespace tolerance
-        assert_eq!(
-            parse_page_selection(" 1 - 3 , 5 ", 10).unwrap(),
-            vec![1, 2, 3, 5]
-        );
-    }
-
-    #[test]
-    fn test_parse_page_selection_errors() {
-        // Empty input
-        assert!(parse_page_selection("", 10).is_err());
-        assert!(parse_page_selection("  ", 10).is_err());
-
-        // Zero page
-        assert!(parse_page_selection("0", 10).is_err());
-        assert!(parse_page_selection("0-3", 10).is_err());
-        assert!(parse_page_selection("1-0", 10).is_err());
-
-        // Out of range
-        assert!(parse_page_selection("11", 10).is_err());
-        assert!(parse_page_selection("8-11", 10).is_err());
-
-        // Duplicates within ranges
-        assert!(parse_page_selection("1-3,2", 10).is_err());
-
-        // Duplicate single pages
-        assert!(parse_page_selection("5,5", 10).is_err());
-
-        // Malformed
-        assert!(parse_page_selection("abc", 10).is_err());
-        assert!(parse_page_selection("1-2-3", 10).is_err());
-        assert!(parse_page_selection(",1", 10).is_err());
-        assert!(parse_page_selection("1,", 10).is_err());
-        assert!(parse_page_selection("-1", 10).is_err());
-        assert!(parse_page_selection("1-", 10).is_err());
     }
 
     #[test]
@@ -1269,13 +1888,12 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("clio-extract-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
 
-        // Write a minimal valid PDF (1 page) so pdfinfo can read it
         let source = temp_dir.join("source.pdf");
         fs::write(&source, MINIMAL_PDF).expect("write source pdf");
         let source_str = source.to_string_lossy().into_owned();
 
         // 1. Valid single-page plan
-        let job = plan_extract_pages_job(&registry, &source_str, &[1], None)
+        let job = plan_extract_pages_job(&registry, &source_str, &[1], None, false)
             .expect("plan single-page extraction");
         assert_eq!(job.operation, OperationKind::ExtractPages);
         assert_eq!(job.engine, ConversionEngine::Poppler);
@@ -1284,45 +1902,55 @@ mod tests {
         assert_eq!(job.status, JobStatus::Planned);
         assert!(job.page_selection.as_ref().unwrap() == &vec![1u32]);
         assert!(job.output_path.ends_with("source-extracted.pdf"));
+        assert!(!job.overwrite);
 
-        // 2. Custom output path
+        // 2. Custom output path + overwrite
         let custom_out = temp_dir.join("out-custom.pdf");
         let job_custom = plan_extract_pages_job(
             &registry,
             &source_str,
             &[1],
             Some(&custom_out.to_string_lossy()),
+            true,
         )
         .expect("plan custom output");
         assert_eq!(job_custom.output_path, custom_out.to_string_lossy());
+        assert!(job_custom.overwrite);
 
         // 3. Empty pages rejected
-        assert!(plan_extract_pages_job(&registry, &source_str, &[], None).is_err());
+        assert!(plan_extract_pages_job(&registry, &source_str, &[], None, false).is_err());
 
         // 4. Duplicate page rejected
-        assert!(plan_extract_pages_job(&registry, &source_str, &[1, 1], None).is_err());
+        assert!(plan_extract_pages_job(&registry, &source_str, &[1, 1], None, false).is_err());
 
         // 5. Out-of-range page rejected
-        assert!(plan_extract_pages_job(&registry, &source_str, &[999], None).is_err());
+        assert!(plan_extract_pages_job(&registry, &source_str, &[999], None, false).is_err());
 
         // 6. Zero page rejected
-        assert!(plan_extract_pages_job(&registry, &source_str, &[0], None).is_err());
+        assert!(plan_extract_pages_job(&registry, &source_str, &[0], None, false).is_err());
 
         // 7. Non-PDF source rejected
         let txt_file = temp_dir.join("doc.txt");
         fs::write(&txt_file, b"hello").expect("write txt");
         assert!(
-            plan_extract_pages_job(&registry, &txt_file.to_string_lossy(), &[1], None).is_err()
-        );
-
-        // 8. Non-existent source rejected
-        assert!(
-            plan_extract_pages_job(&registry, "/tmp/nonexistent_clio_test.pdf", &[1], None)
+            plan_extract_pages_job(&registry, &txt_file.to_string_lossy(), &[1], None, false)
                 .is_err()
         );
 
+        // 8. Non-existent source rejected
+        assert!(plan_extract_pages_job(
+            &registry,
+            "/tmp/nonexistent_clio_test.pdf",
+            &[1],
+            None,
+            false
+        )
+        .is_err());
+
         // 9. Output/source canonical collision rejected
-        assert!(plan_extract_pages_job(&registry, &source_str, &[1], Some(&source_str)).is_err());
+        assert!(
+            plan_extract_pages_job(&registry, &source_str, &[1], Some(&source_str), false).is_err()
+        );
 
         // 10. Integration: execute actual extraction
         let exec_out = temp_dir.join("exec-out.pdf");
@@ -1331,6 +1959,7 @@ mod tests {
             &source_str,
             &[1],
             Some(&exec_out.to_string_lossy()),
+            false,
         )
         .expect("plan exec job");
         execute_job(&mut exec_job).expect("execute extraction");
@@ -1338,6 +1967,30 @@ mod tests {
         assert!(exec_out.exists());
         let meta = fs::metadata(&exec_out).expect("read extracted metadata");
         assert!(meta.len() > 0);
+
+        // 11. Overwrite=false rejects on existing output
+        let mut exec_job2 = plan_extract_pages_job(
+            &registry,
+            &source_str,
+            &[1],
+            Some(&exec_out.to_string_lossy()),
+            false,
+        )
+        .expect("plan second extraction");
+        assert!(execute_job(&mut exec_job2).is_err());
+        assert_eq!(exec_job2.status, JobStatus::Failed);
+
+        // 12. Overwrite=true succeeds on existing output
+        let mut exec_job3 = plan_extract_pages_job(
+            &registry,
+            &source_str,
+            &[1],
+            Some(&exec_out.to_string_lossy()),
+            true,
+        )
+        .expect("plan third extraction");
+        execute_job(&mut exec_job3).expect("overwrite extraction");
+        assert_eq!(exec_job3.status, JobStatus::Completed);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

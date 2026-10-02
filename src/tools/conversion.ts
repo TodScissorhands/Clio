@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type OperationKind = "convert" | "extract-text" | "merge-pdf" | "extract-pages";
+export type OperationKind =
+  | "convert"
+  | "extract-text"
+  | "merge-pdf"
+  | "extract-pages"
+  | "rotate-pages"; // Architecture placeholder; not yet available on all hosts
 
 export type ConversionEngine = "poppler" | "pandoc" | "poppler-pandoc";
 
@@ -29,6 +34,10 @@ export type ConversionJob = {
   createdAt: string;
   completedAt?: string | null;
   pageSelection?: number[] | null;
+  /** When false (default), execution is rejected if the output file already
+   *  exists. When true, an existing output file is replaced. Source/output
+   *  aliasing is always rejected regardless of this flag. */
+  overwrite: boolean;
 };
 
 export type ConversionResult = {
@@ -77,22 +86,26 @@ export async function listConversionCapabilities(
 export async function planConversionJob(
   sourcePath: string,
   targetFormat: string,
-  outputPath?: string
+  outputPath?: string,
+  overwrite = false
 ): Promise<ConversionJob> {
   return invoke<ConversionJob>("conversion_plan_job", {
     sourcePath,
     targetFormat: targetFormat.toLowerCase().replace(/^\./, ""),
     outputPath: outputPath ?? null,
+    overwrite,
   });
 }
 
 export async function planMergeJob(
   sourcePaths: string[],
-  outputPath?: string
+  outputPath?: string,
+  overwrite = false
 ): Promise<ConversionJob> {
   return invoke<ConversionJob>("conversion_plan_merge_job", {
     sourcePaths,
     outputPath: outputPath ?? null,
+    overwrite,
   });
 }
 
@@ -117,12 +130,14 @@ export async function parsePagesFromRange(
 export async function planExtractPagesJob(
   sourcePath: string,
   pageSelection: number[],
-  outputPath?: string
+  outputPath?: string,
+  overwrite = false
 ): Promise<ConversionJob> {
   return invoke<ConversionJob>("conversion_plan_extract_pages_job", {
     sourcePath,
     pageSelection,
     outputPath: outputPath ?? null,
+    overwrite,
   });
 }
 

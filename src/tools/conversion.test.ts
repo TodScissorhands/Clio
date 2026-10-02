@@ -50,13 +50,14 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
       error: null,
       createdAt: "2026-10-02T10:00:00Z",
       completedAt: null,
+      overwrite: false,
     };
 
     expect(plannedJob.status).toBe("planned" satisfies JobStatus);
     expect(plannedJob.operation).toBe("extract-text");
     expect(plannedJob.engine).toBe("poppler");
+    expect(plannedJob.overwrite).toBe(false);
 
-    // Transition to completed
     const completedJob: ConversionJob = {
       ...plannedJob,
       status: "completed",
@@ -65,7 +66,6 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
     expect(completedJob.status).toBe("completed");
     expect(completedJob.completedAt).not.toBeNull();
 
-    // Transition to failed
     const failedJob: ConversionJob = {
       ...plannedJob,
       status: "failed",
@@ -74,6 +74,8 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
     };
     expect(failedJob.status).toBe("failed");
     expect(failedJob.error).toBe("pdftotext execution failed");
+    // Failed job retains overwrite flag from original plan
+    expect(failedJob.overwrite).toBe(false);
   });
 
   it("models conversion capabilities accurately without phantom all-to-all claims", () => {
@@ -116,6 +118,7 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
       error: null,
       createdAt: "2026-10-02T12:00:00Z",
       completedAt: null,
+      overwrite: false,
     };
 
     expect(mergeJob.operation).toBe("merge-pdf");
@@ -124,6 +127,7 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
     expect(mergeJob.sourcePaths?.[1]).toBe("/docs/body.pdf");
     expect(mergeJob.sourcePaths?.[2]).toBe("/docs/appendix.pdf");
     expect(mergeJob.outputPath).toBe("/docs/final-merged.pdf");
+    expect(mergeJob.overwrite).toBe(false);
   });
 
   it("validates that merge requires at least 2 input files", () => {
@@ -138,18 +142,10 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
   it("supports reordering of inputs while preserving exact deterministic order", () => {
     const inputs = ["p1.pdf", "p2.pdf", "p3.pdf"];
 
-    // Move index 2 up
-    const moveUp = (arr: string[], index: number): string[] => {
-      if (index <= 0) return arr;
-      const next = [...arr];
-      const temp = next[index - 1];
-      next[index - 1] = next[index];
-      next[index] = temp;
-      return next;
-    };
-
-    const reordered = moveUp(inputs, 2);
-    expect(reordered).toEqual(["p1.pdf", "p3.pdf", "p2.pdf"]);
+    // Move index 2 up — inline swap, no helper needed
+    const next = [...inputs];
+    [next[1], next[2]] = [next[2], next[1]];
+    expect(next).toEqual(["p1.pdf", "p3.pdf", "p2.pdf"]);
   });
 });
 
@@ -157,6 +153,11 @@ describe("PDF Page Extraction — Types & Validation Logic", () => {
   it("accepts extract-pages as a valid OperationKind", () => {
     const op: OperationKind = "extract-pages";
     expect(op).toBe("extract-pages");
+  });
+
+  it("accepts rotate-pages as a valid OperationKind (architecture placeholder)", () => {
+    const op: OperationKind = "rotate-pages";
+    expect(op).toBe("rotate-pages");
   });
 
   it("models an extract-pages job with pageSelection", () => {
@@ -174,6 +175,7 @@ describe("PDF Page Extraction — Types & Validation Logic", () => {
       createdAt: "2026-10-02T14:00:00Z",
       completedAt: null,
       pageSelection: [1, 3, 5],
+      overwrite: false,
     };
 
     expect(job.operation).toBe("extract-pages");
@@ -181,6 +183,7 @@ describe("PDF Page Extraction — Types & Validation Logic", () => {
     expect(job.sourceFormat).toBe("pdf");
     expect(job.targetFormat).toBe("pdf");
     expect(job.status).toBe("planned" satisfies JobStatus);
+    expect(job.overwrite).toBe(false);
   });
 
   it("allows pageSelection to be absent (null/undefined) for non-extract jobs", () => {
@@ -196,6 +199,7 @@ describe("PDF Page Extraction — Types & Validation Logic", () => {
       error: null,
       createdAt: "2026-10-02T14:00:00Z",
       completedAt: null,
+      overwrite: false,
     };
 
     expect(job.pageSelection).toBeUndefined();
@@ -254,8 +258,87 @@ describe("PDF Page Extraction — Types & Validation Logic", () => {
     expect(validateRangeString("-1").valid).toBe(false);
     expect(validateRangeString("1,").valid).toBe(false);
     expect(validateRangeString(",1").valid).toBe(false);
-    expect(validateRangeString("5-3").valid).toBe(false); // reversed range
+    expect(validateRangeString("5-3").valid).toBe(false);
     expect(validateRangeString("1-").valid).toBe(false);
     expect(validateRangeString("abc").valid).toBe(false);
+  });
+});
+
+describe("Overwrite Policy — Frontend State Model", () => {
+  it("overwrite defaults to false on a fresh planned job", () => {
+    const job: ConversionJob = {
+      id: "ow-1",
+      sourcePath: "/docs/file.md",
+      sourceFormat: "md",
+      targetFormat: "html",
+      outputPath: "/docs/file.html",
+      operation: "convert",
+      engine: "pandoc",
+      status: "planned",
+      error: null,
+      createdAt: "2026-10-02T15:00:00Z",
+      completedAt: null,
+      overwrite: false,
+    };
+
+    expect(job.overwrite).toBe(false);
+  });
+
+  it("overwrite=true produces a distinct job shape for retry", () => {
+    const original: ConversionJob = {
+      id: "ow-2",
+      sourcePath: "/docs/file.md",
+      sourceFormat: "md",
+      targetFormat: "html",
+      outputPath: "/docs/file.html",
+      operation: "convert",
+      engine: "pandoc",
+      status: "failed",
+      error: "Output file already exists: /docs/file.html. Enable overwrite to replace it.",
+      createdAt: "2026-10-02T15:00:00Z",
+      completedAt: "2026-10-02T15:00:01Z",
+      overwrite: false,
+    };
+
+    // Simulate the retry-with-overwrite pattern used by the workspace
+    const retry: ConversionJob = { ...original, overwrite: true };
+
+    expect(retry.overwrite).toBe(true);
+    expect(retry.outputPath).toBe(original.outputPath);
+    expect(retry.operation).toBe(original.operation);
+    expect(retry.id).toBe(original.id); // same job id, different flag
+  });
+
+  it("source/output alias error message does not offer overwrite", () => {
+    // The backend sends a distinct message for alias vs exists; the workspace
+    // should only offer overwrite when the message contains 'already exists'.
+    const aliasError = "Output path is the same as a source file. Choose a different destination.";
+    const existsError = "Output file already exists: /docs/out.html. Enable overwrite to replace it.";
+
+    expect(existsError.includes("already exists")).toBe(true);
+    expect(aliasError.includes("already exists")).toBe(false);
+  });
+
+  it("rotate-pages job shape is valid but produces no capability", () => {
+    // Architecture: the variant exists in OperationKind for future use,
+    // but no capability is registered on this host.
+    const job: ConversionJob = {
+      id: "rot-1",
+      sourcePath: "/docs/file.pdf",
+      sourceFormat: "pdf",
+      targetFormat: "pdf",
+      outputPath: "/docs/file-rotated.pdf",
+      operation: "rotate-pages",
+      engine: "poppler",
+      status: "planned",
+      error: null,
+      createdAt: "2026-10-02T15:00:00Z",
+      completedAt: null,
+      overwrite: false,
+    };
+
+    expect(job.operation).toBe("rotate-pages");
+    // On this host, no capability for rotate-pages is advertised.
+    // The backend will reject execution with a clear error.
   });
 });

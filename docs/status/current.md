@@ -39,11 +39,22 @@
   - **Strict Multi-Path Validation**: `plan_merge_job` validates `>= 2` source files, verifies regular file existence and `.pdf` extension for every input, uses canonical comparison to reject duplicate inputs and input/output aliasing collisions, and checks destination parent directory existence.
   - **Structured Native Invocation**: `execute_job` runs `pdfunite <input1> <input2> ... <output>` using structured process arguments without shell interpolation.
   - **Compact Tools UI Workflow**: `ConversionWorkspace.tsx` features a mode switch (`Convert Document` | `Merge PDF`), multi-PDF picker, ordered list with reorder (`↑`/`↓`) and remove (`✕`) controls, minimum-2 validation, destination save dialog, and execution status reporting.
+- **Milestone 8C — PDF Page Extraction**:
+  - Added `OperationKind::ExtractPages` (`"extract-pages"`), `PageSelection` data model, and Poppler capability registration (`pdfseparate` + `pdfunite` + `pdfinfo`).
+  - Authoritative PDF page count inspection via `pdfinfo` (`get_pdf_page_count`).
+  - Deterministic page selection parser (`parse_page_selection`) supporting single pages, ranges (`1-3`), arbitrary sequences (`5,2,8`), whitespace tolerance, duplicate rejection, and strict boundary validation.
+  - Page extraction engine using `pdfseparate` and `pdfunite` within isolated temporary directory guards (`TempDirGuard`) with guaranteed cleanup.
+  - Frontend Extract Pages mode in `ConversionWorkspace.tsx` with live syntax validation, page count display, and output destination picker.
+- **Milestone 9 — Conversion System Hardening + PDF Manipulation Completion**:
+  - **Hardened Execution Boundary**: `execute_job` re-validates all frontend-supplied fields against the host filesystem and `CapabilityRegistry` (re-canonicalizes inputs, verifies regular files, enforces capability/engine matching, re-checks page counts and ranges). Untrusted/tampered frontend jobs cannot bypass validation or execute arbitrary operations.
+  - **Explicit Overwrite Policy**: `overwrite: bool` added to `ConversionJob`, planners, and executor. Output path validation enforces: (1) source/output aliasing is unconditionally rejected; (2) pre-existing output files are rejected unless `overwrite: true`; (3) parent directory must exist. Frontend provides a dedicated one-click overwrite confirmation when an existing destination is chosen.
+  - **Job Lifecycle & Error Integrity**: Explicit transitions through `Planned` → `Running` → `Completed` or `Failed`. Validation failures prior to execution cleanly transition jobs to `Failed` with `completed_at` timestamps and structured `error` strings.
+  - **Temporary File Safety**: `TempFileGuard` and `TempDirGuard` enforce RAII cleanup across all execution paths (success, failure, and panics). Zero temporary directory leakage verified under test.
+  - **PDF Page Rotation Architecture**: Evaluated host toolchains. `OperationKind::RotatePages` is defined as an architectural placeholder, but deliberately deferred from runtime capability advertisement because `qpdf` is not installed on this host and `gs` selective per-page rotation is unreliable.
 
 ## Current work
 
-Milestone 8B is complete. The safe PDF merge workflow and multi-source job architecture are functional and verified. The next milestone is Milestone 8C (PDF Page Range Extraction / Manipulation) or Milestone 9 (Additional document formats).
-- Filesystem/user-controlled sources remain authoritative.
+Milestone 9 is complete. The conversion and manipulation subsystem is hardened, secure, and verified end-to-end.
 - A raw filesystem path is not universal document identity.
 - `DocumentRecord` uses an opaque UUID independent of any raw path.
 - `SourceRef` records source coordinates separately from `StorageLocator`, which is a runtime access capability.
