@@ -235,6 +235,7 @@ pub fn run() {
             storage::library_root_remove,
             storage::library_root_scan,
             storage::library_document_list,
+            storage::library_document_path,
             storage::reading_state_get,
             storage::reading_state_set,
             storage::bookmark_create,

@@ -106,6 +106,18 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     setStatus(next);
     setStatusMessage(message ?? "");
   }, []);
+  useEffect(() => {
+    const flushReadingState = () => {
+      void coordinator.flush();
+    };
+    window.addEventListener("beforeunload", flushReadingState);
+    window.addEventListener("pagehide", flushReadingState);
+    return () => {
+      window.removeEventListener("beforeunload", flushReadingState);
+      window.removeEventListener("pagehide", flushReadingState);
+      void coordinator.flush();
+    };
+  }, [coordinator]);
 
   useEffect(() => {
     if (!document) {

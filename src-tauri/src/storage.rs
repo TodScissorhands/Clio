@@ -668,6 +668,16 @@ impl LibraryDb {
             locator: StorageLocator::desktop_session(token),
         })
     }
+    pub fn document_path(&self, document_id: &str) -> Result<String, String> {
+        let document = self
+            .document(document_id)?
+            .ok_or_else(|| "Library document was not found.".to_string())?;
+        if document.availability != "present" {
+            return Err("This library document is missing from its root.".to_string());
+        }
+        let path = canonical_library_path(&document.root_locator, &document.relative_path)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
 
     pub fn set_reading_state(&self, state: ReadingState) -> Result<(), String> {
         state.position.validate()?;
@@ -728,7 +738,9 @@ impl LibraryDb {
             .optional()
             .map_err(db_error)?;
         if known.is_none() {
-            return Err("Document was not found.".to_string());
+            return Err(
+                "Bookmarks are only supported for catalog documents in your library.".to_string(),
+            );
         }
         let id = Uuid::new_v4().to_string();
         let now = timestamp();
@@ -832,7 +844,9 @@ impl LibraryDb {
             .optional()
             .map_err(db_error)?;
         if known.is_none() {
-            return Err("Document was not found.".to_string());
+            return Err(
+                "Annotations are only supported for catalog documents in your library.".to_string(),
+            );
         }
         let id = Uuid::new_v4().to_string();
         let now = timestamp();
@@ -1392,13 +1406,13 @@ impl StorageLocator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SourceRef {
+    #[serde(rename_all = "camelCase")]
     Library {
         root_id: String,
         relative_path: String,
     },
-    Direct {
-        locator: StorageLocator,
-    },
+    #[serde(rename_all = "camelCase")]
+    Direct { locator: StorageLocator },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1721,6 +1735,13 @@ pub fn library_document_list(
     include_missing: Option<bool>,
 ) -> Result<Vec<DocumentDto>, String> {
     db.list_documents(root_id.as_deref(), include_missing.unwrap_or(false))
+}
+#[tauri::command]
+pub fn library_document_path(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+) -> Result<String, String> {
+    db.document_path(&document_id)
 }
 
 #[tauri::command]
@@ -3454,6 +3475,265 @@ mod tests {
             .expect("create bookmark");
         assert_eq!(bookmark.title.as_deref(), Some("65%"));
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_source_ref_serialization_camel_case() {
+        let source = SourceRef::Library {
+            root_id: "root-123".to_string(),
+            relative_path: "docs/guide.pdf".to_string(),
+        };
+        let json = serde_json::to_string(&source).expect("serialize source");
+        assert!(json.contains("\"kind\":\"library\""));
+        assert!(json.contains("\"rootId\":\"root-123\""));
+        assert!(json.contains("\"relativePath\":\"docs/guide.pdf\""));
+        assert!(!json.contains("root_id"));
+        assert!(!json.contains("relative_path"));
+    }
+
+    #[test]
+    fn test_document_path_resolution_and_validation() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-path-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        let file_path = temp_dir.join("test.pdf");
+        fs::write(&file_path, b"%PDF sample").expect("write file");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan");
+        let docs = db.list_documents(Some(&root.id), false).expect("list");
+        assert_eq!(docs.len(), 1);
+
+        let resolved_path = db.document_path(&docs[0].id).expect("resolve path");
+        assert_eq!(Path::new(&resolved_path), file_path.canonicalize().unwrap());
+
+        // Non-existent document
+        assert!(db.document_path("invalid-doc-id").is_err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_non_catalog_document_bookmark_and_annotation_error() {
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let bm_err = db.create_bookmark(
+            "non-catalog-doc",
+            ReadingPosition::PdfPage { page: 1 },
+            None,
+        );
+        assert!(bm_err.is_err());
+        assert!(bm_err
+            .unwrap_err()
+            .contains("Bookmarks are only supported for catalog documents"));
+
+        let ann_err = db.create_annotation(
+            "non-catalog-doc",
+            "highlight",
+            ReadingPosition::PdfPage { page: 1 },
+            Some("text"),
+            None,
+            None,
+        );
+        assert!(ann_err.is_err());
+        assert!(ann_err
+            .unwrap_err()
+            .contains("Annotations are only supported for catalog documents"));
+    }
+
+    #[test]
+    fn test_milestone_13_complete_end_to_end_reliability() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-m13-e2e-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        let db_path = temp_dir.join("library.sqlite3");
+        let docs_dir = temp_dir.join("library_files");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+
+        // 1. Multi-format documents
+        let pdf_file = docs_dir.join("sample.pdf");
+        let epub_file = docs_dir.join("sample.epub");
+        let txt_file = docs_dir.join("sample.txt");
+        let md_file = docs_dir.join("sample.md");
+        let malformed_epub = docs_dir.join("corrupt.epub");
+        let malformed_pdf = docs_dir.join("corrupt.pdf");
+        let unsupported_file = docs_dir.join("archive.xyz");
+
+        fs::write(&pdf_file, b"%PDF-1.4 sample content").expect("write pdf");
+        fs::write(&epub_file, b"PK\x03\x04 fake epub minimal").expect("write epub");
+        fs::write(&txt_file, b"Simple text content").expect("write txt");
+        fs::write(&md_file, b"# Markdown Header\n\nContent").expect("write md");
+        fs::write(&malformed_epub, b"NOT A ZIP AT ALL").expect("write corrupt epub");
+        fs::write(&malformed_pdf, b"NOT A PDF HEADER").expect("write corrupt pdf");
+        fs::write(&unsupported_file, b"some unsupported bytes").expect("write xyz");
+
+        // 2. Open DB, add root, scan
+        let (doc_pdf_id, doc_epub_id, doc_txt_id, _doc_md_id, root_id) = {
+            let db = LibraryDb::open(&db_path).expect("open db session 1");
+            let root = db
+                .add_root(&docs_dir.to_string_lossy(), Some("E2E Test Root"))
+                .expect("add root");
+            let scan = db.scan_root(&root.id).expect("scan");
+            // 6 supported files found (sample.pdf, sample.epub, sample.txt, sample.md, corrupt.epub, corrupt.pdf); archive.xyz ignored
+            assert_eq!(scan.scanned, 6);
+            assert_eq!(scan.inserted, 6);
+            assert_eq!(scan.missing, 0);
+
+            let docs = db.list_documents(Some(&root.id), false).expect("list docs");
+            assert_eq!(docs.len(), 6);
+
+            let p_id = docs
+                .iter()
+                .find(|d| d.name == "sample.pdf")
+                .unwrap()
+                .id
+                .clone();
+            let e_id = docs
+                .iter()
+                .find(|d| d.name == "sample.epub")
+                .unwrap()
+                .id
+                .clone();
+            let t_id = docs
+                .iter()
+                .find(|d| d.name == "sample.txt")
+                .unwrap()
+                .id
+                .clone();
+            let m_id = docs
+                .iter()
+                .find(|d| d.name == "sample.md")
+                .unwrap()
+                .id
+                .clone();
+
+            // 3. Reading state writes in session 1 for all 3 locators
+            db.set_reading_state(ReadingState {
+                document_id: p_id.clone(),
+                position: ReadingPosition::PdfPage { page: 17 },
+                last_opened_at: "2026-10-02T16:00:00Z".to_string(),
+                updated_at: "2026-10-02T16:00:00Z".to_string(),
+            })
+            .expect("set pdf state");
+
+            db.set_reading_state(ReadingState {
+                document_id: e_id.clone(),
+                position: ReadingPosition::EpubCfi {
+                    cfi: "/6/4[chap1]!/4/2/1:0".to_string(),
+                    progression: Some(0.42),
+                },
+                last_opened_at: "2026-10-02T16:05:00Z".to_string(),
+                updated_at: "2026-10-02T16:05:00Z".to_string(),
+            })
+            .expect("set epub state");
+
+            db.set_reading_state(ReadingState {
+                document_id: t_id.clone(),
+                position: ReadingPosition::TextScroll { progression: 0.78 },
+                last_opened_at: "2026-10-02T16:10:00Z".to_string(),
+                updated_at: "2026-10-02T16:10:00Z".to_string(),
+            })
+            .expect("set txt state");
+            // 4. Bookmarks and annotations isolated on PDF document
+            let bm = db
+                .create_bookmark(
+                    &p_id,
+                    ReadingPosition::PdfPage { page: 17 },
+                    Some("Important Section"),
+                )
+                .expect("create bookmark");
+            assert_eq!(bm.title.as_deref(), Some("Important Section"));
+
+            let ann = db
+                .create_annotation(
+                    &p_id,
+                    "highlight",
+                    ReadingPosition::PdfPage { page: 17 },
+                    Some("highlighted text"),
+                    Some("my note"),
+                    Some("{\"page\":17}"),
+                )
+                .expect("create annotation");
+            assert_eq!(ann.selected_text.as_deref(), Some("highlighted text"));
+
+            // Confirm EPUB and TXT documents have ZERO bookmarks/annotations (isolation)
+            assert!(db.list_bookmarks(&e_id).unwrap().is_empty());
+            assert!(db.list_bookmarks(&t_id).unwrap().is_empty());
+            assert!(db.list_annotations(&e_id).unwrap().is_empty());
+            assert!(db.list_annotations(&t_id).unwrap().is_empty());
+
+            // 5. Canonical document path resolution for tools
+            let resolved_pdf_path = db.document_path(&p_id).expect("resolve pdf path");
+            assert_eq!(
+                Path::new(&resolved_pdf_path),
+                pdf_file.canonicalize().unwrap()
+            );
+
+            (p_id, e_id, t_id, m_id, root.id)
+        }; // db session 1 dropped / closed here
+
+        // 6. SIMULATED RESTART: Reopen DB from disk in session 2
+        {
+            let db2 = LibraryDb::open(&db_path).expect("open db session 2 (after restart)");
+
+            // Verify reading states survived restart exactly
+            let p_state = db2
+                .get_reading_state(&doc_pdf_id)
+                .unwrap()
+                .expect("pdf state");
+            match p_state.position {
+                ReadingPosition::PdfPage { page } => assert_eq!(page, 17),
+                _ => panic!("Expected PdfPage"),
+            }
+
+            let e_state = db2
+                .get_reading_state(&doc_epub_id)
+                .unwrap()
+                .expect("epub state");
+            match e_state.position {
+                ReadingPosition::EpubCfi { cfi, progression } => {
+                    assert_eq!(cfi, "/6/4[chap1]!/4/2/1:0");
+                    assert!((progression.unwrap() - 0.42).abs() < 1e-6);
+                }
+                _ => panic!("Expected EpubCfi"),
+            }
+
+            let t_state = db2
+                .get_reading_state(&doc_txt_id)
+                .unwrap()
+                .expect("txt state");
+            match t_state.position {
+                ReadingPosition::TextScroll { progression } => {
+                    assert!((progression - 0.78).abs() < 1e-6);
+                }
+                _ => panic!("Expected TextScroll"),
+            }
+
+            // Verify bookmarks & annotations survived restart
+            let bms = db2.list_bookmarks(&doc_pdf_id).unwrap();
+            assert_eq!(bms.len(), 1);
+            assert_eq!(bms[0].title.as_deref(), Some("Important Section"));
+
+            let anns = db2.list_annotations(&doc_pdf_id).unwrap();
+            assert_eq!(anns.len(), 1);
+            assert_eq!(anns[0].note.as_deref(), Some("my note"));
+
+            // 7. Delete source file & rescan -> missing reconciliation
+            fs::remove_file(&pdf_file).expect("remove pdf");
+            let rescan = db2.scan_root(&root_id).expect("rescan after delete");
+            assert_eq!(rescan.scanned, 5);
+            assert_eq!(rescan.missing, 1);
+
+            let missing_docs = db2.list_documents(Some(&root_id), true).unwrap();
+            let p_doc = missing_docs.iter().find(|d| d.id == doc_pdf_id).unwrap();
+            assert_eq!(p_doc.availability, "missing");
+
+            // Document path fails safely when missing
+            assert!(db2.document_path(&doc_pdf_id).is_err());
+        }
+
+        // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

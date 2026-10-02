@@ -214,6 +214,7 @@ function App() {
   const [libraryPending, setLibraryPending] = useState(false);
   const [readerPending, setReaderPending] = useState(false);
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
+  const [conversionDocument, setConversionDocument] = useState<StoredDocument | null>(null);
   async function loadReadingStatesForDocs(docs: StoredDocument[]) {
     const entries = await Promise.all(
       docs.map(async (doc) => {
@@ -457,11 +458,14 @@ function App() {
             onScan={(rootId) => void scanRoot(rootId)}
             onRemove={(rootId) => void removeRoot(rootId)}
             onOpen={(document) => void openLibraryDocument(document)}
-            onConvert={() => setView("tools")}
+            onConvert={(doc) => {
+              setConversionDocument(doc);
+              setView("tools");
+            }}
           />
         )}
         {view === "reader" && <><div className="reader-open-error-wrap">{readerOpenError && <p className="reader-open-error" role="alert">{readerOpenError}</p>}</div><ReaderShell document={readerDocument} onOpen={() => void chooseReaderDocument()} openDisabled={libraryPending || readerPending} /></>}
-        {view === "tools" && <ConversionWorkspace />}
+        {view === "tools" && <ConversionWorkspace initialDocument={conversionDocument} />}
         {view === "settings" && (
           <SettingsView
             appTheme={appTheme}

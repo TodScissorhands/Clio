@@ -331,3 +331,66 @@ describe("formatReadingProgress", () => {
     expect(formatReadingProgress(undefined)).toBeNull();
   });
 });
+
+describe("filterDocuments regression: selectedRootId scoping", () => {
+  it("correctly scopes documents and preserves format counts under selectedRootId", () => {
+    const rootDocs: StoredDocument[] = [
+      {
+        record: {
+          id: "r1-doc1",
+          name: "Guide.pdf",
+          format: "pdf",
+          sizeBytes: 1000,
+          firstSeenAt: "2026-10-01T00:00:00Z",
+          updatedAt: "2026-10-01T00:00:00Z",
+        },
+        source: { kind: "library", rootId: "root-alpha", relativePath: "Guide.pdf" },
+        availability: "present",
+      },
+      {
+        record: {
+          id: "r1-doc2",
+          name: "Novel.epub",
+          format: "epub",
+          sizeBytes: 2000,
+          firstSeenAt: "2026-10-01T00:00:00Z",
+          updatedAt: "2026-10-01T00:00:00Z",
+        },
+        source: { kind: "library", rootId: "root-alpha", relativePath: "Novel.epub" },
+        availability: "present",
+      },
+      {
+        record: {
+          id: "r2-doc1",
+          name: "Other.pdf",
+          format: "pdf",
+          sizeBytes: 1500,
+          firstSeenAt: "2026-10-01T00:00:00Z",
+          updatedAt: "2026-10-01T00:00:00Z",
+        },
+        source: { kind: "library", rootId: "root-beta", relativePath: "Other.pdf" },
+        availability: "present",
+      },
+    ];
+
+    // When scoped to root-alpha
+    const alphaDocs = filterDocuments(rootDocs, "", "all", "root-alpha");
+    expect(alphaDocs.length).toBe(2);
+    expect(alphaDocs.map((d) => d.record.id)).toEqual(["r1-doc1", "r1-doc2"]);
+
+    // Format counts calculation inside root-alpha
+    const scopedAlpha = rootDocs.filter(
+      (d) => d.source.kind === "library" && d.source.rootId === "root-alpha"
+    );
+    expect(scopedAlpha.length).toBe(2);
+    const pdfCount = scopedAlpha.filter((d) => d.record.format === "pdf").length;
+    const epubCount = scopedAlpha.filter((d) => d.record.format === "epub").length;
+    expect(pdfCount).toBe(1);
+    expect(epubCount).toBe(1);
+
+    // When scoped to root-beta
+    const betaDocs = filterDocuments(rootDocs, "", "all", "root-beta");
+    expect(betaDocs.length).toBe(1);
+    expect(betaDocs[0].record.id).toBe("r2-doc1");
+  });
+});

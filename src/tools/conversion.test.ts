@@ -342,3 +342,79 @@ describe("Overwrite Policy — Frontend State Model", () => {
     // The backend will reject execution with a clear error.
   });
 });
+
+describe("Conversion Capability Filtering Regression (Issue B)", () => {
+  it("strictly filters capabilities to match source format and conversion operations", () => {
+    const sampleCapabilities: ConversionCapability[] = [
+      {
+        sourceFormat: "pdf",
+        targetFormat: "pdf",
+        operation: "merge-pdf",
+        engine: "poppler",
+        label: "PDF Merge",
+        description: "Merge PDFs",
+      },
+      {
+        sourceFormat: "pdf",
+        targetFormat: "pdf",
+        operation: "extract-pages",
+        engine: "poppler",
+        label: "PDF Extract",
+        description: "Extract pages",
+      },
+      {
+        sourceFormat: "pdf",
+        targetFormat: "txt",
+        operation: "extract-text",
+        engine: "poppler",
+        label: "PDF to TXT",
+        description: "Extract text",
+      },
+      {
+        sourceFormat: "epub",
+        targetFormat: "md",
+        operation: "convert",
+        engine: "pandoc",
+        label: "EPUB to MD",
+        description: "Convert epub to md",
+      },
+      {
+        sourceFormat: "epub",
+        targetFormat: "docx",
+        operation: "convert",
+        engine: "pandoc",
+        label: "EPUB to DOCX",
+        description: "Convert epub to docx",
+      },
+      {
+        sourceFormat: "epub",
+        targetFormat: "txt",
+        operation: "convert",
+        engine: "pandoc",
+        label: "EPUB to TXT",
+        description: "Convert epub to txt",
+      },
+    ];
+
+    // For an EPUB document:
+    const normSource = "epub".toLowerCase().replace(/^\./, "");
+    const epubCaps = sampleCapabilities.filter(
+      (c) =>
+        (c.operation === "convert" || c.operation === "extract-text") &&
+        c.sourceFormat.toLowerCase() === normSource
+    );
+
+    const validTargets = epubCaps.map((c) => c.targetFormat);
+    expect(validTargets).toContain("md");
+    expect(validTargets).toContain("docx");
+    expect(validTargets).toContain("txt");
+    expect(validTargets).not.toContain("pdf");
+    expect(validTargets).not.toContain("epub"); // no identity convert
+
+    // If target was set to "pdf", selecting valid target properly clamps:
+    const target = "pdf";
+    const nextTarget = validTargets.includes(target) ? target : validTargets[0];
+    expect(nextTarget).toBe("md");
+    expect(validTargets.includes(nextTarget)).toBe(true);
+  });
+});

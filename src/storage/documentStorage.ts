@@ -111,10 +111,19 @@ function nativeRecord(native: NativeDocument, fallback?: NativeDocument): Docume
 }
 
 function nativeSource(native: NativeDocument, fallbackRootId?: string): SourceRef {
-  const source = native.source ?? native.record?.source;
-  if (source?.kind === "library") return source;
-  const rootId = native.rootId ?? native.record?.rootId ?? fallbackRootId;
-  const relativePath = native.relativePath ?? native.record?.relativePath;
+  const source = (native.source ?? native.record?.source) as Record<string, unknown> | undefined;
+  if (source?.kind === "library") {
+    const rootId = (source.rootId ?? source.root_id ?? native.rootId ?? native.record?.rootId ?? fallbackRootId) as string | undefined;
+    const relativePath = (source.relativePath ?? source.relative_path ?? native.relativePath ?? native.record?.relativePath) as string | undefined;
+    if (rootId && relativePath) {
+      return { kind: "library", rootId, relativePath };
+    }
+  }
+  if (source?.kind === "direct" && source.locator) {
+    return { kind: "direct", locator: source.locator as StorageLocator };
+  }
+  const rootId = (native.rootId ?? native.record?.rootId ?? fallbackRootId) as string | undefined;
+  const relativePath = (native.relativePath ?? native.record?.relativePath) as string | undefined;
   if (!rootId || !relativePath) {
     throw new Error("Library document response did not include a safe library source.");
   }

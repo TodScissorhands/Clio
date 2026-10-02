@@ -152,12 +152,18 @@ export function LibraryView({
   const [newCollectionName, setNewCollectionName] = useState("");
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // Validate active root selection against loaded roots
+  const effectiveRootId = useMemo(() => {
+    if (!selectedRootId) return null;
+    return roots.some((r) => r.id === selectedRootId) ? selectedRootId : null;
+  }, [roots, selectedRootId]);
+
   // Calculate format counts for filter chips within active scope
   const formatCounts = useMemo(() => {
     let scoped = documents;
-    if (selectedRootId) {
+    if (effectiveRootId) {
       scoped = scoped.filter(
-        (d) => d.source.kind === "library" && d.source.rootId === selectedRootId
+        (d) => d.source.kind === "library" && d.source.rootId === effectiveRootId
       );
     }
     if (selectedCollectionId) {
@@ -172,7 +178,7 @@ export function LibraryView({
       else other += 1;
     }
     return { all: scoped.length, pdf, epub, other };
-  }, [documents, selectedRootId, selectedCollectionId]);
+  }, [documents, effectiveRootId, selectedCollectionId]);
 
   // Filter and sort visible documents
   const filteredDocuments = useMemo(() => {
@@ -180,7 +186,7 @@ export function LibraryView({
       documents,
       searchQuery,
       formatFilter,
-      selectedRootId,
+      effectiveRootId,
       selectedCollectionId
     );
     return sortDocuments(matched, sortBy, readingStates);
@@ -188,16 +194,15 @@ export function LibraryView({
     documents,
     searchQuery,
     formatFilter,
-    selectedRootId,
+    effectiveRootId,
     selectedCollectionId,
     sortBy,
     readingStates,
   ]);
 
   const selectedRoot = useMemo(() => {
-    return selectedRootId ? roots.find((r) => r.id === selectedRootId) ?? null : null;
-  }, [roots, selectedRootId]);
-
+    return effectiveRootId ? roots.find((r) => r.id === effectiveRootId) ?? null : null;
+  }, [roots, effectiveRootId]);
   const selectedCollection = useMemo(() => {
     return selectedCollectionId
       ? collections.find((c) => c.id === selectedCollectionId) ?? null

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import type { StoredDocument } from "../storage/domain";
 import {
   executeConversionJob,
   formatDetail,
@@ -39,7 +40,11 @@ function formatBytes(bytes: number) {
 /** Pending job ready to be retried with overwrite=true. */
 type PendingOverwrite = { job: ConversionJob; label: string };
 
-export function ConversionWorkspace() {
+export interface ConversionWorkspaceProps {
+  initialDocument?: StoredDocument | null;
+}
+
+export function ConversionWorkspace({ initialDocument }: ConversionWorkspaceProps = {}) {
   const [mode, setMode] = useState<"convert" | "merge" | "extract">("convert");
   const [document, setDocument] = useState<DocumentInfo | null>(null);
   const [capabilities, setCapabilities] = useState<ConversionCapability[]>([]);
@@ -58,10 +63,28 @@ export function ConversionWorkspace() {
   const [pendingOverwrite, setPendingOverwrite] = useState<PendingOverwrite | null>(null);
 
   useEffect(() => {
-    void listConversionCapabilities().then((allCaps) => {
-      if (!document) setCapabilities(allCaps);
-    });
-  }, [document]);
+    if (!initialDocument) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const path = await invoke<string>("library_document_path", {
+          documentId: initialDocument.record.id,
+        });
+        if (cancelled) return;
+        const info = await invoke<DocumentInfo>("inspect_document", { path });
+        if (cancelled) return;
+        await loadDocumentInfo(info);
+      } catch (err) {
+        if (!cancelled) {
+          setStatus("error");
+          setMessage(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialDocument]);
 
   const suggestedName = useMemo(
     () => (document ? document.name.replace(/\.[^.]+$/, "") || document.name : "converted-document"),
@@ -73,42 +96,52 @@ export function ConversionWorkspace() {
     return `${mergeFiles[0].name.replace(/\.[^.]+$/, "") || "document"}-merged`;
   }, [mergeFiles]);
 
+  async function loadDocumentInfo(info: DocumentInfo) {
+    setDocument(info);
+    setOutputPath("");
+    setStatus("idle");
+    setPendingOverwrite(null);
+    setPageRange("");
+    setParsedPages(null);
+    setPageRangeError(null);
+    setPageCount(null);
+    if (info.extension.toLowerCase() === "pdf") {
+      void getPdfPageCount(info.path).then(setPageCount).catch(() => setPageCount(null));
+    }
+    const rawCaps = await listConversionCapabilities(info.extension);
+    const normSource = info.extension.toLowerCase().replace(/^\./, "");
+    const caps = rawCaps.filter(
+      (c) =>
+        (c.operation === "convert" || c.operation === "extract-text") &&
+        c.sourceFormat.toLowerCase() === normSource
+    );
+    setCapabilities(caps);
+    if (caps.length > 0) {
+      const validTargets = caps.map((c) => c.targetFormat);
+      const nextTarget = validTargets.includes(target) ? target : validTargets[0];
+      setTarget(nextTarget);
+      try {
+        const job = await planConversionJob(info.path, nextTarget);
+        setPlannedJob(job);
+        setMessage(
+          `Ready to convert. ${caps.length} target format${caps.length === 1 ? "" : "s"} available.`
+        );
+      } catch {
+        setPlannedJob(null);
+        setMessage("Ready to convert.");
+      }
+    } else {
+      setPlannedJob(null);
+      setMessage(`.${info.extension || "unknown"} is not supported for conversion.`);
+    }
+  }
+
   async function chooseDocument() {
     const path = await open({ multiple: false, directory: false, filters: fileFilters });
     if (!path || Array.isArray(path)) return;
     try {
       const info = await invoke<DocumentInfo>("inspect_document", { path });
-      setDocument(info);
-      setOutputPath("");
-      setStatus("idle");
-      setPendingOverwrite(null);
-      setPageRange("");
-      setParsedPages(null);
-      setPageRangeError(null);
-      setPageCount(null);
-      if (info.extension.toLowerCase() === "pdf") {
-        void getPdfPageCount(info.path).then(setPageCount).catch(() => setPageCount(null));
-      }
-      const caps = await listConversionCapabilities(info.extension);
-      setCapabilities(caps);
-      if (caps.length > 0) {
-        const validTargets = caps.map((c) => c.targetFormat);
-        const nextTarget = validTargets.includes(target) ? target : validTargets[0];
-        setTarget(nextTarget);
-        try {
-          const job = await planConversionJob(info.path, nextTarget);
-          setPlannedJob(job);
-          setMessage(
-            `Ready to convert. ${caps.length} target format${caps.length === 1 ? "" : "s"} available.`
-          );
-        } catch {
-          setPlannedJob(null);
-          setMessage("Ready to convert.");
-        }
-      } else {
-        setPlannedJob(null);
-        setMessage(`.${info.extension || "unknown"} is not supported for conversion.`);
-      }
+      await loadDocumentInfo(info);
     } catch (error) {
       setStatus("error");
       setMessage(String(error));
@@ -116,6 +149,8 @@ export function ConversionWorkspace() {
   }
 
   async function handleTargetSelect(newTarget: string) {
+    const validTargets = capabilities.map((c) => c.targetFormat);
+    if (!validTargets.includes(newTarget)) return;
     setTarget(newTarget);
     setPendingOverwrite(null);
     if (document) {
@@ -396,22 +431,29 @@ export function ConversionWorkspace() {
                 <span>Target Format</span>
               </div>
               <div className="format-grid">
-                {capabilities.map((cap) => (
-                  <button
-                    key={`${cap.sourceFormat}-${cap.targetFormat}`}
-                    type="button"
-                    className={`format-option ${target === cap.targetFormat ? "selected" : ""}`}
-                    onClick={() => void handleTargetSelect(cap.targetFormat)}
-                  >
-                    <strong>{formatLabel(cap.targetFormat)}</strong>
-                    <span>
-                      {formatDetail(cap.targetFormat)} · {cap.label}
-                    </span>
-                  </button>
-                ))}
-                {document && capabilities.length === 0 && (
+                {document ? (
+                  capabilities.length > 0 ? (
+                    capabilities.map((cap) => (
+                      <button
+                        key={`${cap.sourceFormat}-${cap.targetFormat}`}
+                        type="button"
+                        className={`format-option ${target === cap.targetFormat ? "selected" : ""}`}
+                        onClick={() => void handleTargetSelect(cap.targetFormat)}
+                      >
+                        <strong>{formatLabel(cap.targetFormat)}</strong>
+                        <span>
+                          {formatDetail(cap.targetFormat)} · {cap.label}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="no-targets-msg">
+                      No conversion targets available for .{document.extension}.
+                    </p>
+                  )
+                ) : (
                   <p className="no-targets-msg">
-                    No conversion targets available for .{document.extension}.
+                    Select a source document on the left to see available conversion formats.
                   </p>
                 )}
               </div>
