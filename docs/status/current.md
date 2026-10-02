@@ -58,11 +58,21 @@
   - **Thumbnail Cache Architecture**: Deterministic thumbnail caching in application data directory; EPUB cover image extraction from package manifest; first-page PDF thumbnail rendering via `pdftoppm`; served on demand as base64 data URLs via `library_thumbnail_get`.
   - **User-Defined Collections**: Many-to-many relationship (`collections`, `document_collections`); complete CRUD (create, rename, delete, add/remove document membership); deleting a collection preserves documents; deleting a document cascades and removes membership.
   - **Library UI & Search Upgrades**: Document cards display cover thumbnail/placeholder, display title, author list, format badges, and collection tags. Search query matches metadata title, authors, and description in addition to filename and relative path. Left sidebar features collections list with inline create/rename and document counts. Status bar displays active collection filter pill. Responsive down to 390x844 with no horizontal overflow.
+- **Milestone 11 — Format Adapters & Document Breadth**:
+  - **Authoritative Format Registry & Normalization**: Centralized format normalization across Rust (`storage.rs`, `conversion.rs`) and TypeScript (`domain.ts`), mapping `.markdown` → `md`, `.htm` → `html`, `.jpeg` → `jpg`.
+  - **Expanded Metadata Extraction**: Built format-specific adapters in `metadata.rs` for:
+    - DOCX: extracts `docProps/core.xml` (title, author, description, created date, language) and `docProps/thumbnail.jpeg|png`.
+    - ODT: extracts `meta.xml` (title, author, description, date, language) and standard ODF `Thumbnails/thumbnail.png`.
+    - RTF: safe bounded parsing of `\title`, `\author`, `\doccomm` in `\info` groups.
+    - Markdown: safe YAML front matter parsing (`title`, `author`, `date`, `description`, `language`), fallback to level-1 heading (`# `).
+    - HTML: safe bounded inspection of `<title>`, `<meta name="author">`, `<meta name="description">`, `<html lang="...">` with zero script execution, no external resource requests, and sanitized text extraction.
+  - **Thumbnail System Expansion**: DOCX and ODT thumbnails extracted to cache; fallback placeholders for RTF, TXT, Markdown, HTML.
+  - **Lightweight Text/Markdown Reader (TextEngine)**: Added `TextEngine.tsx` to `ReaderShell` alongside `PdfEngine` and `EpubEngine`. Supports scrolling, line wrapping, font scale/zoom, search with match cycling, keyboard navigation, reading position tracking via `TextScroll { progression }`, and structured safe Markdown element rendering (headings with TOC generation, code blocks, lists, blockquotes, paragraphs) with zero `dangerouslySetInnerHTML`.
+  - **Explicit Document Capability Model**: Defined `DocumentCapability` / `FormatCapabilitiesDto` and `hasCapability` across all recognized formats. Library cards are capability-driven ("Open" for readable, "Convert →" for convertible, "Unsupported" for unhandled).
 
 ## Current work
 
-Milestone 10 is complete. The library has structured metadata, thumbnail caching, and user-defined collections.
-- `DocumentRecord` uses an opaque UUID independent of any raw path.
+Milestone 11 is complete. Format adapters and capabilities are expanded across detection, metadata, thumbnails, reading, and conversion.
 - `SourceRef` records source coordinates separately from `StorageLocator`, which is a runtime access capability.
 - SQLite stores metadata, source coordinates, reading state, bookmarks, and annotation records; it never stores document bytes or reader tokens.
 - PDF.js is the PDF engine; foliate-js is the EPUB engine.

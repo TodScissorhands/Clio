@@ -119,6 +119,7 @@ pub fn normalize_format(format_or_ext: &str) -> String {
     match trimmed.as_str() {
         "htm" => "html".to_string(),
         "jpeg" => "jpg".to_string(),
+        "markdown" => "md".to_string(),
         _ => trimmed,
     }
 }
@@ -1327,6 +1328,8 @@ mod tests {
     #[test]
     fn test_format_normalization() {
         assert_eq!(normalize_format(".MD"), "md");
+        assert_eq!(normalize_format(".markdown"), "md");
+        assert_eq!(normalize_format("MARKDOWN"), "md");
         assert_eq!(normalize_format("HTM"), "html");
         assert_eq!(normalize_format(".htm"), "html");
         assert_eq!(normalize_format("  .Docx  "), "docx");

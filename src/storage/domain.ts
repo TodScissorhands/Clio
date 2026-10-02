@@ -80,8 +80,8 @@ export type LibraryRoot = {
 
 export type ReadingPosition =
   | { kind: "pdf-page"; page: number }
-  | { kind: "epub-cfi"; cfi: string; progression?: number };
-
+  | { kind: "epub-cfi"; cfi: string; progression?: number }
+  | { kind: "text-scroll"; progression: number };
 export type ReadingState = {
   documentId: DocumentId;
   position: ReadingPosition;
@@ -185,17 +185,70 @@ export function isSameReadingPosition(a?: ReadingPosition, b?: ReadingPosition):
   if (a.kind === "epub-cfi" && b.kind === "epub-cfi") {
     return a.cfi === b.cfi;
   }
+  if (a.kind === "text-scroll" && b.kind === "text-scroll") {
+    return Math.abs(a.progression - b.progression) < 0.02;
+  }
   return false;
 }
 
 /** Format values are normalized once, at the native DTO boundary. */
 export function normalizeFormat(value: unknown): FormatId {
-  const normalized = typeof value === "string" ? value.toLowerCase().replace(/^\./, "") : "";
-  return (normalized === "htm" ? "html" : normalized) as FormatId;
+  const normalized = typeof value === "string" ? value.toLowerCase().replace(/^\./, "").trim() : "";
+  if (normalized === "htm") return "html";
+  if (normalized === "markdown") return "md";
+  return normalized as FormatId;
 }
 
-export function isReaderFormat(format: FormatId): format is "pdf" | "epub" {
-  return format === "pdf" || format === "epub";
+export function isReaderFormat(format: FormatId): format is "pdf" | "epub" | "txt" | "md" {
+  return format === "pdf" || format === "epub" || format === "txt" || format === "md";
+}
+
+export type DocumentCapability =
+  | "read"
+  | "search"
+  | "toc"
+  | "textSelection"
+  | "annotations"
+  | "bookmarks"
+  | "thumbnail"
+  | "metadata"
+  | "convert"
+  | "extractText";
+
+export const FORMAT_CAPABILITIES: Record<FormatId, readonly DocumentCapability[]> = {
+  pdf: [
+    "read",
+    "search",
+    "toc",
+    "textSelection",
+    "annotations",
+    "bookmarks",
+    "thumbnail",
+    "metadata",
+    "convert",
+    "extractText",
+  ],
+  epub: [
+    "read",
+    "search",
+    "toc",
+    "textSelection",
+    "annotations",
+    "bookmarks",
+    "thumbnail",
+    "metadata",
+    "convert",
+  ],
+  txt: ["read", "search", "textSelection", "bookmarks", "metadata", "convert"],
+  md: ["read", "search", "toc", "textSelection", "bookmarks", "metadata", "convert"],
+  docx: ["metadata", "thumbnail", "convert"],
+  odt: ["metadata", "thumbnail", "convert"],
+  rtf: ["metadata", "convert"],
+  html: ["metadata", "convert"],
+};
+
+export function hasCapability(format: FormatId, capability: DocumentCapability): boolean {
+  return FORMAT_CAPABILITIES[format]?.includes(capability) ?? false;
 }
 
 export function formatBytes(bytes: number): string {

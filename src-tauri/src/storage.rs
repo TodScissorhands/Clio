@@ -11,7 +11,7 @@ use tauri::State;
 use uuid::Uuid;
 
 const SUPPORTED_FORMATS: &[&str] = &[
-    "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt",
+    "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "markdown", "txt",
 ];
 const SCHEMA_VERSION: i64 = 4;
 
@@ -740,6 +740,9 @@ impl LibraryDb {
                 ..
             } => format!("{}%", (p * 100.0).round()),
             ReadingPosition::EpubCfi { .. } => "Bookmark".to_string(),
+            ReadingPosition::TextScroll { progression } => {
+                format!("{}%", (progression * 100.0).round())
+            }
         };
         let bookmark_title = title
             .filter(|t| !t.trim().is_empty())
@@ -1463,6 +1466,9 @@ pub enum ReadingPosition {
         cfi: String,
         progression: Option<f64>,
     },
+    TextScroll {
+        progression: f64,
+    },
 }
 
 impl ReadingPosition {
@@ -1479,6 +1485,11 @@ impl ReadingPosition {
                 ..
             } if !value.is_finite() || !(0.0..=1.0).contains(value) => {
                 Err("EPUB progression must be between 0 and 1.".to_string())
+            }
+            Self::TextScroll { progression }
+                if !progression.is_finite() || !(0.0..=1.0).contains(progression) =>
+            {
+                Err("Text progression must be between 0 and 1.".to_string())
             }
             _ => Ok(()),
         }
@@ -1497,12 +1508,13 @@ impl ReadingPosition {
             Self::EpubCfi { cfi, progression } => {
                 Ok(("epub-cfi", None, Some(cfi.as_str()), *progression))
             }
+            Self::TextScroll { progression } => Ok(("text-scroll", None, None, Some(*progression))),
         }
     }
 }
 
 impl FormatId {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pdf => "pdf",
             Self::Epub => "epub",
@@ -1515,19 +1527,137 @@ impl FormatId {
         }
     }
 
-    fn from_path(path: &Path) -> Option<Self> {
-        match extension(path).as_str() {
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let ext = extension(path);
+        let normalized = crate::conversion::normalize_format(&ext);
+        match normalized.as_str() {
             "pdf" => Some(Self::Pdf),
             "epub" => Some(Self::Epub),
             "docx" => Some(Self::Docx),
             "odt" => Some(Self::Odt),
             "rtf" => Some(Self::Rtf),
-            "html" | "htm" => Some(Self::Html),
+            "html" => Some(Self::Html),
             "md" => Some(Self::Md),
             "txt" => Some(Self::Txt),
             _ => None,
         }
     }
+
+    pub fn capabilities(&self) -> FormatCapabilitiesDto {
+        match self {
+            Self::Pdf => FormatCapabilitiesDto {
+                read: true,
+                search: true,
+                toc: true,
+                text_selection: true,
+                annotations: true,
+                bookmarks: true,
+                thumbnail: true,
+                metadata: true,
+                convert: true,
+                extract_text: true,
+            },
+            Self::Epub => FormatCapabilitiesDto {
+                read: true,
+                search: true,
+                toc: true,
+                text_selection: true,
+                annotations: true,
+                bookmarks: true,
+                thumbnail: true,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Txt => FormatCapabilitiesDto {
+                read: true,
+                search: true,
+                toc: false,
+                text_selection: true,
+                annotations: false,
+                bookmarks: true,
+                thumbnail: false,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Md => FormatCapabilitiesDto {
+                read: true,
+                search: true,
+                toc: true,
+                text_selection: true,
+                annotations: false,
+                bookmarks: true,
+                thumbnail: false,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Docx => FormatCapabilitiesDto {
+                read: false,
+                search: false,
+                toc: false,
+                text_selection: false,
+                annotations: false,
+                bookmarks: false,
+                thumbnail: true,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Odt => FormatCapabilitiesDto {
+                read: false,
+                search: false,
+                toc: false,
+                text_selection: false,
+                annotations: false,
+                bookmarks: false,
+                thumbnail: true,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Rtf => FormatCapabilitiesDto {
+                read: false,
+                search: false,
+                toc: false,
+                text_selection: false,
+                annotations: false,
+                bookmarks: false,
+                thumbnail: false,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+            Self::Html => FormatCapabilitiesDto {
+                read: false,
+                search: false,
+                toc: false,
+                text_selection: false,
+                annotations: false,
+                bookmarks: false,
+                thumbnail: false,
+                metadata: true,
+                convert: true,
+                extract_text: false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatCapabilitiesDto {
+    pub read: bool,
+    pub search: bool,
+    pub toc: bool,
+    pub text_selection: bool,
+    pub annotations: bool,
+    pub bookmarks: bool,
+    pub thumbnail: bool,
+    pub metadata: bool,
+    pub convert: bool,
+    pub extract_text: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1756,6 +1886,23 @@ pub fn library_document_collections_list(
     document_id: String,
 ) -> Result<Vec<String>, String> {
     db.list_document_collections(&document_id)
+}
+
+#[tauri::command]
+pub fn format_capabilities_get(format: String) -> Result<FormatCapabilitiesDto, String> {
+    let normalized = crate::conversion::normalize_format(&format);
+    let format_id = match normalized.as_str() {
+        "pdf" => FormatId::Pdf,
+        "epub" => FormatId::Epub,
+        "docx" => FormatId::Docx,
+        "odt" => FormatId::Odt,
+        "rtf" => FormatId::Rtf,
+        "html" => FormatId::Html,
+        "md" => FormatId::Md,
+        "txt" => FormatId::Txt,
+        _ => return Err(format!("Unsupported format '{format}'.")),
+    };
+    Ok(format_id.capabilities())
 }
 /// Build a tokenized response for a directly selected file. The callback is owned by lib.rs so
 /// its token is inserted into the same authorization registry used by read_document_bytes.
@@ -2105,6 +2252,9 @@ fn reading_state_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingSt
             cfi: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             progression: row.get(4)?,
         },
+        "text-scroll" => ReadingPosition::TextScroll {
+            progression: row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+        },
         _ => {
             return Err(rusqlite::Error::InvalidColumnType(
                 1,
@@ -2130,6 +2280,9 @@ fn bookmark_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookmarkDto> {
         "epub-cfi" => ReadingPosition::EpubCfi {
             cfi: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             progression: row.get(5)?,
+        },
+        "text-scroll" => ReadingPosition::TextScroll {
+            progression: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
         },
         _ => {
             return Err(rusqlite::Error::InvalidColumnType(
@@ -2160,6 +2313,9 @@ fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationDt
             cfi: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
             progression: row.get(6)?,
         },
+        "text-scroll" => ReadingPosition::TextScroll {
+            progression: row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+        },
         _ => {
             return Err(rusqlite::Error::InvalidColumnType(
                 3,
@@ -2182,13 +2338,14 @@ fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationDt
 }
 
 fn parse_format(value: String) -> rusqlite::Result<FormatId> {
-    match value.as_str() {
+    let normalized = crate::conversion::normalize_format(&value);
+    match normalized.as_str() {
         "pdf" => Ok(FormatId::Pdf),
         "epub" => Ok(FormatId::Epub),
         "docx" => Ok(FormatId::Docx),
         "odt" => Ok(FormatId::Odt),
         "rtf" => Ok(FormatId::Rtf),
-        "html" | "htm" => Ok(FormatId::Html),
+        "html" => Ok(FormatId::Html),
         "md" => Ok(FormatId::Md),
         "txt" => Ok(FormatId::Txt),
         _ => Err(rusqlite::Error::InvalidColumnType(
@@ -3188,6 +3345,114 @@ mod tests {
                 .len(),
             docs.len()
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_format_capabilities() {
+        let pdf_caps = FormatId::Pdf.capabilities();
+        assert!(pdf_caps.read);
+        assert!(pdf_caps.search);
+        assert!(pdf_caps.toc);
+        assert!(pdf_caps.thumbnail);
+        assert!(pdf_caps.convert);
+
+        let epub_caps = FormatId::Epub.capabilities();
+        assert!(epub_caps.read);
+        assert!(epub_caps.search);
+        assert!(epub_caps.toc);
+        assert!(epub_caps.thumbnail);
+
+        let txt_caps = FormatId::Txt.capabilities();
+        assert!(txt_caps.read);
+        assert!(txt_caps.search);
+        assert!(!txt_caps.toc);
+        assert!(!txt_caps.thumbnail);
+
+        let md_caps = FormatId::Md.capabilities();
+        assert!(md_caps.read);
+        assert!(md_caps.search);
+        assert!(md_caps.toc);
+
+        let docx_caps = FormatId::Docx.capabilities();
+        assert!(!docx_caps.read);
+        assert!(docx_caps.convert);
+        assert!(docx_caps.metadata);
+
+        let odt_caps = FormatId::Odt.capabilities();
+        assert!(!odt_caps.read);
+        assert!(odt_caps.convert);
+        assert!(odt_caps.thumbnail);
+
+        let html_caps = FormatId::Html.capabilities();
+        assert!(!html_caps.read);
+        assert!(html_caps.convert);
+
+        let rtf_caps = FormatId::Rtf.capabilities();
+        assert!(!rtf_caps.read);
+        assert!(rtf_caps.convert);
+    }
+
+    #[test]
+    fn test_text_scroll_reading_position_roundtrip_and_validation() {
+        // 1. Validation
+        let valid_pos = ReadingPosition::TextScroll { progression: 0.65 };
+        assert!(valid_pos.validate().is_ok());
+
+        let invalid_neg = ReadingPosition::TextScroll { progression: -0.1 };
+        assert!(invalid_neg.validate().is_err());
+
+        let invalid_over = ReadingPosition::TextScroll { progression: 1.1 };
+        assert!(invalid_over.validate().is_err());
+
+        let invalid_nan = ReadingPosition::TextScroll {
+            progression: f64::NAN,
+        };
+        assert!(invalid_nan.validate().is_err());
+
+        // 2. Roundtrip through reading_state table in SQLite
+        let temp_dir = std::env::temp_dir().join(format!("clio-pos-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        fs::write(temp_dir.join("text.txt"), b"Hello world text").expect("write text");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan");
+        let docs = db.list_documents(Some(&root.id), false).expect("list");
+        let doc_id = &docs[0].id;
+
+        let state = ReadingState {
+            document_id: doc_id.clone(),
+            position: valid_pos,
+            last_opened_at: "2026-10-02T12:00:00Z".to_string(),
+            updated_at: "2026-10-02T12:00:00Z".to_string(),
+        };
+
+        db.set_reading_state(state).expect("set reading state");
+
+        let retrieved = db
+            .get_reading_state(doc_id)
+            .expect("get state")
+            .expect("exists");
+        match retrieved.position {
+            ReadingPosition::TextScroll { progression } => {
+                assert!((progression - 0.65).abs() < 1e-6);
+            }
+            _ => panic!("Expected TextScroll position"),
+        }
+
+        // 3. Bookmark creation with text scroll position
+        let bookmark = db
+            .create_bookmark(
+                doc_id,
+                ReadingPosition::TextScroll { progression: 0.65 },
+                None,
+            )
+            .expect("create bookmark");
+        assert_eq!(bookmark.title.as_deref(), Some("65%"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

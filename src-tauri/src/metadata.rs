@@ -337,7 +337,11 @@ pub fn resolve_relative_zip_path(opf_path: &str, href: &str) -> Option<String> {
             normalized_parts.push(part);
         }
     }
-    Some(normalized_parts.join("/"))
+    let res = normalized_parts.join("/");
+    if res.is_empty() {
+        return None;
+    }
+    Some(res)
 }
 
 // ─── Format Extraction ────────────────────────────────────────────────────────
@@ -576,6 +580,394 @@ pub fn extract_pdf_thumbnail(
     None
 }
 
+pub fn extract_docx_metadata(
+    path: &Path,
+    document_id: &str,
+    thumbnail_dir: &Path,
+) -> (DocumentMetadata, Option<String>) {
+    let mut meta = DocumentMetadata::fallback();
+    let mut thumb = None;
+
+    if let Ok(core_output) = Command::new("unzip")
+        .args(["-p"])
+        .arg(path)
+        .arg("docProps/core.xml")
+        .output()
+    {
+        if core_output.status.success() && !core_output.stdout.is_empty() {
+            let xml = String::from_utf8_lossy(&core_output.stdout);
+            let mut found = false;
+            if let Some(t) = extract_xml_tag(&xml, "dc:title") {
+                meta.title = Some(t);
+                found = true;
+            }
+            let creators = extract_all_xml_tags(&xml, "dc:creator");
+            if !creators.is_empty() {
+                meta.authors = creators;
+                found = true;
+            } else if let Some(mod_by) = extract_xml_tag(&xml, "cp:lastModifiedBy") {
+                meta.authors = vec![mod_by];
+                found = true;
+            }
+            if let Some(desc) = extract_xml_tag(&xml, "dc:description")
+                .or_else(|| extract_xml_tag(&xml, "cp:subject"))
+            {
+                meta.description = Some(desc);
+                found = true;
+            }
+            if let Some(date) = extract_xml_tag(&xml, "dcterms:created") {
+                meta.published_date = Some(date);
+                found = true;
+            }
+            if let Some(lang) = extract_xml_tag(&xml, "dc:language") {
+                meta.language = Some(lang);
+                found = true;
+            }
+            if let Some(ident) = extract_xml_tag(&xml, "dc:identifier") {
+                meta.identifiers = vec![ident];
+                found = true;
+            }
+            if found {
+                meta.provenance = MetadataProvenance::Embedded;
+            }
+        }
+    }
+
+    for thumb_name in &[
+        "docProps/thumbnail.jpeg",
+        "docProps/thumbnail.jpg",
+        "docProps/thumbnail.png",
+    ] {
+        let ext = if thumb_name.ends_with(".png") {
+            "png"
+        } else {
+            "jpg"
+        };
+        let thumb_filename = format!("{document_id}.{ext}");
+        let thumb_dest = thumbnail_dir.join(&thumb_filename);
+        if let Ok(out) = Command::new("unzip")
+            .args(["-p"])
+            .arg(path)
+            .arg(thumb_name)
+            .output()
+        {
+            if out.status.success()
+                && !out.stdout.is_empty()
+                && fs::write(&thumb_dest, &out.stdout).is_ok()
+            {
+                thumb = Some(thumb_filename);
+                break;
+            }
+        }
+    }
+
+    meta.thumbnail_path = thumb.clone();
+    (meta, thumb)
+}
+
+pub fn extract_odt_metadata(
+    path: &Path,
+    document_id: &str,
+    thumbnail_dir: &Path,
+) -> (DocumentMetadata, Option<String>) {
+    let mut meta = DocumentMetadata::fallback();
+    let mut thumb = None;
+
+    if let Ok(meta_output) = Command::new("unzip")
+        .args(["-p"])
+        .arg(path)
+        .arg("meta.xml")
+        .output()
+    {
+        if meta_output.status.success() && !meta_output.stdout.is_empty() {
+            let xml = String::from_utf8_lossy(&meta_output.stdout);
+            let mut found = false;
+            if let Some(t) = extract_xml_tag(&xml, "dc:title") {
+                meta.title = Some(t);
+                found = true;
+            }
+            let creators = extract_all_xml_tags(&xml, "dc:creator");
+            if !creators.is_empty() {
+                meta.authors = creators;
+                found = true;
+            } else if let Some(init_creator) = extract_xml_tag(&xml, "meta:initial-creator") {
+                meta.authors = vec![init_creator];
+                found = true;
+            }
+            if let Some(desc) = extract_xml_tag(&xml, "dc:description")
+                .or_else(|| extract_xml_tag(&xml, "dc:subject"))
+            {
+                meta.description = Some(desc);
+                found = true;
+            }
+            if let Some(date) = extract_xml_tag(&xml, "dc:date")
+                .or_else(|| extract_xml_tag(&xml, "meta:creation-date"))
+            {
+                meta.published_date = Some(date);
+                found = true;
+            }
+            if let Some(lang) = extract_xml_tag(&xml, "dc:language") {
+                meta.language = Some(lang);
+                found = true;
+            }
+            if found {
+                meta.provenance = MetadataProvenance::Embedded;
+            }
+        }
+    }
+
+    let thumb_filename = format!("{document_id}.png");
+    let thumb_dest = thumbnail_dir.join(&thumb_filename);
+    if let Ok(out) = Command::new("unzip")
+        .args(["-p"])
+        .arg(path)
+        .arg("Thumbnails/thumbnail.png")
+        .output()
+    {
+        if out.status.success()
+            && !out.stdout.is_empty()
+            && fs::write(&thumb_dest, &out.stdout).is_ok()
+        {
+            thumb = Some(thumb_filename);
+        }
+    }
+
+    meta.thumbnail_path = thumb.clone();
+    (meta, thumb)
+}
+
+pub fn extract_rtf_metadata(path: &Path) -> DocumentMetadata {
+    let mut meta = DocumentMetadata::fallback();
+    let Ok(file_bytes) = read_bounded_prefix(path, 16 * 1024) else {
+        return meta;
+    };
+    let content = String::from_utf8_lossy(&file_bytes);
+    if !content.starts_with("{\\rtf") {
+        return meta;
+    }
+
+    let mut found = false;
+    if let Some(t) = extract_rtf_info_field(&content, "title") {
+        meta.title = Some(t);
+        found = true;
+    }
+    if let Some(a) = extract_rtf_info_field(&content, "author") {
+        meta.authors = vec![a];
+        found = true;
+    }
+    if let Some(desc) = extract_rtf_info_field(&content, "doccomm")
+        .or_else(|| extract_rtf_info_field(&content, "comment"))
+    {
+        meta.description = Some(desc);
+        found = true;
+    }
+    if found {
+        meta.provenance = MetadataProvenance::Embedded;
+    }
+    meta
+}
+
+fn extract_rtf_info_field(content: &str, field_name: &str) -> Option<String> {
+    let pattern = format!("\\{field_name}");
+    let mut search_from = 0;
+    while let Some(idx) = content[search_from..].find(&pattern) {
+        let abs_start = search_from + idx;
+        let after_field = abs_start + pattern.len();
+        if let Some(ch) = content[after_field..].chars().next() {
+            if ch.is_whitespace() || ch == '{' {
+                let rest = content[after_field..].trim_start();
+                if let Some(end) = rest.find('}') {
+                    let raw = rest[..end].trim();
+                    if !raw.is_empty() {
+                        return Some(clean_rtf_text(raw));
+                    }
+                }
+            }
+        }
+        search_from = abs_start + 1;
+    }
+    None
+}
+
+fn clean_rtf_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == '\'' {
+                    chars.next();
+                    let hex_0 = chars.next().unwrap_or('0');
+                    let hex_1 = chars.next().unwrap_or('0');
+                    let hex_str = format!("{hex_0}{hex_1}");
+                    if let Ok(b) = u8::from_str_radix(&hex_str, 16) {
+                        out.push(b as char);
+                        continue;
+                    }
+                } else if next == '\\' || next == '{' || next == '}' {
+                    out.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
+pub fn extract_markdown_metadata(path: &Path) -> DocumentMetadata {
+    let mut meta = DocumentMetadata::fallback();
+    let Ok(file_bytes) = read_bounded_prefix(path, 16 * 1024) else {
+        return meta;
+    };
+    let content = String::from_utf8_lossy(&file_bytes);
+    let trimmed = content.trim_start();
+
+    // Check for front matter delimited by --- at start
+    if let Some(after_first) = trimmed.strip_prefix("---") {
+        if let Some(end_idx) = after_first.find("\n---") {
+            let front_matter = &after_first[..end_idx];
+            let mut found = false;
+            for line in front_matter.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("title:") {
+                    let clean = val.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        meta.title = Some(clean.to_string());
+                        found = true;
+                    }
+                } else if let Some(val) = line.strip_prefix("author:") {
+                    let clean = val.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        meta.authors = vec![clean.to_string()];
+                        found = true;
+                    }
+                } else if let Some(val) = line.strip_prefix("date:") {
+                    let clean = val.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        meta.published_date = Some(clean.to_string());
+                        found = true;
+                    }
+                } else if let Some(val) = line.strip_prefix("description:") {
+                    let clean = val.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        meta.description = Some(clean.to_string());
+                        found = true;
+                    }
+                } else if let Some(val) = line
+                    .strip_prefix("language:")
+                    .or_else(|| line.strip_prefix("lang:"))
+                {
+                    let clean = val.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        meta.language = Some(clean.to_string());
+                        found = true;
+                    }
+                }
+            }
+            if found {
+                meta.provenance = MetadataProvenance::Embedded;
+                return meta;
+            }
+        }
+    }
+
+    // Fallback: check if first non-empty line starts with # (Heading 1)
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("# ") {
+            let clean = heading.trim();
+            if !clean.is_empty() {
+                meta.title = Some(clean.to_string());
+                meta.provenance = MetadataProvenance::Embedded;
+            }
+        }
+        break;
+    }
+
+    meta
+}
+
+pub fn extract_html_metadata(path: &Path) -> DocumentMetadata {
+    let mut meta = DocumentMetadata::fallback();
+    let Ok(file_bytes) = read_bounded_prefix(path, 64 * 1024) else {
+        return meta;
+    };
+    let content = String::from_utf8_lossy(&file_bytes);
+    let mut found = false;
+
+    // <title> tag
+    if let Some(t) = extract_xml_tag(&content, "title") {
+        meta.title = Some(t);
+        found = true;
+    }
+
+    // <meta name="author" content="..."> or <meta content="..." name="author">
+    if let Some(a) = extract_html_meta_attr(&content, "author") {
+        meta.authors = vec![a];
+        found = true;
+    }
+
+    // <meta name="description" content="...">
+    if let Some(desc) = extract_html_meta_attr(&content, "description") {
+        meta.description = Some(desc);
+        found = true;
+    }
+
+    // <html lang="...">
+    if let Some(idx) = content.find("<html") {
+        if let Some(end) = content[idx..].find('>') {
+            let tag = &content[idx..idx + end + 1];
+            if let Some(lang) = extract_attribute(tag, "lang") {
+                meta.language = Some(lang);
+                found = true;
+            }
+        }
+    }
+
+    if found {
+        meta.provenance = MetadataProvenance::Embedded;
+    }
+    meta
+}
+
+fn extract_html_meta_attr(content: &str, meta_name: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(idx) = content[search_from..].find("<meta ") {
+        let abs_start = search_from + idx;
+        if let Some(end_offset) = content[abs_start..].find('>') {
+            let tag = &content[abs_start..abs_start + end_offset + 1];
+            let name = extract_attribute(tag, "name");
+            if let Some(n) = name {
+                if n.eq_ignore_ascii_case(meta_name) {
+                    if let Some(c) = extract_attribute(tag, "content") {
+                        let cleaned = clean_xml_text(&c);
+                        if !cleaned.is_empty() {
+                            return Some(cleaned);
+                        }
+                    }
+                }
+            }
+            search_from = abs_start + end_offset + 1;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn read_bounded_prefix(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(max_bytes.min(1024));
+    file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 pub fn extract_metadata_and_thumbnail(
     path: &Path,
     format_str: &str,
@@ -599,6 +991,11 @@ pub fn extract_metadata_and_thumbnail(
             meta.thumbnail_path = thumb.clone();
             (meta, thumb)
         }
+        "docx" => extract_docx_metadata(path, document_id, thumbnail_dir),
+        "odt" => extract_odt_metadata(path, document_id, thumbnail_dir),
+        "rtf" => (extract_rtf_metadata(path), None),
+        "md" => (extract_markdown_metadata(path), None),
+        "html" => (extract_html_metadata(path), None),
         _ => (DocumentMetadata::fallback(), None),
     }
 }
@@ -728,5 +1125,309 @@ mod tests {
         let mut with_title = DocumentMetadata::fallback();
         with_title.title = Some("Actual Title".to_string());
         assert_eq!(with_title.display_title("My Book.pdf"), "Actual Title");
+    }
+
+    #[test]
+    fn test_docx_metadata_and_thumbnail_extraction() {
+        if Command::new("unzip").arg("-v").output().is_err() {
+            return;
+        }
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("clio-test-docx-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        let docx_build = temp_dir.join("docx_pkg");
+        let doc_props = docx_build.join("docProps");
+        fs::create_dir_all(&doc_props).expect("create docProps");
+
+        fs::write(
+            doc_props.join("core.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                               xmlns:dc="http://purl.org/dc/elements/1.1/"
+                               xmlns:dcterms="http://purl.org/dc/terms/">
+              <dc:title>Test Word Document</dc:title>
+              <dc:creator>Jane Austen</dc:creator>
+              <dc:description>Pride and Prejudice draft</dc:description>
+              <dcterms:created>1813-01-28</dcterms:created>
+              <dc:language>en</dc:language>
+            </cp:coreProperties>"#,
+        )
+        .expect("write core.xml");
+
+        // Dummy thumbnail JPEG bytes
+        fs::write(
+            doc_props.join("thumbnail.jpeg"),
+            b"\xFF\xD8\xFF\xE0\x00\x10JFIFdummy",
+        )
+        .expect("write thumb");
+
+        let docx_path = temp_dir.join("sample.docx");
+        let zip_res = Command::new("zip")
+            .current_dir(&docx_build)
+            .arg("-r")
+            .arg(&docx_path)
+            .arg("docProps")
+            .output();
+
+        if let Ok(z) = zip_res {
+            if z.status.success() {
+                let thumb_dir = temp_dir.join("thumbs");
+                fs::create_dir_all(&thumb_dir).expect("create thumbs");
+
+                let (meta, thumb) = extract_docx_metadata(&docx_path, "doc-123", &thumb_dir);
+                assert_eq!(meta.provenance, MetadataProvenance::Embedded);
+                assert_eq!(meta.title.as_deref(), Some("Test Word Document"));
+                assert_eq!(meta.authors, vec!["Jane Austen"]);
+                assert_eq!(
+                    meta.description.as_deref(),
+                    Some("Pride and Prejudice draft")
+                );
+                assert_eq!(meta.published_date.as_deref(), Some("1813-01-28"));
+                assert_eq!(meta.language.as_deref(), Some("en"));
+                assert!(thumb.is_some());
+                assert!(thumb_dir.join(thumb.unwrap()).exists());
+            }
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_odt_metadata_and_thumbnail_extraction() {
+        if Command::new("unzip").arg("-v").output().is_err() {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-odt-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        let odt_build = temp_dir.join("odt_pkg");
+        let thumbs = odt_build.join("Thumbnails");
+        fs::create_dir_all(&thumbs).expect("create Thumbnails");
+
+        fs::write(
+            odt_build.join("meta.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                                  xmlns:dc="http://purl.org/dc/elements/1.1/"
+                                  xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0">
+              <office:meta>
+                <dc:title>OpenDocument Text File</dc:title>
+                <dc:creator>Ada Lovelace</dc:creator>
+                <dc:description>Analytical Engine notes</dc:description>
+                <dc:date>1843-09-09</dc:date>
+                <dc:language>en</dc:language>
+              </office:meta>
+            </office:document-meta>"#,
+        )
+        .expect("write meta.xml");
+
+        // Dummy thumbnail PNG bytes
+        let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82";
+        fs::write(thumbs.join("thumbnail.png"), png_bytes).expect("write thumb");
+
+        let odt_path = temp_dir.join("sample.odt");
+        let zip_res = Command::new("zip")
+            .current_dir(&odt_build)
+            .arg("-r")
+            .arg(&odt_path)
+            .arg("meta.xml")
+            .arg("Thumbnails")
+            .output();
+
+        if let Ok(z) = zip_res {
+            if z.status.success() {
+                let thumb_dir = temp_dir.join("thumbs");
+                fs::create_dir_all(&thumb_dir).expect("create thumbs");
+
+                let (meta, thumb) = extract_odt_metadata(&odt_path, "doc-456", &thumb_dir);
+                assert_eq!(meta.provenance, MetadataProvenance::Embedded);
+                assert_eq!(meta.title.as_deref(), Some("OpenDocument Text File"));
+                assert_eq!(meta.authors, vec!["Ada Lovelace"]);
+                assert_eq!(meta.description.as_deref(), Some("Analytical Engine notes"));
+                assert_eq!(meta.published_date.as_deref(), Some("1843-09-09"));
+                assert_eq!(meta.language.as_deref(), Some("en"));
+                assert!(thumb.is_some());
+                assert!(thumb_dir.join(thumb.unwrap()).exists());
+            }
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_rtf_metadata_extraction() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-rtf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        let rtf_path = temp_dir.join("doc.rtf");
+        let rtf_content = r"{\rtf1\ansi\deff0{\fonttbl{\f0 Times;}}
+{\info{\title The Adventures of Sherlock Holmes}{\author Sir Arthur Conan Doyle}{\doccomm A collection of twelve short stories.}}
+\pard Hello Watson\par}";
+        fs::write(&rtf_path, rtf_content).expect("write rtf");
+
+        let meta = extract_rtf_metadata(&rtf_path);
+        assert_eq!(meta.provenance, MetadataProvenance::Embedded);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("The Adventures of Sherlock Holmes")
+        );
+        assert_eq!(meta.authors, vec!["Sir Arthur Conan Doyle"]);
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("A collection of twelve short stories.")
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_markdown_metadata_front_matter_and_heading() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-md-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        // 1. With YAML front matter
+        let md1 = temp_dir.join("post.md");
+        fs::write(
+            &md1,
+            "title: Deep Learning\nauthor: Yann LeCun\ndate: 2026-01-15\ndescription: Overview of ConvNets\nlang: en\n",
+        )
+        .expect("write md1");
+        // Prepend and append the triple-dashes cleanly
+        let md1_content = format!(
+            "---\n{}\n---\n# Main Content\nParagraph here.",
+            fs::read_to_string(&md1).unwrap()
+        );
+        fs::write(&md1, md1_content).expect("write md1 full");
+
+        let meta1 = extract_markdown_metadata(&md1);
+        assert_eq!(meta1.provenance, MetadataProvenance::Embedded);
+        assert_eq!(meta1.title.as_deref(), Some("Deep Learning"));
+        assert_eq!(meta1.authors, vec!["Yann LeCun"]);
+        assert_eq!(meta1.published_date.as_deref(), Some("2026-01-15"));
+        assert_eq!(meta1.description.as_deref(), Some("Overview of ConvNets"));
+        assert_eq!(meta1.language.as_deref(), Some("en"));
+
+        // 2. Without front matter, fallback to heading 1
+        let md2 = temp_dir.join("notes.md");
+        fs::write(&md2, "# Engineering Handbook\n\nContent starts here.").expect("write md2");
+        let meta2 = extract_markdown_metadata(&md2);
+        assert_eq!(meta2.provenance, MetadataProvenance::Embedded);
+        assert_eq!(meta2.title.as_deref(), Some("Engineering Handbook"));
+        assert!(meta2.authors.is_empty());
+
+        // 3. Plain markdown without heading or front matter -> fallback
+        let md3 = temp_dir.join("plain.md");
+        fs::write(&md3, "Just a line of text.").expect("write md3");
+        let meta3 = extract_markdown_metadata(&md3);
+        assert_eq!(meta3.provenance, MetadataProvenance::Fallback);
+        assert_eq!(meta3.title, None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_html_metadata_extraction_and_security_containment() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("clio-test-html-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        let html_path = temp_dir.join("page.html");
+        // Contains hostile payloads: <script>, external <img>, <link>
+        let hostile_html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Safe HTML Title &amp; Subtitle</title>
+    <meta name="author" content="Grace Hopper">
+    <meta name="description" content="Compiler construction notes">
+    <script>alert("Hostile script must NOT run or leak");</script>
+    <link rel="stylesheet" href="http://malicious.example.com/steal.css">
+</head>
+<body>
+    <img src="http://tracker.example.com/pixel.gif">
+    <script>document.location = 'http://attacker.com';</script>
+    <p>Content body</p>
+</body>
+</html>"#;
+        fs::write(&html_path, hostile_html).expect("write html");
+
+        let meta = extract_html_metadata(&html_path);
+        assert_eq!(meta.provenance, MetadataProvenance::Embedded);
+        assert_eq!(meta.title.as_deref(), Some("Safe HTML Title & Subtitle"));
+        assert_eq!(meta.authors, vec!["Grace Hopper"]);
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("Compiler construction notes")
+        );
+        assert_eq!(meta.language.as_deref(), Some("en"));
+
+        // Verify no script or link tags leaked into metadata
+        assert!(!meta.title.as_ref().unwrap().contains("script"));
+        assert!(!meta.authors[0].contains("script"));
+        assert!(!meta.description.as_ref().unwrap().contains("script"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_malformed_inputs_return_fallback_cleanly() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-mal-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        let thumbs = temp_dir.join("thumbs");
+        fs::create_dir_all(&thumbs).expect("create thumbs");
+
+        // 1. Malformed DOCX (garbage bytes instead of valid ZIP)
+        let bad_docx = temp_dir.join("corrupted.docx");
+        fs::write(&bad_docx, b"not a zip archive").expect("write bad docx");
+        let (meta_docx, thumb_docx) = extract_docx_metadata(&bad_docx, "bad-1", &thumbs);
+        assert_eq!(meta_docx.provenance, MetadataProvenance::Fallback);
+        assert_eq!(thumb_docx, None);
+
+        // 2. Malformed ODT (truncated zip)
+        let bad_odt = temp_dir.join("corrupted.odt");
+        fs::write(&bad_odt, b"PK\x03\x04incomplete").expect("write bad odt");
+        let (meta_odt, thumb_odt) = extract_odt_metadata(&bad_odt, "bad-2", &thumbs);
+        assert_eq!(meta_odt.provenance, MetadataProvenance::Fallback);
+        assert_eq!(thumb_odt, None);
+
+        // 3. Malformed RTF (no \rtf header)
+        let bad_rtf = temp_dir.join("corrupted.rtf");
+        fs::write(&bad_rtf, b"Plain text missing RTF signature").expect("write bad rtf");
+        let meta_rtf = extract_rtf_metadata(&bad_rtf);
+        assert_eq!(meta_rtf.provenance, MetadataProvenance::Fallback);
+
+        // 4. Malformed HTML (unclosed tags, truncated input)
+        let bad_html = temp_dir.join("broken.html");
+        fs::write(&bad_html, b"<title>Unclosed title").expect("write bad html");
+        let meta_html = extract_html_metadata(&bad_html);
+        assert_eq!(meta_html.provenance, MetadataProvenance::Fallback);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_archive_path_traversal_containment() {
+        // Path traversal attempts in zip hrefs must be rejected
+        assert_eq!(
+            resolve_relative_zip_path("content.opf", "../../../etc/passwd"),
+            None
+        );
+        assert_eq!(
+            resolve_relative_zip_path("OEBPS/content.opf", "../../outside.jpg"),
+            None
+        );
+        assert_eq!(resolve_relative_zip_path("pkg/opf.xml", ".."), None);
+
+        // Safe relative paths within package must succeed
+        assert_eq!(
+            resolve_relative_zip_path("OEBPS/content.opf", "images/cover.jpg"),
+            Some("OEBPS/images/cover.jpg".to_string())
+        );
+        assert_eq!(
+            resolve_relative_zip_path("OEBPS/sub/content.opf", "../images/cover.jpg"),
+            Some("OEBPS/images/cover.jpg".to_string())
+        );
     }
 }

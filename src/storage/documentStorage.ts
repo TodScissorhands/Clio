@@ -168,7 +168,7 @@ function readerLocator(opened: NativeReaderOpen): StorageLocator {
 function readerDocument(record: DocumentRecord, locator: StorageLocator, storage: DocumentStorage): Promise<ReaderDocument> {
   const format = isReaderFormat(record.format) ? record.format : null;
   if (!format) {
-    throw new Error(`Clio Reader cannot open .${record.format || "unknown"} files. PDF and EPUB are supported.`);
+    throw new Error(`Clio Reader cannot open .${record.format || "unknown"} files. Supported: PDF, EPUB, TXT, Markdown.`);
   }
   const readerRecord: ReaderDocumentRecord = {
     id: record.id,

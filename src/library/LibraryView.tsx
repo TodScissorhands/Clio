@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import type { Collection, LibraryRoot, ReadingState, StoredDocument } from "../storage/domain";
-import { formatBytes, getDocumentDisplayTitle, isReaderFormat } from "../storage/domain";
+import { formatBytes, getDocumentDisplayTitle, hasCapability } from "../storage/domain";
 import { getDocumentThumbnail } from "../storage/documentStorage";
 import {
   filterDocuments,
@@ -31,6 +31,7 @@ export type LibraryViewProps = {
   onScan(rootId: string): void;
   onRemove(rootId: string): void;
   onOpen(document: StoredDocument): void;
+  onConvert?(document: StoredDocument): void;
 };
 
 function DocThumbnail({
@@ -107,6 +108,7 @@ export function LibraryView({
   onScan,
   onRemove,
   onOpen,
+  onConvert,
 }: LibraryViewProps) {
   const searchInputId = useId();
   const sortSelectId = useId();
@@ -649,10 +651,11 @@ export function LibraryView({
           {filteredDocuments.length > 0 && (
             <div className="document-grid" role="list">
               {filteredDocuments.map((doc) => {
-                const readable = isReaderFormat(doc.record.format);
+                const readable = hasCapability(doc.record.format, "read");
+                const convertible = hasCapability(doc.record.format, "convert");
                 const isMissing = doc.availability === "missing";
                 const canOpen = readable && !isMissing && !pending;
-
+                const canConvert = !readable && convertible && !isMissing && !pending && Boolean(onConvert);
                 const readingState = readingStates[doc.record.id];
                 const progressText = formatReadingProgress(readingState);
                 const relativePath =
@@ -803,20 +806,34 @@ export function LibraryView({
                         </select>
                       )}
 
-                      <button
-                        type="button"
-                        className={`doc-action-btn ${canOpen ? "openable" : ""}`}
-                        onClick={() => onOpen(doc)}
-                        disabled={!canOpen}
-                      >
-                        {isMissing
-                          ? "Missing"
-                          : !readable
-                          ? "Unsupported"
-                          : progressText
-                          ? "Continue →"
-                          : "Open"}
-                      </button>
+                      {readable ? (
+                        <button
+                          type="button"
+                          className={`doc-action-btn ${canOpen ? "openable" : ""}`}
+                          onClick={() => onOpen(doc)}
+                          disabled={!canOpen}
+                        >
+                          {isMissing ? "Missing" : progressText ? "Continue →" : "Open"}
+                        </button>
+                      ) : convertible ? (
+                        <button
+                          type="button"
+                          className={`doc-action-btn convert-action ${canConvert ? "openable" : ""}`}
+                          onClick={() => onConvert?.(doc)}
+                          disabled={!canConvert}
+                          title="Convert this document with local tools"
+                        >
+                          {isMissing ? "Missing" : "Convert →"}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="doc-action-btn"
+                          disabled
+                        >
+                          {isMissing ? "Missing" : "Unsupported"}
+                        </button>
+                      )}
                     </div>
                   </article>
                 );

@@ -13,6 +13,7 @@ import {
 import { ReadingStateCoordinator } from "./readingState";
 import { EpubEngine } from "./EpubEngine";
 import { PdfEngine } from "./PdfEngine";
+import { TextEngine } from "./TextEngine";
 import { isSameReadingPosition } from "./types";
 import type {
   Annotation,
@@ -416,7 +417,14 @@ export function ReaderShell({ document, onOpen, openDisabled = false }: ReaderSh
     return () => window.removeEventListener("keydown", handleKey);
   }, [annotationsOpen, bookmarksOpen, clearSearch, document, editingAnnotationId, pendingTextSelection, query, searchResult, tocOpen, toggleBookmark]);
 
-  const Engine: ReaderEngineComponent | null = document?.record.format === "pdf" ? PdfEngine : document ? EpubEngine : null;
+  const Engine: ReaderEngineComponent | null =
+    document?.record.format === "pdf"
+      ? PdfEngine
+      : document?.record.format === "epub"
+      ? EpubEngine
+      : document?.record.format === "txt" || document?.record.format === "md"
+      ? TextEngine
+      : null;
   const progressLabel = progress.total ? `${progress.current} / ${progress.total}` : progress.label ?? "Reading";
 
   return (

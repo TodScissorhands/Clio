@@ -254,7 +254,8 @@ pub fn run() {
             storage::library_thumbnail_get,
             storage::library_metadata_get,
             storage::library_metadata_update,
-            storage::library_document_collections_list
+            storage::library_document_collections_list,
+            storage::format_capabilities_get
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import {
   formatBytes,
   getDocumentDisplayTitle,
+  hasCapability,
   isReaderFormat,
+  isSameReadingPosition,
   normalizeFormat,
   type Collection,
   type DocumentId,
@@ -10,6 +12,7 @@ import {
   type DocumentRecord,
   type FormatId,
   type LibraryRoot,
+  type ReadingPosition,
   type ReadingState,
   type SourceRef,
   type StorageLocator,
@@ -23,12 +26,14 @@ describe("Storage domain contracts", () => {
     expect(normalizeFormat("DOCX")).toBe("docx");
     expect(normalizeFormat(".htm")).toBe("html");
     expect(normalizeFormat("htm")).toBe("html");
+    expect(normalizeFormat("markdown")).toBe("md");
+    expect(normalizeFormat(".MARKDOWN")).toBe("md");
     expect(normalizeFormat(null)).toBe("" as FormatId);
-
     expect(isReaderFormat("pdf")).toBe(true);
     expect(isReaderFormat("epub")).toBe(true);
+    expect(isReaderFormat("txt")).toBe(true);
+    expect(isReaderFormat("md")).toBe(true);
     expect(isReaderFormat("docx")).toBe(false);
-    expect(isReaderFormat("txt")).toBe(false);
     expect(isReaderFormat("html")).toBe(false);
   });
 
@@ -224,5 +229,69 @@ describe("Storage domain contracts", () => {
     };
     expect(docInCols.collections?.length).toBe(2);
     expect(docInCols.collections?.includes("col-fiction-1")).toBe(true);
+  });
+
+  it("models ReadingPosition with text-scroll progression and matches positions", () => {
+    const pos1: ReadingPosition = { kind: "text-scroll", progression: 0.45 };
+    const pos2: ReadingPosition = { kind: "text-scroll", progression: 0.455 }; // diff < 0.02
+    const pos3: ReadingPosition = { kind: "text-scroll", progression: 0.80 }; // diff > 0.02
+
+    expect(isSameReadingPosition(pos1, pos2)).toBe(true);
+    expect(isSameReadingPosition(pos1, pos3)).toBe(false);
+    expect(isSameReadingPosition(pos1, { kind: "pdf-page", page: 1 })).toBe(false);
+  });
+
+  it("reports accurate format capabilities across all recognized document types", () => {
+    // PDF: rich reader + tools + text extraction
+    expect(hasCapability("pdf", "read")).toBe(true);
+    expect(hasCapability("pdf", "search")).toBe(true);
+    expect(hasCapability("pdf", "toc")).toBe(true);
+    expect(hasCapability("pdf", "thumbnail")).toBe(true);
+    expect(hasCapability("pdf", "convert")).toBe(true);
+    expect(hasCapability("pdf", "extractText")).toBe(true);
+
+    // EPUB: rich reader + tools
+    expect(hasCapability("epub", "read")).toBe(true);
+    expect(hasCapability("epub", "search")).toBe(true);
+    expect(hasCapability("epub", "toc")).toBe(true);
+    expect(hasCapability("epub", "thumbnail")).toBe(true);
+    expect(hasCapability("epub", "convert")).toBe(true);
+    expect(hasCapability("epub", "extractText")).toBe(false);
+
+    // TXT: lightweight reading + conversion, no TOC or thumbnail
+    expect(hasCapability("txt", "read")).toBe(true);
+    expect(hasCapability("txt", "search")).toBe(true);
+    expect(hasCapability("txt", "toc")).toBe(false);
+    expect(hasCapability("txt", "thumbnail")).toBe(false);
+    expect(hasCapability("txt", "convert")).toBe(true);
+
+    // Markdown: lightweight reading with TOC + conversion
+    expect(hasCapability("md", "read")).toBe(true);
+    expect(hasCapability("md", "search")).toBe(true);
+    expect(hasCapability("md", "toc")).toBe(true);
+    expect(hasCapability("md", "convert")).toBe(true);
+
+    // DOCX: not natively readable, convertible, thumbnail capable
+    expect(hasCapability("docx", "read")).toBe(false);
+    expect(hasCapability("docx", "convert")).toBe(true);
+    expect(hasCapability("docx", "metadata")).toBe(true);
+    expect(hasCapability("docx", "thumbnail")).toBe(true);
+
+    // ODT: not natively readable, convertible, thumbnail capable
+    expect(hasCapability("odt", "read")).toBe(false);
+    expect(hasCapability("odt", "convert")).toBe(true);
+    expect(hasCapability("odt", "metadata")).toBe(true);
+    expect(hasCapability("odt", "thumbnail")).toBe(true);
+
+    // RTF: not natively readable, convertible, metadata capable
+    expect(hasCapability("rtf", "read")).toBe(false);
+    expect(hasCapability("rtf", "convert")).toBe(true);
+    expect(hasCapability("rtf", "metadata")).toBe(true);
+    expect(hasCapability("rtf", "thumbnail")).toBe(false);
+
+    // HTML: not natively readable without sandbox, convertible, metadata capable
+    expect(hasCapability("html", "read")).toBe(false);
+    expect(hasCapability("html", "convert")).toBe(true);
+    expect(hasCapability("html", "metadata")).toBe(true);
   });
 });

@@ -19,7 +19,7 @@ export type {
 } from "../storage/domain";
 export { isSameReadingPosition, validateAnnotationLocator } from "../storage/domain";
 
-export type ReaderFormat = "pdf" | "epub";
+export type ReaderFormat = "pdf" | "epub" | "txt" | "md";
 export type ReaderTheme = "light" | "sepia" | "dark";
 
 export type ReaderDocumentRecord = {

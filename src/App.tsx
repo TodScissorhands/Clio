@@ -27,7 +27,7 @@ import "./App.css";
 
 type AppView = "library" | "reader" | "tools" | "settings";
 
-const readerFileFilters = [{ name: "Readable documents", extensions: ["pdf", "epub"] }];
+const readerFileFilters = [{ name: "Readable documents", extensions: ["pdf", "epub", "txt", "md", "markdown"] }];
 const storage = new TauriDocumentStorage();
 
 function PlaceholderView({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
@@ -305,6 +305,7 @@ function App() {
             onScan={(rootId) => void scanRoot(rootId)}
             onRemove={(rootId) => void removeRoot(rootId)}
             onOpen={(document) => void openLibraryDocument(document)}
+            onConvert={() => setView("tools")}
           />
         )}
         {view === "reader" && <><div className="reader-open-error-wrap">{readerOpenError && <p className="reader-open-error" role="alert">{readerOpenError}</p>}</div><ReaderShell document={readerDocument} onOpen={() => void chooseReaderDocument()} openDisabled={libraryPending || readerPending} /></>}
