@@ -101,6 +101,41 @@ describe("matchesSearch", () => {
     expect(matchesSearch(docPdf1, "")).toBe(true);
     expect(matchesSearch(docPdf1, "   ")).toBe(true);
   });
+
+  it("matches by metadata title, authors, and description", () => {
+    const docWithMeta: StoredDocument = {
+      record: {
+        id: "meta-1",
+        name: "doc_12345.pdf",
+        format: "pdf",
+        sizeBytes: 1000,
+        firstSeenAt: "2026-10-01T10:00:00Z",
+        updatedAt: "2026-10-01T10:00:00Z",
+        metadata: {
+          title: "The Art of Computer Programming",
+          authors: ["Donald Knuth", "Collaborator"],
+          publisher: "Addison-Wesley",
+          publishedDate: "1968",
+          description: "Fundamental algorithms analysis.",
+          language: "en",
+          identifiers: ["isbn:0201896834"],
+          provenance: "embedded",
+        },
+      },
+      source: { kind: "library", rootId: "root-1", relativePath: "cs/doc_12345.pdf" },
+      availability: "present",
+    };
+
+    // Match by metadata title
+    expect(matchesSearch(docWithMeta, "computer programming")).toBe(true);
+    // Match by author
+    expect(matchesSearch(docWithMeta, "knuth")).toBe(true);
+    expect(matchesSearch(docWithMeta, "collaborator")).toBe(true);
+    // Match by description
+    expect(matchesSearch(docWithMeta, "algorithms")).toBe(true);
+    // Non-match
+    expect(matchesSearch(docWithMeta, "calculus")).toBe(false);
+  });
 });
 
 describe("matchesFormat", () => {
@@ -144,6 +179,34 @@ describe("filterDocuments", () => {
 
     const noResult = filterDocuments(sampleDocs, "moby", "pdf", "root-1");
     expect(noResult.length).toBe(0);
+  });
+
+  it("filters by collection ID", () => {
+    const docCol1: StoredDocument = {
+      ...docPdf1,
+      record: { ...docPdf1.record, collections: ["col-fiction", "col-fav"] },
+    };
+    const docCol2: StoredDocument = {
+      ...docEpub1,
+      record: { ...docEpub1.record, collections: ["col-fiction"] },
+    };
+    const docCol3: StoredDocument = {
+      ...docTxt1,
+      record: { ...docTxt1.record, collections: [] },
+    };
+    const docs = [docCol1, docCol2, docCol3];
+
+    // Filter by col-fiction -> returns docCol1 and docCol2
+    const fictionDocs = filterDocuments(docs, "", "all", null, "col-fiction");
+    expect(fictionDocs.map((d) => d.record.id)).toEqual(["doc-1", "doc-2"]);
+
+    // Filter by col-fav -> returns only docCol1
+    const favDocs = filterDocuments(docs, "", "all", null, "col-fav");
+    expect(favDocs.map((d) => d.record.id)).toEqual(["doc-1"]);
+
+    // Filter with null collection -> returns all
+    const allDocs = filterDocuments(docs, "", "all", null, null);
+    expect(allDocs.length).toBe(3);
   });
 });
 
@@ -198,6 +261,40 @@ describe("sortDocuments", () => {
   it("sorts by format alphabetically", () => {
     const sorted = sortDocuments(sampleDocs, "format");
     expect(sorted.map((d) => d.record.format)).toEqual(["epub", "pdf", "pdf", "txt"]);
+  });
+
+  it("sorts by display title when metadata title is present", () => {
+    const docA: StoredDocument = {
+      ...docPdf1,
+      record: {
+        ...docPdf1.record,
+        id: "a",
+        name: "zzz_file.pdf",
+        metadata: {
+          title: "Alpha Book",
+          authors: [],
+          identifiers: [],
+          provenance: "embedded",
+        },
+      },
+    };
+    const docB: StoredDocument = {
+      ...docEpub1,
+      record: {
+        ...docEpub1.record,
+        id: "b",
+        name: "aaa_file.epub",
+        metadata: {
+          title: "Beta Book",
+          authors: [],
+          identifiers: [],
+          provenance: "embedded",
+        },
+      },
+    };
+    const sorted = sortDocuments([docB, docA], "name-asc");
+    // "Alpha Book" comes before "Beta Book" even though filename was "zzz_file.pdf"
+    expect(sorted.map((d) => d.record.id)).toEqual(["a", "b"]);
   });
 });
 

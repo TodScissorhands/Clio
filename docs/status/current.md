@@ -51,11 +51,17 @@
   - **Job Lifecycle & Error Integrity**: Explicit transitions through `Planned` → `Running` → `Completed` or `Failed`. Validation failures prior to execution cleanly transition jobs to `Failed` with `completed_at` timestamps and structured `error` strings.
   - **Temporary File Safety**: `TempFileGuard` and `TempDirGuard` enforce RAII cleanup across all execution paths (success, failure, and panics). Zero temporary directory leakage verified under test.
   - **PDF Page Rotation Architecture**: Evaluated host toolchains. `OperationKind::RotatePages` is defined as an architectural placeholder, but deliberately deferred from runtime capability advertisement because `qpdf` is not installed on this host and `gs` selective per-page rotation is unreliable.
+- **Milestone 10 — Library Depth & Document Metadata**:
+  - **Structured Document Metadata Domain Model**: `DocumentMetadata` (`title`, `authors`, `publisher`, `publishedDate`, `description`, `language`, `identifiers`, `provenance`, `thumbnailPath`) in Rust and TypeScript, with `displayTitle` fallback to filename.
+  - **SQLite Schema Migration v4**: Added `document_metadata`, `collections`, and `document_collections` tables with foreign key cascades, unique constraints, and indexes. Migrates existing databases idempotently to `user_version = 4`.
+  - **Metadata Extraction Service**: Rust `MetadataExtractor` extracting Dublin Core metadata from EPUB packages (`unzip -p`) and standard PDF metadata (`pdfinfo`), with zero network lookups and graceful fallback handling on parser or tool errors.
+  - **Thumbnail Cache Architecture**: Deterministic thumbnail caching in application data directory; EPUB cover image extraction from package manifest; first-page PDF thumbnail rendering via `pdftoppm`; served on demand as base64 data URLs via `library_thumbnail_get`.
+  - **User-Defined Collections**: Many-to-many relationship (`collections`, `document_collections`); complete CRUD (create, rename, delete, add/remove document membership); deleting a collection preserves documents; deleting a document cascades and removes membership.
+  - **Library UI & Search Upgrades**: Document cards display cover thumbnail/placeholder, display title, author list, format badges, and collection tags. Search query matches metadata title, authors, and description in addition to filename and relative path. Left sidebar features collections list with inline create/rename and document counts. Status bar displays active collection filter pill. Responsive down to 390x844 with no horizontal overflow.
 
 ## Current work
 
-Milestone 9 is complete. The conversion and manipulation subsystem is hardened, secure, and verified end-to-end.
-- A raw filesystem path is not universal document identity.
+Milestone 10 is complete. The library has structured metadata, thumbnail caching, and user-defined collections.
 - `DocumentRecord` uses an opaque UUID independent of any raw path.
 - `SourceRef` records source coordinates separately from `StorageLocator`, which is a runtime access capability.
 - SQLite stores metadata, source coordinates, reading state, bookmarks, and annotation records; it never stores document bytes or reader tokens.

@@ -3,18 +3,24 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ReaderShell } from "./reader/ReaderShell";
 import type { ReaderDocument } from "./reader/types";
 import {
+  addDocumentToCollection,
   addLibraryRoot,
+  createCollection,
+  deleteCollection,
   getReadingState,
+  listCollections,
   listLibraryDocuments,
   listLibraryRoots,
   openLibraryReaderDocument,
   openSelectedReaderDocument,
+  removeDocumentFromCollection,
   removeLibraryRoot,
+  renameCollection,
   scanLibraryRoot,
   TauriDocumentStorage,
   type LibraryScanResult,
 } from "./storage/documentStorage";
-import { isReaderFormat, type LibraryRoot, type ReadingState, type StoredDocument } from "./storage/domain";
+import { isReaderFormat, type Collection, type LibraryRoot, type ReadingState, type StoredDocument } from "./storage/domain";
 import { LibraryView } from "./library/LibraryView";
 import { ConversionWorkspace } from "./tools/ConversionWorkspace";
 import "./App.css";
@@ -48,6 +54,7 @@ function App() {
   const [readerOpenError, setReaderOpenError] = useState("");
   const [roots, setRoots] = useState<LibraryRoot[]>([]);
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
+  const [collections, setCollections] = useState<Collection[]>([]);
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
   const [readingStates, setReadingStates] = useState<Record<string, ReadingState>>({});
   const [libraryMessage, setLibraryMessage] = useState("");
@@ -55,7 +62,6 @@ function App() {
   const [libraryPending, setLibraryPending] = useState(false);
   const [readerPending, setReaderPending] = useState(false);
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
-
   async function loadReadingStatesForDocs(docs: StoredDocument[]) {
     const entries = await Promise.all(
       docs.map(async (doc) => {
@@ -75,22 +81,25 @@ function App() {
   }
 
   async function refreshLibrary(rootId = selectedRootId) {
-    const [nextRoots, nextDocuments] = await Promise.all([
+    const [nextRoots, nextDocuments, nextCollections] = await Promise.all([
       listLibraryRoots(),
       listLibraryDocuments(rootId ?? undefined, true),
+      listCollections(),
     ]);
     setRoots(nextRoots);
     setDocuments(nextDocuments);
+    setCollections(nextCollections);
     void loadReadingStatesForDocs(nextDocuments);
   }
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([listLibraryRoots(), listLibraryDocuments(undefined, true)])
-      .then(([nextRoots, nextDocuments]) => {
+    Promise.all([listLibraryRoots(), listLibraryDocuments(undefined, true), listCollections()])
+      .then(([nextRoots, nextDocuments, nextCollections]) => {
         if (cancelled) return;
         setRoots(nextRoots);
         setDocuments(nextDocuments);
+        setCollections(nextCollections);
         void loadReadingStatesForDocs(nextDocuments);
       })
       .catch((error: unknown) => {
@@ -104,6 +113,50 @@ function App() {
     }
   }, [view]);
 
+  async function handleCreateCollection(name: string, description?: string) {
+    try {
+      await createCollection(name, description);
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRenameCollection(id: string, name: string) {
+    try {
+      await renameCollection(id, name);
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDeleteCollection(id: string) {
+    try {
+      await deleteCollection(id);
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleAddDocToCollection(collectionId: string, documentId: string) {
+    try {
+      await addDocumentToCollection(collectionId, documentId);
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRemoveDocFromCollection(collectionId: string, documentId: string) {
+    try {
+      await removeDocumentFromCollection(collectionId, documentId);
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function chooseReaderDocument() {
     if (libraryPending || readerPending) return;
@@ -235,6 +288,7 @@ function App() {
           <LibraryView
             roots={roots}
             documents={documents}
+            collections={collections}
             readingStates={readingStates}
             selectedRootId={selectedRootId}
             pending={libraryPending}
@@ -243,6 +297,11 @@ function App() {
             error={libraryError}
             onAddRoot={() => void addRoot()}
             onSelectRoot={(rootId) => void selectRoot(rootId)}
+            onCreateCollection={handleCreateCollection}
+            onRenameCollection={handleRenameCollection}
+            onDeleteCollection={handleDeleteCollection}
+            onAddDocToCollection={handleAddDocToCollection}
+            onRemoveDocFromCollection={handleRemoveDocFromCollection}
             onScan={(rootId) => void scanRoot(rootId)}
             onRemove={(rootId) => void removeRoot(rootId)}
             onOpen={(document) => void openLibraryDocument(document)}

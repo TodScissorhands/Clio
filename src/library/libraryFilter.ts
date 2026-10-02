@@ -1,5 +1,4 @@
-import type { FormatId, ReadingState, StoredDocument } from "../storage/domain";
-
+import { getDocumentDisplayTitle, type FormatId, type ReadingState, type StoredDocument } from "../storage/domain";
 export type FormatFilterOption = "all" | "pdf" | "epub" | "other";
 
 export type SortOption =
@@ -14,8 +13,15 @@ export function matchesSearch(document: StoredDocument, query: string): boolean 
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
 
-  const nameMatch = document.record.name.toLowerCase().includes(needle);
-  if (nameMatch) return true;
+  if (document.record.name.toLowerCase().includes(needle)) return true;
+
+  if (document.record.metadata?.title?.toLowerCase().includes(needle)) return true;
+
+  if (document.record.metadata?.authors?.some((a) => a.toLowerCase().includes(needle))) {
+    return true;
+  }
+
+  if (document.record.metadata?.description?.toLowerCase().includes(needle)) return true;
 
   if (document.source.kind === "library") {
     return document.source.relativePath.toLowerCase().includes(needle);
@@ -42,11 +48,17 @@ export function filterDocuments(
   documents: StoredDocument[],
   query: string,
   formatFilter: FormatFilterOption,
-  selectedRootId: string | null
+  selectedRootId: string | null,
+  selectedCollectionId: string | null = null
 ): StoredDocument[] {
   return documents.filter((doc) => {
     if (selectedRootId !== null) {
       if (doc.source.kind !== "library" || doc.source.rootId !== selectedRootId) {
+        return false;
+      }
+    }
+    if (selectedCollectionId !== null) {
+      if (!doc.record.collections || !doc.record.collections.includes(selectedCollectionId)) {
         return false;
       }
     }
@@ -67,24 +79,26 @@ export function sortDocuments(
 ): StoredDocument[] {
   const items = [...documents];
   return items.sort((a, b) => {
+    const titleA = getDocumentDisplayTitle(a.record);
+    const titleB = getDocumentDisplayTitle(b.record);
     switch (sort) {
       case "name-asc":
-        return a.record.name.localeCompare(b.record.name, undefined, { sensitivity: "base" });
+        return titleA.localeCompare(titleB, undefined, { sensitivity: "base" });
       case "name-desc":
-        return b.record.name.localeCompare(a.record.name, undefined, { sensitivity: "base" });
+        return titleB.localeCompare(titleA, undefined, { sensitivity: "base" });
       case "size-desc":
         return b.record.sizeBytes - a.record.sizeBytes;
       case "size-asc":
         return a.record.sizeBytes - b.record.sizeBytes;
       case "format": {
         const cmp = a.record.format.localeCompare(b.record.format);
-        return cmp !== 0 ? cmp : a.record.name.localeCompare(b.record.name);
+        return cmp !== 0 ? cmp : titleA.localeCompare(titleB);
       }
       case "recent": {
         const timeA = readingStates?.[a.record.id]?.lastOpenedAt ?? a.record.updatedAt;
         const timeB = readingStates?.[b.record.id]?.lastOpenedAt ?? b.record.updatedAt;
         const cmp = timeB.localeCompare(timeA);
-        return cmp !== 0 ? cmp : a.record.name.localeCompare(b.record.name);
+        return cmp !== 0 ? cmp : titleA.localeCompare(titleB);
       }
     }
   });

@@ -1,6 +1,7 @@
-import { useId, useMemo, useState } from "react";
-import type { LibraryRoot, ReadingState, StoredDocument } from "../storage/domain";
-import { formatBytes, isReaderFormat } from "../storage/domain";
+import { useEffect, useId, useMemo, useState } from "react";
+import type { Collection, LibraryRoot, ReadingState, StoredDocument } from "../storage/domain";
+import { formatBytes, getDocumentDisplayTitle, isReaderFormat } from "../storage/domain";
+import { getDocumentThumbnail } from "../storage/documentStorage";
 import {
   filterDocuments,
   formatReadingProgress,
@@ -13,6 +14,7 @@ import {
 export type LibraryViewProps = {
   roots: LibraryRoot[];
   documents: StoredDocument[];
+  collections?: Collection[];
   readingStates: Record<string, ReadingState>;
   selectedRootId: string | null;
   pending: boolean;
@@ -21,14 +23,74 @@ export type LibraryViewProps = {
   error: string;
   onAddRoot(): void;
   onSelectRoot(rootId: string | null): void;
+  onCreateCollection?(name: string, description?: string): Promise<void>;
+  onRenameCollection?(id: string, name: string): Promise<void>;
+  onDeleteCollection?(id: string): Promise<void>;
+  onAddDocToCollection?(collectionId: string, documentId: string): Promise<void>;
+  onRemoveDocFromCollection?(collectionId: string, documentId: string): Promise<void>;
   onScan(rootId: string): void;
   onRemove(rootId: string): void;
   onOpen(document: StoredDocument): void;
 };
 
+function DocThumbnail({
+  documentId,
+  format,
+  title,
+  hasThumbnail,
+}: {
+  documentId: string;
+  format: string;
+  title: string;
+  hasThumbnail: boolean;
+}) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!hasThumbnail) return;
+    let cancelled = false;
+    getDocumentThumbnail(documentId)
+      .then((url) => {
+        if (!cancelled) {
+          if (url) setDataUrl(url);
+          else setFailed(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId, hasThumbnail]);
+
+  if (hasThumbnail && dataUrl && !failed) {
+    return (
+      <div className="doc-thumbnail-wrap">
+        <img
+          src={dataUrl}
+          alt={`Cover for ${title}`}
+          className="doc-cover-image"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
+  const icon = format === "epub" ? "📖" : format === "pdf" ? "📄" : "📝";
+  return (
+    <div className={`doc-thumbnail-wrap placeholder format-${format}`} aria-hidden="true">
+      <span className="thumb-placeholder-format">{format.toUpperCase()}</span>
+      <span className="thumb-placeholder-icon">{icon}</span>
+    </div>
+  );
+}
+
 export function LibraryView({
   roots,
   documents,
+  collections = [],
   readingStates,
   selectedRootId,
   pending,
@@ -37,6 +99,11 @@ export function LibraryView({
   error,
   onAddRoot,
   onSelectRoot,
+  onCreateCollection,
+  onRenameCollection,
+  onDeleteCollection,
+  onAddDocToCollection,
+  onRemoveDocFromCollection,
   onScan,
   onRemove,
   onOpen,
@@ -47,12 +114,25 @@ export function LibraryView({
   const [searchQuery, setSearchQuery] = useState("");
   const [formatFilter, setFormatFilter] = useState<FormatFilterOption>("all");
   const [sortBy, setSortBy] = useState<SortOption>("recent");
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
 
-  // Calculate format counts for filter chips
+  // Inline collection creation / rename state
+  const [isCreatingCollection, setIsCreatingCollection] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  // Calculate format counts for filter chips within active scope
   const formatCounts = useMemo(() => {
-    const scoped = selectedRootId
-      ? documents.filter((d) => d.source.kind === "library" && d.source.rootId === selectedRootId)
-      : documents;
+    let scoped = documents;
+    if (selectedRootId) {
+      scoped = scoped.filter(
+        (d) => d.source.kind === "library" && d.source.rootId === selectedRootId
+      );
+    }
+    if (selectedCollectionId) {
+      scoped = scoped.filter((d) => d.record.collections?.includes(selectedCollectionId));
+    }
     let pdf = 0;
     let epub = 0;
     let other = 0;
@@ -62,20 +142,58 @@ export function LibraryView({
       else other += 1;
     }
     return { all: scoped.length, pdf, epub, other };
-  }, [documents, selectedRootId]);
+  }, [documents, selectedRootId, selectedCollectionId]);
 
   // Filter and sort visible documents
   const filteredDocuments = useMemo(() => {
-    const matched = filterDocuments(documents, searchQuery, formatFilter, selectedRootId);
+    const matched = filterDocuments(
+      documents,
+      searchQuery,
+      formatFilter,
+      selectedRootId,
+      selectedCollectionId
+    );
     return sortDocuments(matched, sortBy, readingStates);
-  }, [documents, searchQuery, formatFilter, selectedRootId, sortBy, readingStates]);
+  }, [
+    documents,
+    searchQuery,
+    formatFilter,
+    selectedRootId,
+    selectedCollectionId,
+    sortBy,
+    readingStates,
+  ]);
 
   const selectedRoot = useMemo(() => {
     return selectedRootId ? roots.find((r) => r.id === selectedRootId) ?? null : null;
   }, [roots, selectedRootId]);
 
+  const selectedCollection = useMemo(() => {
+    return selectedCollectionId
+      ? collections.find((c) => c.id === selectedCollectionId) ?? null
+      : null;
+  }, [collections, selectedCollectionId]);
+
   const hasSearch = searchQuery.trim().length > 0;
   const hasFilter = formatFilter !== "all";
+
+  async function handleSaveNewCollection(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = newCollectionName.trim();
+    if (!trimmed || !onCreateCollection) return;
+    await onCreateCollection(trimmed);
+    setNewCollectionName("");
+    setIsCreatingCollection(false);
+  }
+
+  async function handleSaveRenameCollection(e: React.FormEvent, id: string) {
+    e.preventDefault();
+    const trimmed = renameValue.trim();
+    if (!trimmed || !onRenameCollection) return;
+    await onRenameCollection(id, trimmed);
+    setRenamingCollectionId(null);
+    setRenameValue("");
+  }
 
   return (
     <section className="library-view" aria-label="Library">
@@ -84,7 +202,10 @@ export function LibraryView({
         <div className="library-header-main">
           <div className="library-title-row">
             <h1 className="library-title">Library</h1>
-            <span className="library-count-badge" aria-label={`${documents.length} total documents`}>
+            <span
+              className="library-count-badge"
+              aria-label={`${documents.length} total documents`}
+            >
               {documents.length} {documents.length === 1 ? "document" : "documents"}
             </span>
           </div>
@@ -120,8 +241,9 @@ export function LibraryView({
 
       {/* Main Two-Column Layout */}
       <div className="library-workspace">
-        {/* Left Sidebar: Roots & Folders Navigation */}
-        <aside className="library-sidebar" aria-label="Library directories">
+        {/* Left Sidebar: Roots & Collections Navigation */}
+        <aside className="library-sidebar" aria-label="Library navigation">
+          {/* Directories Section */}
           <div className="sidebar-section-header">
             <span className="sidebar-heading">Directories</span>
             <span className="sidebar-count">{roots.length}</span>
@@ -131,9 +253,14 @@ export function LibraryView({
             <button
               type="button"
               role="tab"
-              aria-selected={selectedRootId === null}
-              className={`root-nav-item ${selectedRootId === null ? "active" : ""}`}
-              onClick={() => onSelectRoot(null)}
+              aria-selected={selectedRootId === null && selectedCollectionId === null}
+              className={`root-nav-item ${
+                selectedRootId === null && selectedCollectionId === null ? "active" : ""
+              }`}
+              onClick={() => {
+                onSelectRoot(null);
+                setSelectedCollectionId(null);
+              }}
               disabled={pending}
             >
               <span className="root-nav-icon">◈</span>
@@ -158,7 +285,10 @@ export function LibraryView({
                     role="tab"
                     aria-selected={isSelected}
                     className="root-select-btn"
-                    onClick={() => onSelectRoot(root.id)}
+                    onClick={() => {
+                      onSelectRoot(root.id);
+                      setSelectedCollectionId(null);
+                    }}
                     disabled={pending}
                     title={root.label}
                   >
@@ -168,7 +298,10 @@ export function LibraryView({
                   </button>
 
                   <div className="root-footer">
-                    <span className={`root-status-badge ${root.status}`} title={`Status: ${root.status}`}>
+                    <span
+                      className={`root-status-badge ${root.status}`}
+                      title={`Status: ${root.status}`}
+                    >
                       {root.status}
                     </span>
                     <div className="root-quick-actions">
@@ -199,7 +332,152 @@ export function LibraryView({
 
           {roots.length === 0 && (
             <div className="roots-empty-hint">
-              <p>No directories added yet. Add a local folder to start indexing your books and papers.</p>
+              <p>
+                No directories added yet. Add a local folder to start indexing your books and
+                papers.
+              </p>
+            </div>
+          )}
+
+          {/* Collections Section */}
+          <div className="sidebar-section-header collections-header">
+            <span className="sidebar-heading">Collections</span>
+            <div className="sidebar-header-actions">
+              <span className="sidebar-count">{collections.length}</span>
+              {onCreateCollection && (
+                <button
+                  type="button"
+                  className="icon-action-btn"
+                  onClick={() => setIsCreatingCollection(true)}
+                  title="Create new collection"
+                  aria-label="Create new collection"
+                >
+                  +
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isCreatingCollection && (
+            <form onSubmit={handleSaveNewCollection} className="collection-inline-form">
+              <input
+                type="text"
+                autoFocus
+                placeholder="Collection name…"
+                value={newCollectionName}
+                onChange={(e) => setNewCollectionName(e.target.value)}
+                className="collection-inline-input"
+              />
+              <div className="collection-form-actions">
+                <button type="submit" className="mini-save-btn">
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="mini-cancel-btn"
+                  onClick={() => {
+                    setIsCreatingCollection(false);
+                    setNewCollectionName("");
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="collections-list" role="tablist" aria-orientation="vertical">
+            {collections.map((col) => {
+              const isSelected = selectedCollectionId === col.id;
+              const count = documents.filter((d) =>
+                d.record.collections?.includes(col.id)
+              ).length;
+              const isRenaming = renamingCollectionId === col.id;
+
+              if (isRenaming) {
+                return (
+                  <form
+                    key={col.id}
+                    onSubmit={(e) => void handleSaveRenameCollection(e, col.id)}
+                    className="collection-inline-form"
+                  >
+                    <input
+                      type="text"
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      className="collection-inline-input"
+                    />
+                    <div className="collection-form-actions">
+                      <button type="submit" className="mini-save-btn">
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-cancel-btn"
+                        onClick={() => setRenamingCollectionId(null)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </form>
+                );
+              }
+
+              return (
+                <div
+                  key={col.id}
+                  className={`collection-nav-item ${isSelected ? "active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="collection-select-btn"
+                    onClick={() => {
+                      setSelectedCollectionId(isSelected ? null : col.id);
+                      onSelectRoot(null);
+                    }}
+                    title={col.name}
+                  >
+                    <span className="collection-icon">🏷</span>
+                    <span className="collection-label-text">{col.name}</span>
+                    <span className="collection-count">{count}</span>
+                  </button>
+
+                  <div className="collection-actions">
+                    {onRenameCollection && (
+                      <button
+                        type="button"
+                        className="collection-mini-btn"
+                        onClick={() => {
+                          setRenamingCollectionId(col.id);
+                          setRenameValue(col.name);
+                        }}
+                        title={`Rename ${col.name}`}
+                        aria-label={`Rename ${col.name}`}
+                      >
+                        ✎
+                      </button>
+                    )}
+                    {onDeleteCollection && (
+                      <button
+                        type="button"
+                        className="collection-mini-btn danger"
+                        onClick={() => void onDeleteCollection(col.id)}
+                        title={`Delete ${col.name}`}
+                        aria-label={`Delete ${col.name}`}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {collections.length === 0 && !isCreatingCollection && (
+            <div className="collections-empty-hint">
+              <p>No collections yet. Group documents into custom shelves.</p>
             </div>
           )}
         </aside>
@@ -220,68 +498,69 @@ export function LibraryView({
                 id={searchInputId}
                 type="text"
                 className="library-search-input"
-                placeholder="Search by title or path…"
+                placeholder="Search by title, author, or path…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setSearchQuery("");
-                }}
               />
-              {hasSearch && (
+              {searchQuery && (
                 <button
                   type="button"
                   className="search-clear-btn"
                   onClick={() => setSearchQuery("")}
-                  aria-label="Clear search"
+                  aria-label="Clear search query"
+                  title="Clear search"
                 >
                   ✕
                 </button>
               )}
             </div>
 
-            {/* Filter and Sort Group */}
+            {/* Filter Chips & Sort Select */}
             <div className="library-filter-group">
-              {/* Format Filter Segmented Controls */}
-              <div className="format-chips" role="radiogroup" aria-label="Filter by format">
+              <div
+                className="format-filter-chips"
+                role="radiogroup"
+                aria-label="Filter by document format"
+              >
                 <button
                   type="button"
                   role="radio"
                   aria-checked={formatFilter === "all"}
-                  className={`format-chip ${formatFilter === "all" ? "active" : ""}`}
+                  className={`filter-chip ${formatFilter === "all" ? "selected" : ""}`}
                   onClick={() => setFormatFilter("all")}
                 >
-                  All ({formatCounts.all})
+                  All <span className="chip-count">{formatCounts.all}</span>
                 </button>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={formatFilter === "pdf"}
-                  className={`format-chip ${formatFilter === "pdf" ? "active" : ""}`}
+                  className={`filter-chip ${formatFilter === "pdf" ? "selected" : ""}`}
                   onClick={() => setFormatFilter("pdf")}
                 >
-                  PDF ({formatCounts.pdf})
+                  PDF <span className="chip-count">{formatCounts.pdf}</span>
                 </button>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={formatFilter === "epub"}
-                  className={`format-chip ${formatFilter === "epub" ? "active" : ""}`}
+                  className={`filter-chip ${formatFilter === "epub" ? "selected" : ""}`}
                   onClick={() => setFormatFilter("epub")}
                 >
-                  EPUB ({formatCounts.epub})
+                  EPUB <span className="chip-count">{formatCounts.epub}</span>
                 </button>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={formatFilter === "other"}
-                  className={`format-chip ${formatFilter === "other" ? "active" : ""}`}
+                  className={`filter-chip ${formatFilter === "other" ? "selected" : ""}`}
                   onClick={() => setFormatFilter("other")}
                 >
-                  Other ({formatCounts.other})
+                  Other <span className="chip-count">{formatCounts.other}</span>
                 </button>
               </div>
 
-              {/* Sort Selector */}
+              {/* Sort Dropdown */}
               <div className="sort-selector">
                 <label htmlFor={sortSelectId} className="sort-label">
                   Sort:
@@ -292,9 +571,9 @@ export function LibraryView({
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value as SortOption)}
                 >
-                  <option value="recent">Recently opened</option>
-                  <option value="name-asc">Name (A → Z)</option>
-                  <option value="name-desc">Name (Z → A)</option>
+                  <option value="recent">Recently Opened</option>
+                  <option value="name-asc">Title (A–Z)</option>
+                  <option value="name-desc">Title (Z–A)</option>
                   <option value="size-desc">Size (Largest)</option>
                   <option value="size-asc">Size (Smallest)</option>
                   <option value="format">Format</option>
@@ -304,7 +583,7 @@ export function LibraryView({
           </div>
 
           {/* Active Scope / Filter Info */}
-          {(selectedRoot || hasSearch || hasFilter) && (
+          {(selectedRoot || selectedCollection || hasSearch || hasFilter) && (
             <div className="catalog-status-bar">
               <div className="scope-indicator">
                 {selectedRoot && (
@@ -315,6 +594,19 @@ export function LibraryView({
                       className="pill-clear"
                       onClick={() => onSelectRoot(null)}
                       title="Show all documents"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                )}
+                {selectedCollection && (
+                  <span className="scope-pill collection-pill">
+                    Collection: <strong>{selectedCollection.name}</strong>
+                    <button
+                      type="button"
+                      className="pill-clear"
+                      onClick={() => setSelectedCollectionId(null)}
+                      title="Show all collections"
                     >
                       ✕
                     </button>
@@ -374,6 +666,11 @@ export function LibraryView({
                   ? formatRelativeTime(readingState.lastOpenedAt)
                   : null;
 
+                const displayTitle = getDocumentDisplayTitle(doc.record);
+                const authors = doc.record.metadata?.authors ?? [];
+                const docColIds = doc.record.collections ?? [];
+                const docCollections = collections.filter((c) => docColIds.includes(c.id));
+
                 return (
                   <article
                     key={doc.record.id}
@@ -383,47 +680,129 @@ export function LibraryView({
                     role="listitem"
                   >
                     <div className="doc-card-body">
-                      {/* Format Badge / Icon */}
-                      <div className="doc-badge-wrap">
-                        <span className={`doc-format-badge format-${doc.record.format}`}>
-                          {doc.record.format.toUpperCase()}
-                        </span>
-                        {progressText && (
-                          <span className="doc-progress-chip" title="Reading progress">
-                            {progressText}
-                          </span>
-                        )}
-                        {isMissing && (
-                          <span className="doc-missing-badge" title="File not found in root directory">
-                            Missing
-                          </span>
-                        )}
-                      </div>
+                      {/* Left: Cover thumbnail or format-colored placeholder */}
+                      <DocThumbnail
+                        documentId={doc.record.id}
+                        format={doc.record.format}
+                        title={displayTitle}
+                        hasThumbnail={Boolean(doc.record.metadata?.thumbnailPath)}
+                      />
 
-                      {/* Title & Metadata */}
-                      <div className="doc-meta-wrap">
-                        <h2 className="doc-title" title={doc.record.name}>
-                          {doc.record.name}
-                        </h2>
-
-                        <div className="doc-submeta">
-                          {directoryPrefix && (
-                            <span className="doc-folder-tag" title={`In folder: ${directoryPrefix}`}>
-                              📁 {directoryPrefix}
+                      {/* Right: Badges, Title, Authors, and Submeta */}
+                      <div className="doc-content-wrap">
+                        {/* Format Badge & Progress */}
+                        <div className="doc-badge-wrap">
+                          <span className={`doc-format-badge format-${doc.record.format}`}>
+                            {doc.record.format.toUpperCase()}
+                          </span>
+                          {progressText && (
+                            <span className="doc-progress-chip" title="Reading progress">
+                              {progressText}
                             </span>
                           )}
-                          <span className="doc-size-tag">{formatBytes(doc.record.sizeBytes)}</span>
-                          {lastOpenedText && (
-                            <span className="doc-opened-tag" title={`Last read: ${readingState?.lastOpenedAt}`}>
-                              Opened {lastOpenedText}
+                          {isMissing && (
+                            <span
+                              className="doc-missing-badge"
+                              title="File not found in root directory"
+                            >
+                              Missing
                             </span>
+                          )}
+                        </div>
+
+                        {/* Title & Metadata */}
+                        <div className="doc-meta-wrap">
+                          <h2 className="doc-title" title={displayTitle}>
+                            {displayTitle}
+                          </h2>
+
+                          {authors.length > 0 && (
+                            <p className="doc-authors" title={authors.join(", ")}>
+                              by {authors.join(", ")}
+                            </p>
+                          )}
+
+                          <div className="doc-submeta">
+                            {directoryPrefix && (
+                              <span
+                                className="doc-folder-tag"
+                                title={`In folder: ${directoryPrefix}`}
+                              >
+                                📁 {directoryPrefix}
+                              </span>
+                            )}
+                            <span className="doc-size-tag">
+                              {formatBytes(doc.record.sizeBytes)}
+                            </span>
+                            {lastOpenedText && (
+                              <span
+                                className="doc-opened-tag"
+                                title={`Last read: ${readingState?.lastOpenedAt}`}
+                              >
+                                Opened {lastOpenedText}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Collection Tags on Card */}
+                          {docCollections.length > 0 && (
+                            <div className="doc-collections-row">
+                              {docCollections.map((col) => (
+                                <span
+                                  key={col.id}
+                                  className="doc-collection-tag"
+                                  title={`Collection: ${col.name}`}
+                                >
+                                  🏷 {col.name}
+                                  {onRemoveDocFromCollection && (
+                                    <button
+                                      type="button"
+                                      className="collection-tag-remove"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void onRemoveDocFromCollection(col.id, doc.record.id);
+                                      }}
+                                      title={`Remove from ${col.name}`}
+                                      aria-label={`Remove from ${col.name}`}
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
                           )}
                         </div>
                       </div>
                     </div>
 
-                    {/* Action Button */}
+                    {/* Action Bar */}
                     <div className="doc-card-actions">
+                      {/* Add to collection dropdown */}
+                      {collections.length > 0 && onAddDocToCollection && (
+                        <select
+                          className="doc-add-collection-select"
+                          value=""
+                          onChange={(e) => {
+                            const cid = e.target.value;
+                            if (cid) void onAddDocToCollection(cid, doc.record.id);
+                          }}
+                          title="Add document to collection"
+                          aria-label="Add document to collection"
+                        >
+                          <option value="" disabled>
+                            + Collection
+                          </option>
+                          {collections
+                            .filter((c) => !docColIds.includes(c.id))
+                            .map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                        </select>
+                      )}
+
                       <button
                         type="button"
                         className={`doc-action-btn ${canOpen ? "openable" : ""}`}
@@ -451,87 +830,52 @@ export function LibraryView({
               {roots.length === 0 ? (
                 <div className="empty-message-wrap">
                   <span className="empty-icon">📚</span>
-                  <h2>No library directories configured</h2>
-                  <p>
-                    Add a folder from your filesystem to index your documents. Files remain in
-                    their original location.
-                  </p>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onClick={onAddRoot}
-                    disabled={pending}
-                  >
-                    Add directory
+                  <h3>No directories indexed</h3>
+                  <p>Add a directory containing your documents to view them in your library.</p>
+                  <button type="button" className="primary-button" onClick={onAddRoot}>
+                    Add your first directory
                   </button>
                 </div>
               ) : documents.length === 0 ? (
                 <div className="empty-message-wrap">
-                  <span className="empty-icon">🔍</span>
-                  <h2>No documents indexed yet</h2>
-                  <p>
-                    {selectedRoot
-                      ? `"${selectedRoot.label}" has not been scanned yet or contains no supported files.`
-                      : "Your library directories have not been scanned yet."}
-                  </p>
-                  {selectedRoot ? (
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={() => onScan(selectedRoot.id)}
-                      disabled={pending || selectedRoot.status === "disabled"}
-                    >
-                      {pendingRootId === selectedRoot.id ? "Scanning…" : `Scan "${selectedRoot.label}"`}
-                    </button>
-                  ) : (
-                    roots[0] && (
-                      <button
-                        type="button"
-                        className="primary-button"
-                        onClick={() => onScan(roots[0].id)}
-                        disabled={pending}
-                      >
-                        Scan library
-                      </button>
-                    )
-                  )}
-                </div>
-              ) : hasSearch ? (
-                <div className="empty-message-wrap">
-                  <span className="empty-icon">🔎</span>
-                  <h2>No matching documents</h2>
-                  <p>
-                    No documents matched <strong>"{searchQuery}"</strong>. Check for typos or
-                    try a different keyword.
-                  </p>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => setSearchQuery("")}
-                  >
-                    Clear search
-                  </button>
-                </div>
-              ) : hasFilter ? (
-                <div className="empty-message-wrap">
-                  <span className="empty-icon">📄</span>
-                  <h2>No {formatFilter.toUpperCase()} documents</h2>
-                  <p>
-                    There are no {formatFilter.toUpperCase()} files in the current view.
-                  </p>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => setFormatFilter("all")}
-                  >
-                    Show all formats
-                  </button>
+                  <span className="empty-icon">📂</span>
+                  <h3>No documents found</h3>
+                  <p>The indexed directories do not contain any supported files.</p>
                 </div>
               ) : (
                 <div className="empty-message-wrap">
-                  <span className="empty-icon">📂</span>
-                  <h2>No documents found</h2>
-                  <p>No documents are available in this view.</p>
+                  <span className="empty-icon">🔍</span>
+                  <h3>No matching documents</h3>
+                  <p>No documents matched the active query, format filter, or collection.</p>
+                  <div className="empty-actions">
+                    {hasSearch && (
+                      <button
+                        type="button"
+                        className="quiet-button"
+                        onClick={() => setSearchQuery("")}
+                      >
+                        Clear search
+                      </button>
+                    )}
+                    {hasFilter && (
+                      <button
+                        type="button"
+                        className="quiet-button"
+                        onClick={() => setFormatFilter("all")}
+                      >
+                        Reset format filter
+                      </button>
+                    )}
+                    {selectedCollection && (
+                      <button
+                        type="button"
+                        className="quiet-button"
+                        onClick={() => setSelectedCollectionId(null)}
+                      >
+                        Show all collections
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

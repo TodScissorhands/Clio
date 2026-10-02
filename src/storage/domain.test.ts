@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
   formatBytes,
+  getDocumentDisplayTitle,
   isReaderFormat,
   normalizeFormat,
+  type Collection,
   type DocumentId,
+  type DocumentMetadata,
   type DocumentRecord,
   type FormatId,
   type LibraryRoot,
@@ -133,5 +136,93 @@ describe("Storage domain contracts", () => {
     };
     expect(root.kind).toBe("filesystem-directory");
     expect(root.status).toBe("active");
+  });
+
+  it("models DocumentMetadata with title, authors, and provenance", () => {
+    const meta: DocumentMetadata = {
+      title: "Moby Dick",
+      authors: ["Herman Melville"],
+      publisher: "Harper & Brothers",
+      publishedDate: "1851-10-18",
+      description: "A quest for a white whale.",
+      language: "en",
+      identifiers: ["urn:isbn:9780142437247"],
+      provenance: "embedded",
+      thumbnailPath: "doc-1.png",
+    };
+    expect(meta.title).toBe("Moby Dick");
+    expect(meta.authors).toEqual(["Herman Melville"]);
+    expect(meta.provenance).toBe("embedded");
+    expect(meta.thumbnailPath).toBe("doc-1.png");
+  });
+
+  it("derives display title with metadata title or falls back to record name", () => {
+    const docWithTitle: DocumentRecord = {
+      id: "doc-1",
+      name: "raw_filename_1234.pdf",
+      format: "pdf",
+      sizeBytes: 1024,
+      firstSeenAt: "2026-10-01T10:00:00Z",
+      updatedAt: "2026-10-01T10:00:00Z",
+      metadata: {
+        title: "Clean Book Title",
+        authors: ["Author Name"],
+        identifiers: [],
+        provenance: "embedded",
+      },
+    };
+    expect(getDocumentDisplayTitle(docWithTitle)).toBe("Clean Book Title");
+
+    const docNoTitle: DocumentRecord = {
+      id: "doc-2",
+      name: "raw_filename_5678.pdf",
+      format: "pdf",
+      sizeBytes: 1024,
+      firstSeenAt: "2026-10-01T10:00:00Z",
+      updatedAt: "2026-10-01T10:00:00Z",
+      metadata: {
+        title: null,
+        authors: [],
+        identifiers: [],
+        provenance: "fallback",
+      },
+    };
+    expect(getDocumentDisplayTitle(docNoTitle)).toBe("raw_filename_5678.pdf");
+
+    const docWhitespaceTitle: DocumentRecord = {
+      ...docNoTitle,
+      metadata: {
+        title: "   ",
+        authors: [],
+        identifiers: [],
+        provenance: "fallback",
+      },
+    };
+    expect(getDocumentDisplayTitle(docWhitespaceTitle)).toBe("raw_filename_5678.pdf");
+  });
+
+  it("models user-defined Collections and document membership", () => {
+    const col: Collection = {
+      id: "col-fiction-1",
+      name: "Fiction",
+      description: "Novels and stories",
+      documentCount: 3,
+      createdAt: "2026-10-01T10:00:00Z",
+      updatedAt: "2026-10-01T10:00:00Z",
+    };
+    expect(col.name).toBe("Fiction");
+    expect(col.documentCount).toBe(3);
+
+    const docInCols: DocumentRecord = {
+      id: "doc-3",
+      name: "novel.epub",
+      format: "epub",
+      sizeBytes: 2048,
+      firstSeenAt: "2026-10-01T10:00:00Z",
+      updatedAt: "2026-10-01T10:00:00Z",
+      collections: ["col-fiction-1", "col-favorites"],
+    };
+    expect(docInCols.collections?.length).toBe(2);
+    expect(docInCols.collections?.includes("col-fiction-1")).toBe(true);
   });
 });

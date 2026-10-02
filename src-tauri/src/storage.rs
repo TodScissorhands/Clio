@@ -1,3 +1,4 @@
+use crate::metadata::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,20 +13,33 @@ use uuid::Uuid;
 const SUPPORTED_FORMATS: &[&str] = &[
     "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt",
 ];
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone)]
 pub struct LibraryDb {
     connection: Arc<Mutex<Connection>>,
     scan_lock: Arc<Mutex<()>>,
+    pub thumbnail_dir: PathBuf,
 }
 
 impl LibraryDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let p = path.as_ref();
+        let thumb_dir = p.parent().unwrap_or(Path::new(".")).join("thumbnails");
+        Self::open_with_thumbnail_dir(p, thumb_dir)
+    }
+
+    pub fn open_with_thumbnail_dir(
+        path: impl AsRef<Path>,
+        thumbnail_dir: impl AsRef<Path>,
+    ) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(db_error)?;
+        let thumb_dir = thumbnail_dir.as_ref().to_path_buf();
+        let _ = fs::create_dir_all(&thumb_dir);
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
             scan_lock: Arc::new(Mutex::new(())),
+            thumbnail_dir: thumb_dir,
         };
         db.migrate()?;
         Ok(db)
@@ -33,10 +47,13 @@ impl LibraryDb {
 
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self, String> {
+        let thumb_dir = std::env::temp_dir().join(format!("clio-thumbs-{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&thumb_dir);
         let connection = Connection::open_in_memory().map_err(db_error)?;
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
             scan_lock: Arc::new(Mutex::new(())),
+            thumbnail_dir: thumb_dir,
         };
         db.migrate()?;
         Ok(db)
@@ -220,6 +237,50 @@ impl LibraryDb {
                 .map_err(db_error)?;
             transaction.commit().map_err(db_error)?;
         }
+
+        if version < 4 {
+            let transaction = connection.transaction().map_err(db_error)?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS document_metadata (
+                         document_id TEXT PRIMARY KEY NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                         title TEXT,
+                         authors TEXT NOT NULL DEFAULT '[]',
+                         publisher TEXT,
+                         published_date TEXT,
+                         description TEXT,
+                         language TEXT,
+                         identifiers TEXT NOT NULL DEFAULT '[]',
+                         provenance TEXT NOT NULL DEFAULT 'fallback' CHECK (provenance IN ('embedded', 'fallback')),
+                         thumbnail_path TEXT,
+                         updated_at TEXT NOT NULL
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_document_metadata_doc_id ON document_metadata(document_id);
+                     CREATE INDEX IF NOT EXISTS idx_document_metadata_title ON document_metadata(title COLLATE NOCASE);
+
+                     CREATE TABLE IF NOT EXISTS collections (
+                         id TEXT PRIMARY KEY NOT NULL,
+                         name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                         description TEXT,
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_collections_name ON collections(name);
+
+                     CREATE TABLE IF NOT EXISTS document_collections (
+                         collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                         document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                         added_at TEXT NOT NULL,
+                         PRIMARY KEY (collection_id, document_id)
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_doc_col_collection ON document_collections(collection_id);
+                     CREATE INDEX IF NOT EXISTS idx_doc_col_document ON document_collections(document_id);
+
+                     PRAGMA user_version = 4;",
+                )
+                .map_err(db_error)?;
+            transaction.commit().map_err(db_error)?;
+        }
         Ok(())
     }
 
@@ -397,7 +458,7 @@ impl LibraryDb {
                 )
                 .optional()
                 .map_err(db_error)?;
-            if let Some(document_id) = existing_id {
+            let doc_id = if let Some(document_id) = existing_id {
                 transaction
                     .execute(
                         "UPDATE documents
@@ -415,6 +476,7 @@ impl LibraryDb {
                     )
                     .map_err(db_error)?;
                 updated += 1;
+                document_id
             } else {
                 let document_id = Uuid::new_v4().to_string();
                 transaction
@@ -437,7 +499,56 @@ impl LibraryDb {
                     )
                     .map_err(db_error)?;
                 inserted += 1;
-            }
+                document_id
+            };
+
+            // Extract metadata & thumbnail for present document
+            let (doc_meta, _thumb) = extract_metadata_and_thumbnail(
+                path,
+                format_id.as_str(),
+                &doc_id,
+                &self.thumbnail_dir,
+            );
+            let authors_json =
+                serde_json::to_string(&doc_meta.authors).unwrap_or_else(|_| "[]".to_string());
+            let idents_json =
+                serde_json::to_string(&doc_meta.identifiers).unwrap_or_else(|_| "[]".to_string());
+            let prov_str = match doc_meta.provenance {
+                MetadataProvenance::Embedded => "embedded",
+                MetadataProvenance::Fallback => "fallback",
+            };
+            transaction
+                .execute(
+                    "INSERT INTO document_metadata
+                         (document_id, title, authors, publisher, published_date, description,
+                          language, identifiers, provenance, thumbnail_path, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     ON CONFLICT(document_id) DO UPDATE SET
+                         title = excluded.title,
+                         authors = excluded.authors,
+                         publisher = excluded.publisher,
+                         published_date = excluded.published_date,
+                         description = excluded.description,
+                         language = excluded.language,
+                         identifiers = excluded.identifiers,
+                         provenance = excluded.provenance,
+                         thumbnail_path = COALESCE(excluded.thumbnail_path, document_metadata.thumbnail_path),
+                         updated_at = excluded.updated_at",
+                    params![
+                        doc_id,
+                        doc_meta.title,
+                        authors_json,
+                        doc_meta.publisher,
+                        doc_meta.published_date,
+                        doc_meta.description,
+                        doc_meta.language,
+                        idents_json,
+                        prov_str,
+                        doc_meta.thumbnail_path,
+                        now,
+                    ],
+                )
+                .map_err(db_error)?;
         }
         transaction
             .execute(
@@ -494,11 +605,29 @@ impl LibraryDb {
         include_missing: bool,
     ) -> Result<Vec<DocumentDto>, String> {
         let connection = self.lock()?;
+        let mut col_stmt = connection
+            .prepare("SELECT document_id, collection_id FROM document_collections")
+            .map_err(db_error)?;
+        let mut doc_collections: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let col_rows = col_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?;
+        for r in col_rows {
+            let (doc_id, col_id) = r.map_err(db_error)?;
+            doc_collections.entry(doc_id).or_default().push(col_id);
+        }
+
         let mut statement = connection
             .prepare(
                 "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
-                        d.root_id, d.relative_path, d.availability
+                        d.root_id, d.relative_path, d.availability,
+                        dm.title, dm.authors, dm.publisher, dm.published_date,
+                        dm.description, dm.language, dm.identifiers, dm.provenance, dm.thumbnail_path
                  FROM documents d
+                 LEFT JOIN document_metadata dm ON dm.document_id = d.id
                  WHERE (?1 IS NULL OR d.root_id = ?1) AND (?2 OR d.availability = 'present')
                  ORDER BY d.name COLLATE NOCASE, d.id",
             )
@@ -506,8 +635,12 @@ impl LibraryDb {
         let rows = statement
             .query_map(params![root_id, include_missing], document_from_row)
             .map_err(db_error)?;
-        rows.map(|row| row.map_err(db_error).map(DocumentRow::into_dto))
-            .collect()
+        rows.map(|row| {
+            let doc = row.map_err(db_error)?;
+            let collections = doc_collections.get(&doc.id).cloned().unwrap_or_default();
+            Ok(doc.into_dto(collections))
+        })
+        .collect()
     }
 
     pub fn open_library_document<F>(
@@ -814,6 +947,378 @@ impl LibraryDb {
             .optional()
             .map_err(db_error)
     }
+
+    pub fn create_collection(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<CollectionDto, String> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err("Collection name cannot be empty.".to_string());
+        }
+        let connection = self.lock()?;
+        let id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        let desc = description
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        connection
+            .execute(
+                "INSERT INTO collections (id, name, description, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, trimmed_name, desc, now, now],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    "A collection with this name already exists.".to_string()
+                } else {
+                    db_error(e)
+                }
+            })?;
+        Ok(CollectionDto {
+            id,
+            name: trimmed_name.to_string(),
+            description: desc,
+            document_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn list_collections(&self) -> Result<Vec<CollectionDto>, String> {
+        let connection = self.lock()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT c.id, c.name, c.description, c.created_at, c.updated_at,
+                        COUNT(dc.document_id) as doc_count
+                 FROM collections c
+                 LEFT JOIN document_collections dc ON dc.collection_id = c.id
+                 GROUP BY c.id
+                 ORDER BY c.name COLLATE NOCASE, c.id",
+            )
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CollectionDto {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    document_count: row.get::<_, i64>(5)?.max(0) as u64,
+                })
+            })
+            .map_err(db_error)?;
+        rows.map(|r| r.map_err(db_error)).collect()
+    }
+
+    pub fn rename_collection(&self, id: &str, new_name: &str) -> Result<CollectionDto, String> {
+        let trimmed_name = new_name.trim();
+        if trimmed_name.is_empty() {
+            return Err("Collection name cannot be empty.".to_string());
+        }
+        let connection = self.lock()?;
+        let now = timestamp();
+        let updated = connection
+            .execute(
+                "UPDATE collections SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![trimmed_name, now, id],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    "A collection with this name already exists.".to_string()
+                } else {
+                    db_error(e)
+                }
+            })?;
+        if updated == 0 {
+            return Err("Collection was not found.".to_string());
+        }
+        connection
+            .query_row(
+                "SELECT c.id, c.name, c.description, c.created_at, c.updated_at,
+                        COUNT(dc.document_id) as doc_count
+                 FROM collections c
+                 LEFT JOIN document_collections dc ON dc.collection_id = c.id
+                 WHERE c.id = ?1
+                 GROUP BY c.id",
+                [id],
+                |row| {
+                    Ok(CollectionDto {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        document_count: row.get::<_, i64>(5)?.max(0) as u64,
+                    })
+                },
+            )
+            .map_err(db_error)
+    }
+
+    pub fn delete_collection(&self, id: &str) -> Result<(), String> {
+        let connection = self.lock()?;
+        let deleted = connection
+            .execute("DELETE FROM collections WHERE id = ?1", [id])
+            .map_err(db_error)?;
+        if deleted == 0 {
+            return Err("Collection was not found.".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn add_document_to_collection(
+        &self,
+        collection_id: &str,
+        document_id: &str,
+    ) -> Result<(), String> {
+        let connection = self.lock()?;
+        let col_exists: Option<String> = connection
+            .query_row(
+                "SELECT id FROM collections WHERE id = ?1",
+                [collection_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if col_exists.is_none() {
+            return Err("Collection was not found.".to_string());
+        }
+        let doc_exists: Option<String> = connection
+            .query_row(
+                "SELECT id FROM documents WHERE id = ?1",
+                [document_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if doc_exists.is_none() {
+            return Err("Document was not found.".to_string());
+        }
+        let now = timestamp();
+        connection
+            .execute(
+                "INSERT INTO document_collections (collection_id, document_id, added_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(collection_id, document_id) DO NOTHING",
+                params![collection_id, document_id, now],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn remove_document_from_collection(
+        &self,
+        collection_id: &str,
+        document_id: &str,
+    ) -> Result<(), String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "DELETE FROM document_collections WHERE collection_id = ?1 AND document_id = ?2",
+                params![collection_id, document_id],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn list_collection_documents(
+        &self,
+        collection_id: &str,
+    ) -> Result<Vec<DocumentDto>, String> {
+        let connection = self.lock()?;
+        let mut col_stmt = connection
+            .prepare("SELECT document_id, collection_id FROM document_collections")
+            .map_err(db_error)?;
+        let mut doc_collections: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let col_rows = col_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?;
+        for r in col_rows {
+            let (doc_id, col_id) = r.map_err(db_error)?;
+            doc_collections.entry(doc_id).or_default().push(col_id);
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
+                        d.root_id, d.relative_path, d.availability,
+                        dm.title, dm.authors, dm.publisher, dm.published_date,
+                        dm.description, dm.language, dm.identifiers, dm.provenance, dm.thumbnail_path
+                 FROM documents d
+                 JOIN document_collections dc ON dc.document_id = d.id
+                 LEFT JOIN document_metadata dm ON dm.document_id = d.id
+                 WHERE dc.collection_id = ?1
+                 ORDER BY d.name COLLATE NOCASE, d.id",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([collection_id], document_from_row)
+            .map_err(db_error)?;
+        rows.map(|row| {
+            let doc = row.map_err(db_error)?;
+            let collections = doc_collections.get(&doc.id).cloned().unwrap_or_default();
+            Ok(doc.into_dto(collections))
+        })
+        .collect()
+    }
+
+    pub fn list_document_collections(&self, document_id: &str) -> Result<Vec<String>, String> {
+        let connection = self.lock()?;
+        let mut stmt = connection
+            .prepare("SELECT collection_id FROM document_collections WHERE document_id = ?1")
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([document_id], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        rows.map(|r| r.map_err(db_error)).collect()
+    }
+
+    pub fn get_metadata(&self, document_id: &str) -> Result<Option<DocumentMetadata>, String> {
+        let connection = self.lock()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT title, authors, publisher, published_date, description, language,
+                        identifiers, provenance, thumbnail_path
+                 FROM document_metadata WHERE document_id = ?1",
+            )
+            .map_err(db_error)?;
+        let meta = stmt
+            .query_row([document_id], |row| {
+                let title: Option<String> = row.get(0)?;
+                let authors_raw: Option<String> = row.get(1)?;
+                let publisher: Option<String> = row.get(2)?;
+                let published_date: Option<String> = row.get(3)?;
+                let description: Option<String> = row.get(4)?;
+                let language: Option<String> = row.get(5)?;
+                let idents_raw: Option<String> = row.get(6)?;
+                let provenance_raw: Option<String> = row.get(7)?;
+                let thumbnail_path: Option<String> = row.get(8)?;
+
+                let authors: Vec<String> = authors_raw
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let identifiers: Vec<String> = idents_raw
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let provenance = match provenance_raw.as_deref() {
+                    Some("embedded") => MetadataProvenance::Embedded,
+                    _ => MetadataProvenance::Fallback,
+                };
+                Ok(DocumentMetadata {
+                    title,
+                    authors,
+                    publisher,
+                    published_date,
+                    description,
+                    language,
+                    identifiers,
+                    provenance,
+                    thumbnail_path,
+                })
+            })
+            .optional()
+            .map_err(db_error)?;
+        Ok(meta)
+    }
+
+    pub fn update_metadata(
+        &self,
+        document_id: &str,
+        metadata: DocumentMetadata,
+    ) -> Result<DocumentMetadata, String> {
+        let connection = self.lock()?;
+        let now = timestamp();
+        let authors_json =
+            serde_json::to_string(&metadata.authors).unwrap_or_else(|_| "[]".to_string());
+        let idents_json =
+            serde_json::to_string(&metadata.identifiers).unwrap_or_else(|_| "[]".to_string());
+        let prov_str = match metadata.provenance {
+            MetadataProvenance::Embedded => "embedded",
+            MetadataProvenance::Fallback => "fallback",
+        };
+        connection
+            .execute(
+                "INSERT INTO document_metadata
+                     (document_id, title, authors, publisher, published_date, description, language, identifiers, provenance, thumbnail_path, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(document_id) DO UPDATE SET
+                     title = excluded.title,
+                     authors = excluded.authors,
+                     publisher = excluded.publisher,
+                     published_date = excluded.published_date,
+                     description = excluded.description,
+                     language = excluded.language,
+                     identifiers = excluded.identifiers,
+                     provenance = excluded.provenance,
+                     thumbnail_path = COALESCE(excluded.thumbnail_path, document_metadata.thumbnail_path),
+                     updated_at = excluded.updated_at",
+                params![
+                    document_id,
+                    metadata.title,
+                    authors_json,
+                    metadata.publisher,
+                    metadata.published_date,
+                    metadata.description,
+                    metadata.language,
+                    idents_json,
+                    prov_str,
+                    metadata.thumbnail_path,
+                    now,
+                ],
+            )
+            .map_err(db_error)?;
+        Ok(metadata)
+    }
+
+    pub fn get_thumbnail_data_url(&self, document_id: &str) -> Result<Option<String>, String> {
+        let connection = self.lock()?;
+        let path: Option<String> = connection
+            .query_row(
+                "SELECT thumbnail_path FROM document_metadata WHERE document_id = ?1",
+                [document_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        let Some(rel_path) = path else {
+            return Ok(None);
+        };
+        let full_path = self.thumbnail_dir.join(&rel_path);
+        if !full_path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&full_path).map_err(|e| format!("Could not read thumbnail: {e}"))?;
+        let mime = if rel_path.ends_with(".png") {
+            "image/png"
+        } else if rel_path.ends_with(".jpg") || rel_path.ends_with(".jpeg") {
+            "image/jpeg"
+        } else if rel_path.ends_with(".webp") {
+            "image/webp"
+        } else {
+            "application/octet-stream"
+        };
+        let b64 = base64_encode(&bytes);
+        Ok(Some(format!("data:{mime};base64,{b64}")))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionDto {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub document_count: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -827,7 +1332,7 @@ pub struct LibraryRootDto {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentDto {
     pub id: String,
@@ -840,6 +1345,8 @@ pub struct DocumentDto {
     pub root_id: String,
     pub relative_path: String,
     pub availability: String,
+    pub metadata: Option<DocumentMetadata>,
+    pub collections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1164,6 +1671,92 @@ pub fn annotation_delete(db: State<'_, LibraryDb>, annotation_id: String) -> Res
     db.delete_annotation(&annotation_id)
 }
 
+#[tauri::command]
+pub fn library_collection_create(
+    db: State<'_, LibraryDb>,
+    name: String,
+    description: Option<String>,
+) -> Result<CollectionDto, String> {
+    db.create_collection(&name, description.as_deref())
+}
+
+#[tauri::command]
+pub fn library_collection_list(db: State<'_, LibraryDb>) -> Result<Vec<CollectionDto>, String> {
+    db.list_collections()
+}
+
+#[tauri::command]
+pub fn library_collection_rename(
+    db: State<'_, LibraryDb>,
+    id: String,
+    name: String,
+) -> Result<CollectionDto, String> {
+    db.rename_collection(&id, &name)
+}
+
+#[tauri::command]
+pub fn library_collection_delete(db: State<'_, LibraryDb>, id: String) -> Result<(), String> {
+    db.delete_collection(&id)
+}
+
+#[tauri::command]
+pub fn library_collection_add_document(
+    db: State<'_, LibraryDb>,
+    collection_id: String,
+    document_id: String,
+) -> Result<(), String> {
+    db.add_document_to_collection(&collection_id, &document_id)
+}
+
+#[tauri::command]
+pub fn library_collection_remove_document(
+    db: State<'_, LibraryDb>,
+    collection_id: String,
+    document_id: String,
+) -> Result<(), String> {
+    db.remove_document_from_collection(&collection_id, &document_id)
+}
+
+#[tauri::command]
+pub fn library_collection_list_documents(
+    db: State<'_, LibraryDb>,
+    collection_id: String,
+) -> Result<Vec<DocumentDto>, String> {
+    db.list_collection_documents(&collection_id)
+}
+
+#[tauri::command]
+pub fn library_thumbnail_get(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+) -> Result<Option<String>, String> {
+    db.get_thumbnail_data_url(&document_id)
+}
+
+#[tauri::command]
+pub fn library_metadata_get(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+) -> Result<Option<DocumentMetadata>, String> {
+    db.get_metadata(&document_id)
+}
+
+#[tauri::command]
+pub fn library_metadata_update(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+    metadata: DocumentMetadata,
+) -> Result<DocumentMetadata, String> {
+    db.update_metadata(&document_id, metadata)
+}
+
+#[tauri::command]
+pub fn library_document_collections_list(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+) -> Result<Vec<String>, String> {
+    db.list_document_collections(&document_id)
+}
 /// Build a tokenized response for a directly selected file. The callback is owned by lib.rs so
 /// its token is inserted into the same authorization registry used by read_document_bytes.
 pub fn direct_open<F>(path: String, mint_token: F) -> Result<ReaderOpen, String>
@@ -1389,10 +1982,11 @@ struct DocumentRow {
     root_id: String,
     relative_path: String,
     availability: String,
+    metadata: Option<DocumentMetadata>,
 }
 
 impl DocumentRow {
-    fn into_dto(self) -> DocumentDto {
+    fn into_dto(self, collections: Vec<String>) -> DocumentDto {
         DocumentDto {
             id: self.id,
             name: self.name,
@@ -1407,6 +2001,8 @@ impl DocumentRow {
             root_id: self.root_id,
             relative_path: self.relative_path,
             availability: self.availability,
+            metadata: self.metadata,
+            collections,
         }
     }
 }
@@ -1432,6 +2028,42 @@ fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RootRow> {
 }
 
 fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
+    let title: Option<String> = row.get(9)?;
+    let authors_raw: Option<String> = row.get(10)?;
+    let publisher: Option<String> = row.get(11)?;
+    let published_date: Option<String> = row.get(12)?;
+    let description: Option<String> = row.get(13)?;
+    let language: Option<String> = row.get(14)?;
+    let idents_raw: Option<String> = row.get(15)?;
+    let provenance_raw: Option<String> = row.get(16)?;
+    let thumbnail_path: Option<String> = row.get(17)?;
+
+    let metadata = if provenance_raw.is_some() || title.is_some() {
+        let authors: Vec<String> = authors_raw
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let identifiers: Vec<String> = idents_raw
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let provenance = match provenance_raw.as_deref() {
+            Some("embedded") => MetadataProvenance::Embedded,
+            _ => MetadataProvenance::Fallback,
+        };
+        Some(DocumentMetadata {
+            title,
+            authors,
+            publisher,
+            published_date,
+            description,
+            language,
+            identifiers,
+            provenance,
+            thumbnail_path,
+        })
+    } else {
+        None
+    };
+
     Ok(DocumentRow {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -1442,6 +2074,7 @@ fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
         root_id: row.get(6)?,
         relative_path: row.get(7)?,
         availability: row.get(8)?,
+        metadata,
     })
 }
 
@@ -1569,7 +2202,8 @@ fn parse_format(value: String) -> rusqlite::Result<FormatId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::conversion::is_tool_installed;
+    use std::process::Command;
     #[test]
     fn test_schema_migration_and_idempotence() {
         let db = LibraryDb::open_in_memory().expect("open in-memory db");
@@ -1579,7 +2213,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("query user_version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -1990,7 +2624,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("user_version");
-            assert_eq!(version, 3, "schema must be at version 3");
+            assert!(version >= 3, "schema must be at least version 3");
         }
 
         let root = db
@@ -2177,6 +2811,383 @@ mod tests {
         db.delete_annotation(&ann.id)
             .expect("delete existing annotation");
         assert!(db.list_annotations(&doc_id).expect("list").is_empty());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_schema_v4_tables_and_metadata_persistence() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-meta-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        fs::write(temp_dir.join("sample.txt"), b"plain text").expect("write txt");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        // Verify tables exist in schema v4
+        {
+            let conn = db.lock().expect("lock");
+            let meta_exists = table_exists(&conn, "document_metadata").expect("table check");
+            let col_exists = table_exists(&conn, "collections").expect("table check");
+            let doc_col_exists = table_exists(&conn, "document_collections").expect("table check");
+            assert!(meta_exists, "document_metadata table must exist");
+            assert!(col_exists, "collections table must exist");
+            assert!(doc_col_exists, "document_collections table must exist");
+        }
+
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan root");
+
+        let docs = db.list_documents(Some(&root.id), false).expect("list docs");
+        assert_eq!(docs.len(), 1);
+        let doc_id = &docs[0].id;
+
+        // Fallback metadata was generated and saved
+        let meta = db
+            .get_metadata(doc_id)
+            .expect("get metadata")
+            .expect("meta exists");
+        assert_eq!(meta.provenance, MetadataProvenance::Fallback);
+
+        // Update metadata manually
+        let custom_meta = DocumentMetadata {
+            title: Some("My Custom Document".to_string()),
+            authors: vec!["Alice Author".to_string(), "Bob Coauthor".to_string()],
+            publisher: Some("Independent Press".to_string()),
+            published_date: Some("2026-10-02".to_string()),
+            description: Some("A rich description of the document.".to_string()),
+            language: Some("en".to_string()),
+            identifiers: vec!["isbn:1234567890".to_string()],
+            provenance: MetadataProvenance::Embedded,
+            thumbnail_path: None,
+        };
+        let saved = db
+            .update_metadata(doc_id, custom_meta.clone())
+            .expect("update metadata");
+        assert_eq!(saved.title, Some("My Custom Document".to_string()));
+        assert_eq!(saved.authors.len(), 2);
+
+        // Verify list_documents reflects updated metadata
+        let docs_updated = db.list_documents(Some(&root.id), false).expect("list docs");
+        let doc_with_meta = &docs_updated[0];
+        assert_eq!(
+            doc_with_meta.metadata.as_ref().unwrap().title,
+            Some("My Custom Document".to_string())
+        );
+        assert_eq!(
+            doc_with_meta.metadata.as_ref().unwrap().authors,
+            vec!["Alice Author", "Bob Coauthor"]
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_collections_crud_and_membership_cascades() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-col-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        fs::write(temp_dir.join("doc1.txt"), b"doc 1").expect("write doc1");
+        fs::write(temp_dir.join("doc2.txt"), b"doc 2").expect("write doc2");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan root");
+        let docs = db.list_documents(Some(&root.id), false).expect("list docs");
+        assert_eq!(docs.len(), 2);
+        let id1 = &docs[0].id;
+        let id2 = &docs[1].id;
+
+        // 1. Create collection
+        let c1 = db
+            .create_collection("Fiction", Some("Favorite novels"))
+            .expect("create c1");
+        assert_eq!(c1.name, "Fiction");
+        assert_eq!(c1.description.as_deref(), Some("Favorite novels"));
+        assert_eq!(c1.document_count, 0);
+
+        // Duplicate name rejection
+        assert!(
+            db.create_collection("Fiction", None).is_err(),
+            "duplicate collection name must fail"
+        );
+        assert!(
+            db.create_collection("fiction", None).is_err(),
+            "case-insensitive duplicate name must fail"
+        );
+
+        let c2 = db.create_collection("To Read", None).expect("create c2");
+
+        // 2. Add document membership
+        db.add_document_to_collection(&c1.id, id1)
+            .expect("add id1 to c1");
+        db.add_document_to_collection(&c1.id, id2)
+            .expect("add id2 to c1");
+        db.add_document_to_collection(&c2.id, id1)
+            .expect("add id1 to c2");
+
+        // Adding duplicate membership is safe / idempotent
+        assert!(db.add_document_to_collection(&c1.id, id1).is_ok());
+
+        // Verify document counts
+        let cols = db.list_collections().expect("list cols");
+        let c1_listed = cols.iter().find(|c| c.id == c1.id).expect("find c1");
+        let c2_listed = cols.iter().find(|c| c.id == c2.id).expect("find c2");
+        assert_eq!(c1_listed.document_count, 2);
+        assert_eq!(c2_listed.document_count, 1);
+
+        // Verify list_collection_documents
+        let c1_docs = db.list_collection_documents(&c1.id).expect("list c1 docs");
+        assert_eq!(c1_docs.len(), 2);
+        let c2_docs = db.list_collection_documents(&c2.id).expect("list c2 docs");
+        assert_eq!(c2_docs.len(), 1);
+        assert_eq!(c2_docs[0].id, *id1);
+
+        // Verify list_documents includes collection IDs
+        let all_docs = db.list_documents(Some(&root.id), false).expect("list all");
+        let d1 = all_docs.iter().find(|d| d.id == *id1).expect("find d1");
+        assert_eq!(d1.collections.len(), 2);
+        assert!(d1.collections.contains(&c1.id));
+        assert!(d1.collections.contains(&c2.id));
+
+        // 3. Rename collection
+        let renamed = db
+            .rename_collection(&c1.id, "Classic Fiction")
+            .expect("rename");
+        assert_eq!(renamed.name, "Classic Fiction");
+        assert_eq!(renamed.document_count, 2);
+
+        // Rename with duplicate name rejected
+        assert!(db.rename_collection(&c2.id, "Classic Fiction").is_err());
+
+        // 4. Remove document from collection
+        db.remove_document_from_collection(&c1.id, id2)
+            .expect("remove id2 from c1");
+        let c1_docs_after = db.list_collection_documents(&c1.id).expect("list c1 docs");
+        assert_eq!(c1_docs_after.len(), 1);
+
+        // 5. Delete collection: collection deleted, membership deleted, DOCUMENTS INTACT
+        db.delete_collection(&c2.id).expect("delete c2");
+        assert_eq!(db.list_collections().expect("list cols").len(), 1);
+        // Documents still exist
+        let docs_still_here = db.list_documents(Some(&root.id), false).expect("list docs");
+        assert_eq!(docs_still_here.len(), 2);
+
+        // 6. Delete document (via root remove): membership cleaned up, collection intact
+        db.remove_root(&root.id).expect("remove root");
+        assert_eq!(db.list_documents(None, false).expect("list").len(), 0);
+        let c1_after_root_delete = db.list_collections().expect("list cols");
+        assert_eq!(c1_after_root_delete[0].document_count, 0);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_thumbnail_data_url_generation() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-test-thumb-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        fs::write(temp_dir.join("sample.txt"), b"sample").expect("write sample");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan root");
+        let docs = db.list_documents(Some(&root.id), false).expect("list docs");
+        let doc_id = &docs[0].id;
+
+        // 1. Initially fallback metadata has no thumbnail -> returns None
+        assert_eq!(db.get_thumbnail_data_url(doc_id).unwrap(), None);
+
+        // 2. Put a real dummy thumbnail in thumbnail_dir
+        let thumb_filename = format!("{doc_id}.png");
+        let thumb_path = db.thumbnail_dir.join(&thumb_filename);
+        let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest";
+        fs::write(&thumb_path, png_bytes).expect("write thumb");
+
+        // Save metadata with thumbnail path
+        let mut meta = DocumentMetadata::fallback();
+        meta.thumbnail_path = Some(thumb_filename);
+        db.update_metadata(doc_id, meta).expect("save meta");
+
+        // 3. get_thumbnail_data_url returns data:image/png;base64,...
+        let data_url = db
+            .get_thumbnail_data_url(doc_id)
+            .unwrap()
+            .expect("data url");
+        assert!(data_url.starts_with("data:image/png;base64,"));
+        assert!(data_url.len() > 25);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_live_metadata_extraction_and_collections_workflow() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-live-meta-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+
+        // 1. Create a real EPUB with metadata and a cover
+        let epub_dir = temp_dir.join("epub_build");
+        let meta_inf = epub_dir.join("META-INF");
+        let oebps = epub_dir.join("OEBPS");
+        let oebps_img = oebps.join("images");
+        fs::create_dir_all(&meta_inf).expect("create meta-inf");
+        fs::create_dir_all(&oebps_img).expect("create oebps img");
+
+        fs::write(epub_dir.join("mimetype"), b"application/epub+zip").expect("write mimetype");
+        fs::write(
+            meta_inf.join("container.xml"),
+            r#"<?xml version="1.0"?>
+            <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+              <rootfiles>
+                <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+              </rootfiles>
+            </container>"#,
+        )
+        .expect("write container");
+
+        fs::write(
+            oebps.join("content.opf"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:title>Moby Dick</dc:title>
+                <dc:creator>Herman Melville</dc:creator>
+                <dc:publisher>Harper &amp; Brothers</dc:publisher>
+                <dc:date>1851-10-18</dc:date>
+                <dc:language>en</dc:language>
+                <dc:description>Captain Ahab quest.</dc:description>
+                <dc:identifier>isbn:9780142437247</dc:identifier>
+              </metadata>
+              <manifest>
+                <item id="cov" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+              </manifest>
+            </package>"#,
+        )
+        .expect("write opf");
+
+        // Valid 1x1 PNG bytes for cover
+        let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82";
+        fs::write(oebps_img.join("cover.png"), png_bytes).expect("write cover png");
+
+        // Package into real test.epub using system zip CLI if available
+        let epub_path = temp_dir.join("book.epub");
+        let zip_res = Command::new("zip")
+            .current_dir(&epub_dir)
+            .args(["-0", "-X"])
+            .arg(&epub_path)
+            .arg("mimetype")
+            .output();
+        if let Ok(z) = zip_res {
+            if z.status.success() {
+                let _ = Command::new("zip")
+                    .current_dir(&epub_dir)
+                    .args(["-r"])
+                    .arg(&epub_path)
+                    .arg("META-INF")
+                    .arg("OEBPS")
+                    .output();
+            }
+        }
+        let _ = fs::remove_dir_all(&epub_dir);
+
+        // 2. Create a PDF with Info metadata
+        let pdf_path = temp_dir.join("paper.pdf");
+        let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 200 200]/Parent 2 0 R>>endobj\n4 0 obj<</Title (Rust Systems)/Author (Ferris)/Subject (Systems Programming)>>endobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \n0000000159 00000 n \ntrailer<</Size 5/Root 1 0 R/Info 4 0 R>>\nstartxref\n260\n%%EOF\n";
+        fs::write(&pdf_path, pdf_bytes).expect("write pdf");
+
+        // 3. Create a plain text file (fallback metadata)
+        let txt_path = temp_dir.join("notes.txt");
+        fs::write(&txt_path, b"Some plain text notes.").expect("write txt");
+
+        // 4. Scan using LibraryDb
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        let scan = db.scan_root(&root.id).expect("scan");
+        assert_eq!(scan.missing, 0);
+        assert!(scan.scanned >= 2); // pdf + txt (+ epub if zip was installed)
+
+        let docs = db.list_documents(Some(&root.id), false).expect("list docs");
+        assert!(docs.len() >= 2);
+
+        // Verify PDF metadata
+        let pdf_doc = docs
+            .iter()
+            .find(|d| d.name == "paper.pdf")
+            .expect("find pdf");
+        if let Some(meta) = &pdf_doc.metadata {
+            if is_tool_installed("pdfinfo") {
+                assert_eq!(meta.provenance, MetadataProvenance::Embedded);
+                assert_eq!(meta.title.as_deref(), Some("Rust Systems"));
+                assert!(meta.authors.contains(&"Ferris".to_string()));
+            }
+        }
+
+        // Verify TXT metadata (fallback)
+        let txt_doc = docs
+            .iter()
+            .find(|d| d.name == "notes.txt")
+            .expect("find txt");
+        let txt_meta = txt_doc.metadata.as_ref().expect("txt meta exists");
+        assert_eq!(txt_meta.provenance, MetadataProvenance::Fallback);
+        assert_eq!(txt_meta.title, None);
+        assert!(txt_meta.authors.is_empty());
+
+        // Verify EPUB metadata if epub was created
+        if epub_path.exists() && is_tool_installed("unzip") {
+            let epub_doc = docs
+                .iter()
+                .find(|d| d.name == "book.epub")
+                .expect("find epub");
+            let epub_meta = epub_doc.metadata.as_ref().expect("epub meta exists");
+            assert_eq!(epub_meta.provenance, MetadataProvenance::Embedded);
+            assert_eq!(epub_meta.title.as_deref(), Some("Moby Dick"));
+            assert_eq!(epub_meta.authors, vec!["Herman Melville".to_string()]);
+            assert_eq!(epub_meta.publisher.as_deref(), Some("Harper & Brothers"));
+            assert_eq!(epub_meta.published_date.as_deref(), Some("1851-10-18"));
+
+            // Verify thumbnail was extracted
+            if let Some(thumb_data) = db.get_thumbnail_data_url(&epub_doc.id).expect("get thumb") {
+                assert!(thumb_data.starts_with("data:image/"));
+            }
+        }
+
+        // 5. Test Collection operations on scanned documents
+        let col = db
+            .create_collection("Important", Some("Key docs"))
+            .expect("create col");
+        db.add_document_to_collection(&col.id, &pdf_doc.id)
+            .expect("add pdf to col");
+        db.add_document_to_collection(&col.id, &txt_doc.id)
+            .expect("add txt to col");
+
+        let col_docs = db
+            .list_collection_documents(&col.id)
+            .expect("list col docs");
+        assert_eq!(col_docs.len(), 2);
+
+        let pdf_cols = db.list_document_collections(&pdf_doc.id).expect("pdf cols");
+        assert!(pdf_cols.contains(&col.id));
+
+        db.remove_document_from_collection(&col.id, &pdf_doc.id)
+            .expect("remove pdf");
+        assert_eq!(
+            db.list_collection_documents(&col.id)
+                .expect("list col docs")
+                .len(),
+            1
+        );
+
+        db.delete_collection(&col.id).expect("delete col");
+        assert_eq!(
+            db.list_documents(Some(&root.id), false)
+                .expect("list docs")
+                .len(),
+            docs.len()
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

@@ -20,6 +20,31 @@ export type SourceRef =
   | { kind: "library"; rootId: string; relativePath: string }
   | { kind: "direct"; locator: StorageLocator };
 
+export type MetadataProvenance = "embedded" | "fallback";
+
+export type DocumentMetadata = {
+  title?: string | null;
+  authors: string[];
+  publisher?: string | null;
+  publishedDate?: string | null;
+  description?: string | null;
+  language?: string | null;
+  identifiers: string[];
+  provenance: MetadataProvenance;
+  thumbnailPath?: string | null;
+};
+
+export type CollectionId = string;
+
+export type Collection = {
+  id: CollectionId;
+  name: string;
+  description?: string | null;
+  documentCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type DocumentRecord = {
   id: DocumentId;
   name: string;
@@ -27,7 +52,16 @@ export type DocumentRecord = {
   sizeBytes: number;
   firstSeenAt: string;
   updatedAt: string;
+  metadata?: DocumentMetadata | null;
+  collections?: string[];
 };
+
+export function getDocumentDisplayTitle(record: DocumentRecord): string {
+  if (record.metadata?.title && record.metadata.title.trim().length > 0) {
+    return record.metadata.title.trim();
+  }
+  return record.name;
+}
 
 export type StoredDocument = {
   record: DocumentRecord;

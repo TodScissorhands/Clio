@@ -1,4 +1,5 @@
 mod conversion;
+pub mod metadata;
 mod storage;
 use serde::Serialize;
 use std::{
@@ -242,7 +243,18 @@ pub fn run() {
             storage::annotation_create,
             storage::annotation_update,
             storage::annotation_list,
-            storage::annotation_delete
+            storage::annotation_delete,
+            storage::library_collection_create,
+            storage::library_collection_list,
+            storage::library_collection_rename,
+            storage::library_collection_delete,
+            storage::library_collection_add_document,
+            storage::library_collection_remove_document,
+            storage::library_collection_list_documents,
+            storage::library_thumbnail_get,
+            storage::library_metadata_get,
+            storage::library_metadata_update,
+            storage::library_document_collections_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

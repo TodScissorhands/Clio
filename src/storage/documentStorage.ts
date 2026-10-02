@@ -8,7 +8,9 @@ import {
   type AnnotationKind,
   type AnnotationLocator,
   type Bookmark,
+  type Collection,
   type DocumentId,
+  type DocumentMetadata,
   type DocumentRecord,
   type LibraryRoot,
   type ReadingPosition,
@@ -65,6 +67,8 @@ type NativeDocument = {
   relativePath?: string;
   availability?: string;
   record?: NativeDocument;
+  metadata?: DocumentMetadata | null;
+  collections?: string[];
 };
 type NativeReaderOpen = {
   record: NativeDocument;
@@ -101,6 +105,8 @@ function nativeRecord(native: NativeDocument, fallback?: NativeDocument): Docume
     sizeBytes: Number(value.sizeBytes ?? value.size ?? source.sizeBytes ?? source.size ?? 0),
     firstSeenAt: value.firstSeenAt ?? timestamp,
     updatedAt: value.updatedAt ?? timestamp,
+    metadata: value.metadata ?? source.metadata ?? null,
+    collections: value.collections ?? source.collections ?? [],
   };
 }
 
@@ -319,4 +325,48 @@ export async function listAnnotations(documentId: DocumentId): Promise<Annotatio
 
 export async function deleteAnnotation(annotationId: string): Promise<void> {
   await invoke("annotation_delete", { annotationId });
+}
+
+export async function listCollections(): Promise<Collection[]> {
+  return invoke<Collection[]>("library_collection_list");
+}
+
+export async function createCollection(name: string, description?: string): Promise<Collection> {
+  return invoke<Collection>("library_collection_create", {
+    name,
+    description: description ?? null,
+  });
+}
+
+export async function renameCollection(id: string, name: string): Promise<Collection> {
+  return invoke<Collection>("library_collection_rename", { id, name });
+}
+
+export async function deleteCollection(id: string): Promise<void> {
+  await invoke("library_collection_delete", { id });
+}
+
+export async function addDocumentToCollection(
+  collectionId: string,
+  documentId: string
+): Promise<void> {
+  await invoke("library_collection_add_document", { collectionId, documentId });
+}
+
+export async function removeDocumentFromCollection(
+  collectionId: string,
+  documentId: string
+): Promise<void> {
+  await invoke("library_collection_remove_document", { collectionId, documentId });
+}
+
+export async function listCollectionDocuments(collectionId: string): Promise<StoredDocument[]> {
+  const documents = await invoke<NativeDocument[]>("library_collection_list_documents", {
+    collectionId,
+  });
+  return documents.map((document) => normalizeStoredDocument(document));
+}
+
+export async function getDocumentThumbnail(documentId: string): Promise<string | null> {
+  return invoke<string | null>("library_thumbnail_get", { documentId });
 }
