@@ -21,6 +21,7 @@ import {
   openLibraryReaderDocument,
   openSelectedReaderDocument,
   removeLibraryDocument,
+  removeDocumentFromCollection,
   removeLibraryRoot,
   relinkLibraryDocument,
   renameCollection,
@@ -209,6 +210,29 @@ function App() {
     try {
       for (const docId of documentIds) {
         await addDocumentToCollection(collectionId, docId);
+      }
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleCreateAndAddToCollection(name: string, documentIds: string[]) {
+    try {
+      const col = await createCollection(name);
+      for (const docId of documentIds) {
+        await addDocumentToCollection(col.id, docId);
+      }
+      await refreshLibrary();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRemoveDocFromCollection(collectionId: string, documentIds: string[]) {
+    try {
+      for (const docId of documentIds) {
+        await removeDocumentFromCollection(collectionId, docId);
       }
       await refreshLibrary();
     } catch (err) {
@@ -428,9 +452,11 @@ function App() {
           onScanRoot={(rootId) => void scanRoot(rootId)}
           onRemoveRoot={(rootId) => void removeRoot(rootId)}
           onCreateCollection={handleCreateCollection}
+          onCreateAndAddToCollection={handleCreateAndAddToCollection}
           onRenameCollection={handleRenameCollection}
           onDeleteCollection={handleDeleteCollection}
           onAddDocToCollection={handleAddDocToCollection}
+          onRemoveDocFromCollection={handleRemoveDocFromCollection}
           onRemoveFromLibrary={handleRemoveFromLibrary}
           onOpenDocument={(doc) => void handleOpenDocument(doc)}
           onRevealInFileManager={handleRevealInFileManager}

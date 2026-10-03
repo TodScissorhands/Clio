@@ -6,10 +6,14 @@ export interface CommandContext {
   activeDocument?: StoredDocument | null;
   collections: Collection[];
   roots: LibraryRoot[];
+  /** ID of the collection scope the user is currently viewing, if any. */
+  activeCollectionId?: string | null;
   onOpen: (doc: StoredDocument) => void;
   onAddToCollection: (collectionId: string, docIds: string[]) => Promise<void>;
   onCreateAndAddToCollection?: (name: string, docIds: string[]) => Promise<void>;
   onRemoveFromLibrary: (docIds: string[]) => Promise<void>;
+  /** Remove the target documents from the currently viewed collection. */
+  onRemoveFromCollection?: (collectionId: string, docIds: string[]) => Promise<void>;
   onConvert: (doc: StoredDocument) => void;
   onMerge: (docs: StoredDocument[]) => void;
   onExtractPages: (doc: StoredDocument) => void;
@@ -135,6 +139,33 @@ export const documentCommands: DocumentCommand[] = [
     execute: (ctx) => {
       const doc = getTargetDocument(ctx);
       if (doc) ctx.onProperties(doc);
+    },
+  },
+  {
+    id: "remove-from-collection",
+    label: "Remove from collection",
+    group: 3,
+    isAvailable: (ctx) => {
+      const collectionId = ctx.activeCollectionId;
+      const ids = getTargetDocumentIds(ctx);
+      if (!collectionId || !ctx.onRemoveFromCollection || ids.length === 0) return false;
+      return ids.every((id) =>
+        ctx.documents.some(
+          (doc) => doc.record.id === id && doc.record.collections?.includes(collectionId)
+        )
+      );
+    },
+    execute: async (ctx) => {
+      const collectionId = ctx.activeCollectionId;
+      if (!collectionId || !ctx.onRemoveFromCollection) return;
+      const ids = getTargetDocumentIds(ctx).filter((id) =>
+        ctx.documents.some(
+          (doc) => doc.record.id === id && doc.record.collections?.includes(collectionId)
+        )
+      );
+      if (ids.length > 0) {
+        await ctx.onRemoveFromCollection(collectionId, ids);
+      }
     },
   },
   {

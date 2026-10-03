@@ -43,9 +43,11 @@ export interface LibraryViewProps {
   onScanRoot: (rootId: string) => void;
   onRemoveRoot: (rootId: string) => void;
   onCreateCollection: (name: string) => Promise<void>;
+  onCreateAndAddToCollection: (name: string, documentIds: string[]) => Promise<void>;
   onRenameCollection: (id: string, name: string) => Promise<void>;
   onDeleteCollection: (id: string) => Promise<void>;
   onAddDocToCollection: (collectionId: string, documentIds: string[]) => Promise<void>;
+  onRemoveDocFromCollection: (collectionId: string, documentIds: string[]) => Promise<void>;
   onRemoveFromLibrary: (documentIds: string[]) => Promise<void>;
   onOpenDocument: (document: StoredDocument) => void;
   onRevealInFileManager: (document: StoredDocument) => Promise<void>;
@@ -57,6 +59,15 @@ export interface LibraryViewProps {
   onDismissError?: () => void;
   onOpenFile?: () => void;
 }
+
+const SORT_BAR_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: "recent", label: "Recent" },
+  { value: "name-asc", label: "A → Z" },
+  { value: "name-desc", label: "Z → A" },
+  { value: "author", label: "Author" },
+  { value: "added", label: "Added" },
+  { value: "format", label: "Format" },
+];
 
 
 function getDeterministicHue(str: string): number {
@@ -166,9 +177,11 @@ export function LibraryView({
   onScanRoot,
   onRemoveRoot,
   onCreateCollection,
+  onCreateAndAddToCollection,
   onRenameCollection,
   onDeleteCollection,
   onAddDocToCollection,
+  onRemoveDocFromCollection,
   onRemoveFromLibrary,
   onOpenDocument,
   onRevealInFileManager,
@@ -307,12 +320,17 @@ export function LibraryView({
       activeDocument: contextMenu?.targetDoc ?? null,
       collections,
       roots,
+      activeCollectionId: activeScope.kind === "collection" ? activeScope.collectionId : null,
       onOpen: (doc) => handleOpenDoc(doc),
       onAddToCollection: async (colId, docIds) => {
         await onAddDocToCollection(colId, docIds);
       },
       onRemoveFromLibrary: async (docIds) => {
         await onRemoveFromLibrary(docIds);
+        handleClearSelection();
+      },
+      onRemoveFromCollection: async (colId, docIds) => {
+        await onRemoveDocFromCollection(colId, docIds);
         handleClearSelection();
       },
       onConvert: (doc) => {
@@ -342,11 +360,14 @@ export function LibraryView({
       contextMenu?.targetDoc,
       collections,
       roots,
+      activeScope,
       handleOpenDoc,
       onAddDocToCollection,
+      onRemoveDocFromCollection,
       onRemoveFromLibrary,
       handleClearSelection,
       onRevealInFileManager,
+      onLocateDocument,
     ]
   );
 
@@ -503,6 +524,23 @@ export function LibraryView({
 
               {/* 2. Full Document Set for Current Scope */}
               <div className="library-document-section">
+                {/* Sort bar — shown in grid mode; list mode uses column headers */}
+                {visibleDocuments.length > 0 && viewMode === "grid" && (
+                  <div className="library-sort-bar" role="toolbar" aria-label="Sort documents">
+                    <span className="sort-bar-label">Sort:</span>
+                    {SORT_BAR_OPTIONS.map(({ value, label }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`sort-bar-btn ${sortBy === value ? "active" : ""}`}
+                        onClick={() => onSortChange(value)}
+                        aria-pressed={sortBy === value}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {visibleDocuments.length > 0 ? (
                   viewMode === "grid" ? (
                     <DocumentGrid
@@ -601,7 +639,13 @@ export function LibraryView({
             }
           }}
           onCreateAndAddToCollection={async (name) => {
-            await onCreateCollection(name);
+            const ids =
+              selectedDocuments.length > 0
+                ? selectedDocuments.map((d) => d.record.id)
+                : contextMenu?.targetDoc
+                ? [contextMenu.targetDoc.record.id]
+                : [];
+            await onCreateAndAddToCollection(name, ids);
           }}
           onClose={() => setIsAddToCollectionOpen(false)}
         />

@@ -29,7 +29,7 @@ export function DocumentList({
     return root?.label ?? rootId;
   }
 
-  function toggleSort(target: "name" | "format" | "recent" | "size") {
+  function toggleSort(target: "name" | "format" | "recent" | "size" | "author" | "added") {
     if (target === "name") {
       onSortChange(sortBy === "name-asc" ? "name-desc" : "name-asc");
     } else if (target === "size") {
@@ -38,6 +38,10 @@ export function DocumentList({
       onSortChange("format");
     } else if (target === "recent") {
       onSortChange("recent");
+    } else if (target === "author") {
+      onSortChange("author");
+    } else if (target === "added") {
+      onSortChange("added");
     }
   }
 
@@ -50,12 +54,18 @@ export function DocumentList({
             <th className="th-sortable th-title" onClick={() => toggleSort("name")}>
               Title {sortBy === "name-asc" ? "↑" : sortBy === "name-desc" ? "↓" : ""}
             </th>
+            <th className="th-sortable th-author" onClick={() => toggleSort("author")}>
+              Author {sortBy === "author" ? "↓" : ""}
+            </th>
             <th className="th-sortable th-format" onClick={() => toggleSort("format")}>
               Format {sortBy === "format" ? "↓" : ""}
             </th>
             <th className="th-folder">Folder</th>
             <th className="th-sortable th-opened" onClick={() => toggleSort("recent")}>
               Last Opened {sortBy === "recent" ? "↓" : ""}
+            </th>
+            <th className="th-sortable th-added" onClick={() => toggleSort("added")}>
+              Added {sortBy === "added" ? "↓" : ""}
             </th>
             <th className="th-progress">Progress</th>
             <th className="th-actions" aria-label="Actions column" />
@@ -70,6 +80,11 @@ export function DocumentList({
             const lastOpened = doc.readingState?.lastOpenedAt
               ? formatRelativeTime(doc.readingState.lastOpenedAt)
               : "Never";
+            const addedLabel = formatRelativeTime(doc.record.firstSeenAt);
+            const authorLabel =
+              doc.record.metadata?.authors && doc.record.metadata.authors.length > 0
+                ? doc.record.metadata.authors.join(", ")
+                : "—";
 
             return (
               <tr
@@ -120,11 +135,6 @@ export function DocumentList({
                     <span className="doc-row-name" title={getDocumentDisplayTitle(doc.record)}>
                       {getDocumentDisplayTitle(doc.record)}
                     </span>
-                    {doc.record.metadata?.authors && doc.record.metadata.authors.length > 0 && (
-                      <span className="doc-row-author" title={doc.record.metadata.authors.join(", ")}>
-                        {doc.record.metadata.authors.join(", ")}
-                      </span>
-                    )}
                     {getDocumentDisplayTitle(doc.record) !== doc.record.name && (
                       <span className="doc-row-filename" title={doc.record.name}>
                         {doc.record.name}
@@ -142,6 +152,12 @@ export function DocumentList({
                   </span>
                 </td>
 
+                <td className="td-author">
+                  <span className="author-cell" title={authorLabel !== "—" ? authorLabel : undefined}>
+                    {authorLabel}
+                  </span>
+                </td>
+
                 <td className="td-folder">
                   <span className="folder-name-cell" title={doc.source.kind === "library" ? doc.source.relativePath : ""}>
                     {rootLabel}
@@ -150,6 +166,10 @@ export function DocumentList({
 
                 <td className="td-opened">
                   <span className="opened-time-cell">{lastOpened}</span>
+                </td>
+
+                <td className="td-added">
+                  <span className="added-time-cell">{addedLabel}</span>
                 </td>
 
                 <td className="td-progress">

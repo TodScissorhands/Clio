@@ -6,6 +6,8 @@ export type SortOption =
   | "recent"
   | "name-asc"
   | "name-desc"
+  | "author"
+  | "added"
   | "size-desc"
   | "size-asc"
   | "format";
@@ -211,6 +213,8 @@ export function isDocumentStarted(document: StoredDocument): boolean {
     case "epub-cfi":
       return Boolean(state.position.cfi || (state.position.progression && state.position.progression > 0));
     case "text-scroll":
+      // Any opened text document is "started" — the lastOpenedAt guard above
+      // ensures the user actually opened it. progression: 0 is valid (top of file).
       return true;
   }
 }
@@ -272,6 +276,23 @@ export function sortDocuments(
         return titleA.localeCompare(titleB, undefined, { sensitivity: "base" });
       case "name-desc":
         return titleB.localeCompare(titleA, undefined, { sensitivity: "base" });
+      case "author": {
+        const authorA = a.record.metadata?.authors.find((author) => author.trim())?.trim() ?? "";
+        const authorB = b.record.metadata?.authors.find((author) => author.trim())?.trim() ?? "";
+        // Keep documents without author metadata after identified authors.
+        if (!authorA || !authorB) {
+          if (!authorA && authorB) return 1;
+          if (authorA && !authorB) return -1;
+        }
+        const cmp = authorA.localeCompare(authorB, undefined, { sensitivity: "base" });
+        return cmp !== 0 ? cmp : titleA.localeCompare(titleB, undefined, { sensitivity: "base" });
+      }
+      case "added": {
+        const addedA = a.record.firstSeenAt;
+        const addedB = b.record.firstSeenAt;
+        const cmp = addedB.localeCompare(addedA); // newest first
+        return cmp !== 0 ? cmp : titleA.localeCompare(titleB, undefined, { sensitivity: "base" });
+      }
       case "size-desc":
         return b.record.sizeBytes - a.record.sizeBytes;
       case "size-asc":
@@ -284,7 +305,7 @@ export function sortDocuments(
         const timeA = readingStates?.[a.record.id]?.lastOpenedAt ?? a.readingState?.lastOpenedAt ?? a.record.updatedAt;
         const timeB = readingStates?.[b.record.id]?.lastOpenedAt ?? b.readingState?.lastOpenedAt ?? b.record.updatedAt;
         const cmp = timeB.localeCompare(timeA);
-        return cmp !== 0 ? cmp : titleA.localeCompare(titleB);
+        return cmp !== 0 ? cmp : titleA.localeCompare(titleB, undefined, { sensitivity: "base" });
       }
     }
   });
