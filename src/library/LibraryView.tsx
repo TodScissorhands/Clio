@@ -152,6 +152,7 @@ export function LibraryView({
   sortBy,
   onSortChange,
   pendingRootId: _pendingRootId,
+  message,
   error,
   onAddRoot,
   onScanRoot,
@@ -334,6 +335,14 @@ export function LibraryView({
 
   return (
     <div className="library-shell" aria-label="Library">
+      {/* Status Message Banner */}
+      {message && (
+        <div className="library-alert info" role="status">
+          <span className="library-alert-icon">ℹ</span>
+          <span className="library-alert-text">{message}</span>
+        </div>
+      )}
+
       {/* Actionable Error Alert Banner */}
       {error && (
         <div className="library-alert error" role="alert">
@@ -355,15 +364,30 @@ export function LibraryView({
         onSelectScope={onSelectScope}
         selectedDocuments={selectedDocuments}
         onClearSelection={handleClearSelection}
+        onOpenSelection={() => {
+          if (selectedDocuments.length === 1 && selectedDocuments[0]) {
+            handleOpenDoc(selectedDocuments[0]);
+          }
+        }}
         onAddToCollection={() => setIsAddToCollectionOpen(true)}
         onConvertSelection={() => {
           if (selectedDocuments.length === 1) {
             setConversionModal({ mode: "convert", sourceDoc: selectedDocuments[0] });
           }
         }}
+        onExtractPagesSelection={() => {
+          if (selectedDocuments.length === 1) {
+            setConversionModal({ mode: "extract", sourceDoc: selectedDocuments[0] });
+          }
+        }}
         onMergeSelection={() => {
           if (selectedDocuments.length >= 2) {
             setConversionModal({ mode: "merge", mergeDocs: selectedDocuments });
+          }
+        }}
+        onPropertiesSelection={() => {
+          if (selectedDocuments.length === 1 && selectedDocuments[0]) {
+            setPropertiesDoc(selectedDocuments[0]);
           }
         }}
         onRemoveSelection={() => {

@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LibraryRoot, StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
+import { getSelectionCapabilities } from "../commands/selectionCommands";
 
 export interface LibraryToolbarProps {
   activeScope: LibraryScope;
@@ -15,9 +16,12 @@ export interface LibraryToolbarProps {
   // Selection
   selectedDocuments: StoredDocument[];
   onClearSelection: () => void;
+  onOpenSelection: () => void;
   onAddToCollection: () => void;
   onConvertSelection: () => void;
+  onExtractPagesSelection: () => void;
   onMergeSelection: () => void;
+  onPropertiesSelection: () => void;
   onRemoveSelection: () => void;
   onOpenAppMenu?: () => void;
 }
@@ -34,13 +38,17 @@ export function LibraryToolbar({
   onSelectScope,
   selectedDocuments,
   onClearSelection,
+  onOpenSelection,
   onAddToCollection,
   onConvertSelection,
+  onExtractPagesSelection,
   onMergeSelection,
+  onPropertiesSelection,
   onRemoveSelection,
   onOpenAppMenu,
 }: LibraryToolbarProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [removeConfirm, setRemoveConfirm] = useState(false);
 
   // Global search shortcut: "/" or "Ctrl/Cmd+K" focuses search input; "Escape" clears selection or search
   useEffect(() => {
@@ -75,10 +83,7 @@ export function LibraryToolbar({
   }, [onClearSelection, onSearchChange, selectedDocuments.length]);
 
   const isSelectionMode = selectedDocuments.length > 0;
-  const canMerge =
-    selectedDocuments.length >= 2 &&
-    selectedDocuments.every((d) => d.record.format === "pdf" && d.availability === "present");
-
+  const caps = getSelectionCapabilities(selectedDocuments);
   if (isSelectionMode) {
     return (
       <header className="library-toolbar selection-action-bar" role="toolbar" aria-label="Selection actions">
@@ -89,50 +94,105 @@ export function LibraryToolbar({
         </div>
 
         <div className="selection-actions-group">
+          {caps.canOpen && (
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => { setRemoveConfirm(false); onOpenSelection(); }}
+              title="Open selected document"
+            >
+              Open
+            </button>
+          )}
+
           <button
             type="button"
             className="action-bar-btn"
-            onClick={onAddToCollection}
+            onClick={() => { setRemoveConfirm(false); onAddToCollection(); }}
             title="Add selected documents to a collection"
           >
             Add to collection
           </button>
 
-          {selectedDocuments.length === 1 && (
+          {caps.canConvert && (
             <button
               type="button"
               className="action-bar-btn"
-              onClick={onConvertSelection}
+              onClick={() => { setRemoveConfirm(false); onConvertSelection(); }}
               title="Convert selected document"
             >
               Convert…
             </button>
           )}
 
-          {canMerge && (
+          {caps.canExtractPages && (
             <button
               type="button"
               className="action-bar-btn"
-              onClick={onMergeSelection}
+              onClick={() => { setRemoveConfirm(false); onExtractPagesSelection(); }}
+              title="Extract pages from selected PDF"
+            >
+              Extract pages…
+            </button>
+          )}
+
+          {caps.canMergePdfs && (
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => { setRemoveConfirm(false); onMergeSelection(); }}
               title="Merge selected PDFs into one document"
             >
               Merge PDFs…
             </button>
           )}
 
-          <button
-            type="button"
-            className="action-bar-btn danger"
-            onClick={onRemoveSelection}
-            title="Remove selected documents from library catalog"
-          >
-            Remove from library
-          </button>
+          {caps.canViewProperties && (
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => { setRemoveConfirm(false); onPropertiesSelection(); }}
+              title="Document properties"
+            >
+              Properties
+            </button>
+          )}
+
+          {removeConfirm ? (
+            <span className="selection-remove-confirm">
+              <span className="confirm-label">Remove {selectedDocuments.length === 1 ? "this document" : `${selectedDocuments.length} documents`}?</span>
+              <button
+                type="button"
+                className="action-bar-btn danger"
+                onClick={() => { setRemoveConfirm(false); onRemoveSelection(); }}
+                title="Confirm removal from library catalog (file is NOT deleted)"
+              >
+                Remove
+              </button>
+              <button
+                type="button"
+                className="action-bar-btn"
+                onClick={() => setRemoveConfirm(false)}
+                title="Cancel"
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="action-bar-btn danger"
+              onClick={() => setRemoveConfirm(true)}
+              title="Remove selected documents from library catalog (does not delete files)"
+            >
+              Remove from library
+            </button>
+          )}
 
           <button
             type="button"
             className="action-bar-close-btn"
-            onClick={onClearSelection}
+            onClick={() => { setRemoveConfirm(false); onClearSelection(); }}
             title="Clear selection (Esc)"
             aria-label="Clear selection"
           >

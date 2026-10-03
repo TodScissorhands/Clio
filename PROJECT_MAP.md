@@ -18,14 +18,15 @@ Library → Document → Reading / Contextual Actions
    - The reading surface fills the viewport, restoring the exact last-read position (PDF page, EPUB CFI, TextScroll progression).
    - Back button returns to the previous Library state, restoring scope, scroll position, search query, and selection.
 3. **Contextual Document Actions**:
-   - Ellipsis and context menus (`src/library/DocumentContextMenu.tsx` and `src/commands/documentCommands.ts`) provide contextual actions: Open, Add to collection, Convert…, Extract pages…, Reveal in file manager, Properties, and Remove from library.
+   - Selection action bar (`src/library/LibraryToolbar.tsx`): capability-filtered buttons (Open, Add to collection, Convert, Extract pages, Merge PDFs, Properties, Remove) derived from `getSelectionCapabilities`. Remove requires inline confirmation. `canMerge` uses the authoritative `canMergeSelected` from `documentCommands.ts`.
+   - Context menus (`src/library/DocumentContextMenu.tsx`): Remove from library requires inline confirmation; does not delete the underlying file.
 
 ## Frontend Subsystems (`src/`)
 
 - `src/App.tsx`: Top-level application shell, routing state (`AppRoute`), restoration stack, and native window bridge.
 - `src/navigation/navigation.ts`: Route definitions (`AppRoute`, `LibraryScope`, `LibraryRestorationState`, `DEFAULT_LIBRARY_SCOPE`).
-- `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars.
-- `src/library/`: Library components, filtering (`libraryFilter.ts`), thumbnail generation, properties modal, and collection modals.
+- `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars. Contains `canMergeSelected` and `CommandContext`.
+- `src/commands/selectionCommands.ts`: Pure selection capability derivation (`getSelectionCapabilities`) — maps a set of selected documents to available actions (open, convert, extract pages, merge PDFs, properties, reveal, add to collection, remove). Used by `LibraryToolbar` to render only applicable action bar buttons.
 - `src/reader/`:
   - `ReaderShell.tsx`: Document-first reader surface. The document viewport fills 100vh. Reader chrome is transient: a compact top bar (`reader-topbar`) overlays the document and auto-hides after inactivity; it is revealed by pointer proximity to the top edge, keyboard activation, or opening a panel. Controls: ‹ Library (D1 back), title, Find, Navigator, Display, ⋯ document menu.
   - Navigator panel (`reader-navigator`): overlay drawer (right side) with three tabs — Contents (TOC), Bookmarks, Notes. Does not reflow the document.

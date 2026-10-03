@@ -29,6 +29,7 @@ export function DocumentContextMenu({
   onCreateCollectionPrompt,
 }: DocumentContextMenuProps) {
   const [collectionSubmenuOpen, setCollectionSubmenuOpen] = useState(false);
+  const [removeConfirm, setRemoveConfirm] = useState(false);
 
   // Effective documents for this action
   const docs = selectedDocs.length > 0 ? selectedDocs : targetDoc ? [targetDoc] : [];
@@ -177,18 +178,55 @@ export function DocumentContextMenu({
           <div className="context-menu-divider" role="separator" />
         )}
 
-        {/* GROUP 3 */}
-        {group3.map((cmd) => (
-          <button
-            key={cmd.id}
-            type="button"
-            className={`context-menu-item ${cmd.id === "remove-from-library" ? "danger" : ""}`}
-            role="menuitem"
-            onClick={() => executeCommand(cmd)}
-          >
-            {cmd.label}
-          </button>
-        ))}
+        {/* GROUP 3 — render remove-from-library with inline confirmation */}
+        {group3.map((cmd) => {
+          if (cmd.id === "remove-from-library") {
+            return removeConfirm ? (
+              <div key={cmd.id} className="context-menu-remove-confirm">
+                <span className="context-menu-confirm-label">
+                  Remove {docs.length === 1 ? "this document" : `${docs.length} documents`}?
+                </span>
+                <button
+                  type="button"
+                  className="context-menu-item danger"
+                  role="menuitem"
+                  onClick={() => executeCommand(cmd)}
+                >
+                  Remove
+                </button>
+                <button
+                  type="button"
+                  className="context-menu-item"
+                  role="menuitem"
+                  onClick={() => setRemoveConfirm(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                key={cmd.id}
+                type="button"
+                className="context-menu-item danger"
+                role="menuitem"
+                onClick={() => setRemoveConfirm(true)}
+              >
+                {cmd.label}
+              </button>
+            );
+          }
+          return (
+            <button
+              key={cmd.id}
+              type="button"
+              className="context-menu-item"
+              role="menuitem"
+              onClick={() => executeCommand(cmd)}
+            >
+              {cmd.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
