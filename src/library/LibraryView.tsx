@@ -290,6 +290,24 @@ export function LibraryView({
     onSelectionChange(new Set());
     setLastSelectedDocId(null);
   }, [onSelectionChange]);
+  const handleToggleSelectAll = useCallback(() => {
+    const allSelected =
+      visibleDocuments.length > 0 &&
+      visibleDocuments.every((d) => selectedDocIds.has(d.record.id));
+    if (allSelected) {
+      const next = new Set(selectedDocIds);
+      for (const d of visibleDocuments) {
+        next.delete(d.record.id);
+      }
+      onSelectionChange(next);
+    } else {
+      const next = new Set(selectedDocIds);
+      for (const d of visibleDocuments) {
+        next.add(d.record.id);
+      }
+      onSelectionChange(next);
+    }
+  }, [visibleDocuments, selectedDocIds, onSelectionChange]);
 
   const handleOpenDoc = useCallback(
     (doc: StoredDocument) => {
@@ -561,6 +579,7 @@ export function LibraryView({
                       onToggleSelect={handleToggleSelect}
                       onOpenDocument={handleOpenDoc}
                       onOpenContextMenu={handleOpenContextMenu}
+                      onToggleSelectAll={handleToggleSelectAll}
                     />
                   )
                 ) : (

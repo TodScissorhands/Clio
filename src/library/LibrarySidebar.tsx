@@ -1,7 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
-
+import {
+  BookOpenIcon,
+  BookmarkIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  MoreHorizontalIcon,
+  PlusIcon,
+} from "./LibraryIcons";
 export interface FolderNode {
   name: string;
   relativePath: string;
@@ -150,21 +157,18 @@ export function LibrarySidebar({
 
           return (
             <li key={node.relativePath} className="folder-tree-node">
-              <div
-                className={`folder-item-row ${isSelected ? "active" : ""}`}
-                style={{ paddingLeft: `${depth * 14 + 8}px` }}
-              >
+              <div className={`folder-item-row ${isSelected ? "active" : ""}`}>
                 {hasChildren ? (
                   <button
                     type="button"
-                    className="folder-chevron"
+                    className={`folder-chevron ${isExpanded ? "expanded" : ""}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleFolder(folderKey);
                     }}
                     aria-label={isExpanded ? "Collapse folder" : "Expand folder"}
                   >
-                    {isExpanded ? "▾" : "▸"}
+                    <ChevronRightIcon className={`folder-chevron-icon ${isExpanded ? "expanded" : ""}`} />
                   </button>
                 ) : (
                   <span className="folder-chevron-placeholder" />
@@ -181,11 +185,15 @@ export function LibrarySidebar({
                   }
                   title={node.relativePath}
                 >
-                  <span className="folder-icon">📁</span>
+                  <FolderIcon className="folder-icon" />
                   <span className="folder-name-text">{node.name}</span>
                 </button>
               </div>
-              {hasChildren && isExpanded && renderFolderNodes(rootId, node.children, depth + 1)}
+              {hasChildren && isExpanded && (
+                <div className="folder-sub-tree">
+                  {renderFolderNodes(rootId, node.children, depth + 1)}
+                </div>
+              )}
             </li>
           );
         })}
@@ -202,7 +210,7 @@ export function LibrarySidebar({
           className={`sidebar-scope-btn ${activeScope.kind === "all" ? "active" : ""}`}
           onClick={() => onSelectScope({ kind: "all" })}
         >
-          <span className="sidebar-icon">📚</span>
+          <BookOpenIcon className="sidebar-icon" />
           <span className="sidebar-label">All Documents</span>
           <span className="sidebar-count">{documents.length}</span>
         </button>
@@ -219,7 +227,7 @@ export function LibrarySidebar({
             title="Create new collection"
             aria-label="Add collection"
           >
-            +
+            <PlusIcon />
           </button>
         </div>
 
@@ -315,7 +323,7 @@ export function LibrarySidebar({
                     className="sidebar-item-btn"
                     onClick={() => onSelectScope({ kind: "collection", collectionId: col.id })}
                   >
-                    <span className="sidebar-icon">🏷️</span>
+                    <BookmarkIcon className="sidebar-icon" />
                     <span className="sidebar-label">{col.name}</span>
                     <span className="sidebar-count">{docCount}</span>
                   </button>
@@ -329,7 +337,7 @@ export function LibrarySidebar({
                     title={`Options for ${col.name}`}
                     aria-label={`Options for ${col.name}`}
                   >
-                    ⋯
+                    <MoreHorizontalIcon />
                   </button>
                 </div>
               </li>
@@ -352,7 +360,7 @@ export function LibrarySidebar({
             title="Add a folder to library"
             aria-label="Add folder"
           >
-            +
+            <PlusIcon />
           </button>
         </div>
 
@@ -377,12 +385,11 @@ export function LibrarySidebar({
                 >
                   {folderTree.length > 0 ? (
                     <button
-                      type="button"
-                      className="folder-chevron"
+                      className={`folder-chevron ${isExpanded ? "expanded" : ""}`}
                       onClick={() => toggleFolder(rootKey)}
                       aria-label={isExpanded ? "Collapse folders" : "Expand folders"}
                     >
-                      {isExpanded ? "▾" : "▸"}
+                      <ChevronRightIcon className={`folder-chevron-icon ${isExpanded ? "expanded" : ""}`} />
                     </button>
                   ) : (
                     <span className="folder-chevron-placeholder" />
@@ -393,7 +400,7 @@ export function LibrarySidebar({
                     onClick={() => onSelectScope({ kind: "root", rootId: root.id })}
                     title={root.label}
                   >
-                    <span className="sidebar-icon">📁</span>
+                    <FolderIcon className="sidebar-icon" />
                     <span className="sidebar-label">{root.label}</span>
                     <span className="sidebar-count">{rootDocs.length}</span>
                   </button>
@@ -407,10 +414,14 @@ export function LibrarySidebar({
                     title={`Folder options for ${root.label}`}
                     aria-label={`Folder options for ${root.label}`}
                   >
-                    ⋯
+                    <MoreHorizontalIcon />
                   </button>
                 </div>
-                {folderTree.length > 0 && isExpanded && renderFolderNodes(root.id, folderTree, 1)}
+                {folderTree.length > 0 && isExpanded && (
+                  <div className="folder-sub-tree">
+                    {renderFolderNodes(root.id, folderTree, 1)}
+                  </div>
+                )}
               </li>
             );
           })}

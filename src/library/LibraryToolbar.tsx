@@ -3,7 +3,13 @@ import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain"
 import { isSameScope, type LibraryScope } from "../navigation/navigation";
 import { getSelectionCapabilities } from "../commands/selectionCommands";
 import { getScopeLabel, getSearchScopeOptions } from "./libraryFilter";
-
+import {
+  GridIcon,
+  ListIcon,
+  MoreHorizontalIcon,
+  PanelLeftIcon,
+  SearchIcon,
+} from "./LibraryIcons";
 export interface LibraryToolbarProps {
   activeScope: LibraryScope;
   roots: LibraryRoot[];
@@ -314,7 +320,7 @@ export function LibraryToolbar({
           title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
           aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
         >
-          ☰
+          <PanelLeftIcon />
         </button>
         <div className="toolbar-scope-display">{renderBreadcrumbOrTitle()}</div>
       </div>
@@ -322,7 +328,7 @@ export function LibraryToolbar({
       <div className="toolbar-right-group">
         <div className="toolbar-search-wrap">
           <span className="search-icon" aria-hidden="true">
-            🔍
+            <SearchIcon />
           </span>
           <input
             ref={searchInputRef}
@@ -424,7 +430,7 @@ export function LibraryToolbar({
             title="Grid view"
             aria-label="Grid view"
           >
-            ⊞
+            <GridIcon />
           </button>
           <button
             type="button"
@@ -435,7 +441,7 @@ export function LibraryToolbar({
             title="List view"
             aria-label="List view"
           >
-            ☰
+            <ListIcon />
           </button>
         </div>
 
@@ -447,7 +453,7 @@ export function LibraryToolbar({
             title="Clio menu"
             aria-label="App menu"
           >
-            ⋯
+            <MoreHorizontalIcon />
           </button>
         )}
       </div>

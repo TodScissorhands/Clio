@@ -1,6 +1,7 @@
 import type { LibraryRoot, StoredDocument } from "../storage/domain";
 import { getDocumentDisplayTitle } from "../storage/domain";
 import { formatReadingProgress, formatRelativeTime, type SortOption } from "./libraryFilter";
+import { CheckIcon, FileTextIcon, FolderIcon, MoreHorizontalIcon } from "./LibraryIcons";
 
 export interface DocumentListProps {
   documents: StoredDocument[];
@@ -11,6 +12,7 @@ export interface DocumentListProps {
   onToggleSelect: (docId: string, isShift: boolean, isCmdCtrl: boolean) => void;
   onOpenDocument: (doc: StoredDocument) => void;
   onOpenContextMenu: (doc: StoredDocument, e: React.MouseEvent) => void;
+  onToggleSelectAll?: () => void;
 }
 
 export function DocumentList({
@@ -22,7 +24,24 @@ export function DocumentList({
   onToggleSelect,
   onOpenDocument,
   onOpenContextMenu,
+  onToggleSelectAll,
 }: DocumentListProps) {
+  const allSelected = documents.length > 0 && documents.every((d) => selectedDocIds.has(d.record.id));
+  const someSelected = !allSelected && documents.some((d) => selectedDocIds.has(d.record.id));
+
+  function renderSortIndicator(target: "name" | "author" | "format" | "recent" | "added") {
+    if (target === "name") {
+      if (sortBy === "name-asc") return <span className="th-sort-indicator active">↑</span>;
+      if (sortBy === "name-desc") return <span className="th-sort-indicator active">↓</span>;
+      return <span className="th-sort-indicator">↕</span>;
+    }
+    const isActive = sortBy === target;
+    return (
+      <span className={`th-sort-indicator ${isActive ? "active" : ""}`}>
+        {isActive ? "↓" : "↕"}
+      </span>
+    );
+  }
   function getRootLabel(rootId?: string): string {
     if (!rootId) return "—";
     const root = roots.find((r) => r.id === rootId);
@@ -50,22 +69,34 @@ export function DocumentList({
       <table className="doc-list-table">
         <thead>
           <tr>
-            <th className="th-checkbox" aria-label="Selection column" />
+            <th className="th-checkbox" aria-label="Selection column">
+              {onToggleSelectAll && documents.length > 0 && (
+                <button
+                  type="button"
+                  className={`list-select-checkbox header-checkbox ${allSelected ? "checked" : someSelected ? "indeterminate" : ""}`}
+                  onClick={onToggleSelectAll}
+                  title={allSelected ? "Deselect all" : "Select all"}
+                  aria-label={allSelected ? "Deselect all" : "Select all"}
+                >
+                  {allSelected ? <CheckIcon /> : someSelected ? <span className="indeterminate-dash">—</span> : null}
+                </button>
+              )}
+            </th>
             <th className="th-sortable th-title" onClick={() => toggleSort("name")}>
-              Title {sortBy === "name-asc" ? "↑" : sortBy === "name-desc" ? "↓" : ""}
+              Title {renderSortIndicator("name")}
             </th>
             <th className="th-sortable th-author" onClick={() => toggleSort("author")}>
-              Author {sortBy === "author" ? "↓" : ""}
+              Author {renderSortIndicator("author")}
             </th>
             <th className="th-sortable th-format" onClick={() => toggleSort("format")}>
-              Format {sortBy === "format" ? "↓" : ""}
+              Format {renderSortIndicator("format")}
             </th>
             <th className="th-folder">Folder</th>
             <th className="th-sortable th-opened" onClick={() => toggleSort("recent")}>
-              Last Opened {sortBy === "recent" ? "↓" : ""}
+              Last Opened {renderSortIndicator("recent")}
             </th>
             <th className="th-sortable th-added" onClick={() => toggleSort("added")}>
-              Added {sortBy === "added" ? "↓" : ""}
+              Added {renderSortIndicator("added")}
             </th>
             <th className="th-progress">Progress</th>
             <th className="th-actions" aria-label="Actions column" />
@@ -126,20 +157,23 @@ export function DocumentList({
                     title={isSelected ? "Deselect" : "Select"}
                     aria-label={`Select ${doc.record.name}`}
                   >
-                    {isSelected ? "✓" : ""}
+                    {isSelected ? <CheckIcon /> : null}
                   </button>
                 </td>
 
                 <td className="td-title">
                   <div className="title-cell">
-                    <span className="doc-row-name" title={getDocumentDisplayTitle(doc.record)}>
-                      {getDocumentDisplayTitle(doc.record)}
-                    </span>
-                    {getDocumentDisplayTitle(doc.record) !== doc.record.name && (
-                      <span className="doc-row-filename" title={doc.record.name}>
-                        {doc.record.name}
+                    <FileTextIcon className="row-file-icon" />
+                    <div className="title-text-group">
+                      <span className="doc-row-name" title={getDocumentDisplayTitle(doc.record)}>
+                        {getDocumentDisplayTitle(doc.record)}
                       </span>
-                    )}
+                      {getDocumentDisplayTitle(doc.record) !== doc.record.name && (
+                        <span className="doc-row-filename" title={doc.record.name}>
+                          {doc.record.name}
+                        </span>
+                      )}
+                    </div>
                     {doc.availability === "missing" && (
                       <span className="doc-missing-pill">Missing</span>
                     )}
@@ -160,7 +194,8 @@ export function DocumentList({
 
                 <td className="td-folder">
                   <span className="folder-name-cell" title={doc.source.kind === "library" ? doc.source.relativePath : ""}>
-                    {rootLabel}
+                    <FolderIcon className="folder-cell-icon" />
+                    <span>{rootLabel}</span>
                   </span>
                 </td>
 
@@ -187,7 +222,7 @@ export function DocumentList({
                     title="Actions"
                     aria-label={`Actions for ${doc.record.name}`}
                   >
-                    ⋯
+                    <MoreHorizontalIcon />
                   </button>
                 </td>
               </tr>

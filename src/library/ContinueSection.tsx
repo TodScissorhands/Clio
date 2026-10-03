@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { StoredDocument } from "../storage/domain";
-import { getDocumentDisplayTitle } from "../storage/domain";
+import { getDocumentDisplayTitle, type StoredDocument } from "../storage/domain";
+import { MoreHorizontalIcon } from "./LibraryIcons";
 import { formatReadingProgress } from "./libraryFilter";
 
 export interface ContinueSectionProps {
@@ -105,7 +105,7 @@ export function ContinueSection({
                   title="Document options"
                   aria-label={`Options for ${displayTitle}`}
                 >
-                  ⋯
+                  <MoreHorizontalIcon />
                 </button>
               </div>
 

@@ -1,6 +1,6 @@
 import type { StoredDocument } from "../storage/domain";
 import { getDocumentDisplayTitle } from "../storage/domain";
-import { formatReadingProgress } from "./libraryFilter";
+import { CheckIcon, MoreHorizontalIcon } from "./LibraryIcons";
 
 export interface DocumentGridProps {
   documents: StoredDocument[];
@@ -26,9 +26,6 @@ export function DocumentGrid({
         const displayTitle = getDocumentDisplayTitle(doc.record);
         const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
         const authorStr = authors.length > 0 ? authors.join(", ") : null;
-        const formatStr = doc.record.format.toUpperCase();
-        const progressLabel = formatReadingProgress(doc.readingState ?? undefined);
-        const formatProgressLabel = progressLabel ? `${formatStr} · ${progressLabel}` : formatStr;
         let progressPercent: number | null = null;
         if (doc.readingState?.position) {
           const pos = doc.readingState.position;
@@ -87,8 +84,22 @@ export function DocumentGrid({
                 title={isSelected ? "Deselect document" : "Select document"}
                 aria-label={isSelected ? "Deselect document" : "Select document"}
               >
-                {isSelected ? "✓" : ""}
+                {isSelected && <CheckIcon />}
               </button>
+
+              {/* Reading progress: discreet bar at bottom of cover only when relevant */}
+              {progressPercent !== null && progressPercent > 0 && (
+                <div
+                  className="book-cover-progress"
+                  aria-hidden="true"
+                  title={`${progressPercent}% completed`}
+                >
+                  <div
+                    className="book-cover-progress-bar"
+                    style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
+                  />
+                </div>
+              )}
 
               {/* Document Ellipsis menu button at bottom-right of cover */}
               <button
@@ -101,7 +112,7 @@ export function DocumentGrid({
                 title="Document actions"
                 aria-label={`Actions for ${doc.record.name}`}
               >
-                ⋯
+                <MoreHorizontalIcon />
               </button>
             </div>
 
@@ -115,18 +126,9 @@ export function DocumentGrid({
                   {authorStr}
                 </span>
               )}
-              <div className="doc-grid-meta-line">
-                <span className="doc-grid-format-badge">{formatProgressLabel}</span>
-                {doc.availability === "missing" && (
+              {doc.availability === "missing" && (
+                <div className="doc-grid-status-line">
                   <span className="doc-missing-pill">Missing</span>
-                )}
-              </div>
-              {progressPercent !== null && (
-                <div className="thin-progress-bar-bg" aria-hidden="true">
-                  <div
-                    className="thin-progress-bar-fill"
-                    style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                  />
                 </div>
               )}
             </div>
