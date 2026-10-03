@@ -17,9 +17,12 @@ import { isSameReadingPosition } from "./types";
 import type { ReadingPosition } from "./types";
 import {
   TOPBAR_HIDE_DELAY,
+  getReaderZoomLimits,
+  getTextReadingProgression,
   parseReaderTheme,
   resolveEscapeAction,
   resolveFindEnterAction,
+  isCurrentReaderOperation,
 } from "./readerLogic";
 
 // ── ReadingStateCoordinator ─────────────────────────────────────────────────
@@ -347,12 +350,27 @@ describe("Display controls", () => {
     expect(parseReaderTheme("Light")).toBe("light");
   });
 
-  it("zoom is only available for PDF format (inline condition matches implementation)", () => {
-    // ReaderShell uses: canZoom = document?.record.format === "pdf"
-    const formats = ["pdf", "epub", "txt", "md", "docx"];
-    const zoomable = formats.filter(f => f === "pdf");
-    expect(zoomable).toEqual(["pdf"]);
-    expect(formats.filter(f => f !== "pdf" && f === "pdf")).toHaveLength(0);
+  it("exposes zoom only for engines that implement it", () => {
+    expect(getReaderZoomLimits("pdf")).toEqual({ min: 50, max: 250, step: 10 });
+    expect(getReaderZoomLimits("txt")).toEqual({ min: 70, max: 220, step: 15 });
+    expect(getReaderZoomLimits("md")).toEqual({ min: 70, max: 220, step: 15 });
+    expect(getReaderZoomLimits("epub")).toBeNull();
+    expect(getReaderZoomLimits(undefined)).toBeNull();
+  });
+
+  it("calculates text progress without marking a non-scrollable document finished", () => {
+    expect(getTextReadingProgression(0, 800, 800)).toBe(0);
+    expect(getTextReadingProgression(0, 800, 800, 0.4)).toBe(0.4);
+    expect(getTextReadingProgression(250, 1200, 200)).toBe(0.25);
+    expect(getTextReadingProgression(2000, 1200, 200)).toBe(1);
+  });
+
+  it("rejects stale async reader results after a document or search request changes", () => {
+    expect(isCurrentReaderOperation(4, 4)).toBe(true);
+    expect(isCurrentReaderOperation(4, 5)).toBe(false);
+    expect(isCurrentReaderOperation(4, 4, 8, 9)).toBe(false);
+    expect(isCurrentReaderOperation(4, 5, 8, 8)).toBe(false);
+    expect(isCurrentReaderOperation(4, 4, 8, 8)).toBe(true);
   });
 });
 

@@ -8,6 +8,9 @@ import type {
   ReaderTocItem,
   TextSelection,
 } from "./types";
+import { getReaderZoomLimits } from "./readerLogic";
+
+const PDF_ZOOM_LIMITS = getReaderZoomLimits("pdf")!;
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -159,7 +162,11 @@ export function PdfEngine({
     if (!await renderPage(pdf, nextPage, scale, token, sequence)) return false;
     if (!active()) return false;
     onProgress({ current: nextPage, total: pdf.numPages, fraction: nextPage / pdf.numPages });
-    onPositionChange?.({ kind: "pdf-page", page: nextPage });
+    onPositionChange?.({
+      kind: "pdf-page",
+      page: nextPage,
+      progression: nextPage / pdf.numPages,
+    });
     return true;
   }, [onPositionChange, onProgress, renderPage]);
 
@@ -252,7 +259,7 @@ export function PdfEngine({
     },
     zoomOut: async () => {
       const pdf = pdfRef.current;
-      const nextZoom = Math.max(0.5, Number((zoom - 0.1).toFixed(2)));
+      const nextZoom = Math.max(PDF_ZOOM_LIMITS.min / 100, Number((zoom - PDF_ZOOM_LIMITS.step / 100).toFixed(2)));
       const token = loadTokenRef.current;
       const sequence = ++pageSequenceRef.current;
       setZoom(nextZoom);
@@ -261,7 +268,7 @@ export function PdfEngine({
     },
     zoomIn: async () => {
       const pdf = pdfRef.current;
-      const nextZoom = Math.min(2.5, Number((zoom + 0.1).toFixed(2)));
+      const nextZoom = Math.min(PDF_ZOOM_LIMITS.max / 100, Number((zoom + PDF_ZOOM_LIMITS.step / 100).toFixed(2)));
       const token = loadTokenRef.current;
       const sequence = ++pageSequenceRef.current;
       setZoom(nextZoom);

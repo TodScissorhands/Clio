@@ -80,7 +80,7 @@ export type LibraryRoot = {
 };
 
 export type ReadingPosition =
-  | { kind: "pdf-page"; page: number }
+  | { kind: "pdf-page"; page: number; progression?: number }
   | { kind: "epub-cfi"; cfi: string; progression?: number }
   | { kind: "text-scroll"; progression: number };
 export type ReadingState = {

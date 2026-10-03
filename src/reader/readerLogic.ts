@@ -22,6 +22,49 @@ export function parseReaderTheme(raw: string | null | undefined): ReaderTheme {
   return "light";
 }
 
+export type ReaderZoomLimits = {
+  min: number;
+  max: number;
+  step: number;
+};
+
+const PDF_ZOOM_LIMITS: ReaderZoomLimits = { min: 50, max: 250, step: 10 };
+const REFLOWABLE_ZOOM_LIMITS: ReaderZoomLimits = { min: 70, max: 220, step: 15 };
+
+/** Return only zoom controls implemented by the active reader engine. */
+export function getReaderZoomLimits(format: string | undefined): ReaderZoomLimits | null {
+  if (format === "pdf") return PDF_ZOOM_LIMITS;
+  if (format === "txt" || format === "md") return REFLOWABLE_ZOOM_LIMITS;
+  return null;
+}
+
+/** Calculate text-reader progress without treating a non-scrollable document as already finished. */
+export function getTextReadingProgression(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  fallbackProgression = 0
+): number {
+  const maxScroll = scrollHeight - clientHeight;
+  if (!Number.isFinite(maxScroll) || maxScroll <= 0) {
+    return Number.isFinite(fallbackProgression)
+      ? Math.max(0, Math.min(1, fallbackProgression))
+      : 0;
+  }
+  const progression = scrollTop / maxScroll;
+  return Number.isFinite(progression) ? Math.max(0, Math.min(1, progression)) : 0;
+}
+
+/** Reject async UI results after the reader document or request has changed. */
+export function isCurrentReaderOperation(
+  operationEpoch: number,
+  currentEpoch: number,
+  requestId?: number,
+  currentRequestId?: number
+): boolean {
+  return operationEpoch === currentEpoch &&
+    (requestId === undefined || requestId === currentRequestId);
+}
 
 // ── Escape dismissal ──────────────────────────────────────────────────────────
 

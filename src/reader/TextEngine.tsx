@@ -14,6 +14,7 @@ import type {
   ReaderSearchResult,
   ReaderTocItem,
 } from "./types";
+import { getReaderZoomLimits, getTextReadingProgression } from "./readerLogic";
 
 type MarkdownBlock =
   | { kind: "heading"; level: number; text: string; id: string }
@@ -272,6 +273,8 @@ export function TextEngine({
 
   const isMarkdown = document.record.format === "md";
 
+  const zoomLimits = getReaderZoomLimits(document.record.format)!;
+
   // Parse markdown or keep raw text
   const { blocks, toc } = useMemo(() => {
     if (isMarkdown && rawText) {
@@ -284,6 +287,9 @@ export function TextEngine({
   useEffect(() => {
     let cancelled = false;
     onState("loading", "Loading text document…");
+    setRawText("");
+    setZoomPercent(100);
+    onZoomChange?.(100);
     document.bytes
       .text()
       .then((text) => {
@@ -300,35 +306,53 @@ export function TextEngine({
     return () => {
       cancelled = true;
     };
-  }, [document.bytes, onState]);
+  }, [document.bytes, onState, onZoomChange]);
 
   // Pass TOC to shell
   useEffect(() => {
     onToc(toc);
   }, [toc, onToc]);
 
-  // Restore initial reading position
+  // Restore and report the first position after document layout is ready. This
+  // creates durable state even when the document does not need scrolling.
   useEffect(() => {
     if (!rawText || !viewportRef.current) return;
     const vp = viewportRef.current;
+    const savedProgression =
+      initialPosition?.kind === "text-scroll" ? initialPosition.progression : 0;
     if (initialPosition?.kind === "text-scroll") {
-      const targetScroll =
-        initialPosition.progression * (vp.scrollHeight - vp.clientHeight);
+      const targetScroll = savedProgression * (vp.scrollHeight - vp.clientHeight);
       vp.scrollTop = Math.max(0, targetScroll);
     }
-  }, [rawText, initialPosition]);
+    const progression = getTextReadingProgression(
+      vp.scrollTop,
+      vp.scrollHeight,
+      vp.clientHeight,
+      savedProgression
+    );
+    const currentPercent = Math.round(progression * 100);
+    onProgress({ current: currentPercent, total: 100, fraction: progression, label: `${currentPercent}%` });
+    onPositionChange?.({ kind: "text-scroll", progression });
+  }, [rawText, initialPosition, onPositionChange, onProgress]);
 
   // Track scroll progression
   const handleScroll = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-    const maxScroll = vp.scrollHeight - vp.clientHeight;
-    const progression = maxScroll > 0 ? Math.min(1, Math.max(0, vp.scrollTop / maxScroll)) : 1;
+    const fallbackProgression =
+      initialPosition?.kind === "text-scroll" ? initialPosition.progression : 0;
+    const progression = getTextReadingProgression(
+      vp.scrollTop,
+      vp.scrollHeight,
+      vp.clientHeight,
+      fallbackProgression
+    );
     const currentPercent = Math.round(progression * 100);
 
     onProgress({
       current: currentPercent,
       total: 100,
+      fraction: progression,
       label: `${currentPercent}%`,
     });
 
@@ -336,7 +360,7 @@ export function TextEngine({
       kind: "text-scroll",
       progression,
     });
-  }, [onProgress, onPositionChange]);
+  }, [initialPosition, onProgress, onPositionChange]);
 
   // Pointer-up selection handler (no-op for text reader until text locators exist)
   const handlePointerUp = useCallback(() => {}, []);
@@ -401,14 +425,14 @@ export function TextEngine({
       },
       zoomIn() {
         setZoomPercent((prev) => {
-          const next = Math.min(220, prev + 15);
+          const next = Math.min(zoomLimits.max, prev + zoomLimits.step);
           onZoomChange?.(next);
           return next;
         });
       },
       zoomOut() {
         setZoomPercent((prev) => {
-          const next = Math.max(70, prev - 15);
+          const next = Math.max(zoomLimits.min, prev - zoomLimits.step);
           onZoomChange?.(next);
           return next;
         });
@@ -470,6 +494,7 @@ export function TextEngine({
       activeMatchIndex,
       scrollToMatch,
       onZoomChange,
+      zoomLimits,
     ]
   );
 

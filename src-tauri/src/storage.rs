@@ -978,7 +978,7 @@ impl LibraryDb {
         let now = timestamp();
         let (kind, page, cfi, progression) = position.columns()?;
         let fallback_title = match &position {
-            ReadingPosition::PdfPage { page } => format!("Page {page}"),
+            ReadingPosition::PdfPage { page, .. } => format!("Page {page}"),
             ReadingPosition::EpubCfi {
                 progression: Some(p),
                 ..
@@ -1718,10 +1718,12 @@ pub struct AnnotationDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ReadingPosition {
     PdfPage {
         page: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progression: Option<f64>,
     },
     EpubCfi {
         cfi: String,
@@ -1735,8 +1737,14 @@ pub enum ReadingPosition {
 impl ReadingPosition {
     fn validate(&self) -> Result<(), String> {
         match self {
-            Self::PdfPage { page } if *page == 0 || i64::try_from(*page).is_err() => {
+            Self::PdfPage { page, .. } if *page == 0 || i64::try_from(*page).is_err() => {
                 Err("PDF page must be at least 1.".to_string())
+            }
+            Self::PdfPage {
+                progression: Some(value),
+                ..
+            } if !value.is_finite() || !(0.0..=1.0).contains(value) => {
+                Err("PDF progression must be between 0 and 1.".to_string())
             }
             Self::EpubCfi { cfi, progression } if cfi.trim().is_empty() => {
                 Err("EPUB reading position requires a CFI.".to_string())
@@ -1760,11 +1768,11 @@ impl ReadingPosition {
     fn columns(&self) -> Result<(&'static str, Option<i64>, Option<&str>, Option<f64>), String> {
         self.validate()?;
         match self {
-            Self::PdfPage { page } => Ok((
+            Self::PdfPage { page, progression } => Ok((
                 "pdf-page",
                 Some(i64::try_from(*page).map_err(|_| "PDF page is too large.".to_string())?),
                 None,
-                None,
+                *progression,
             )),
             Self::EpubCfi { cfi, progression } => {
                 Ok(("epub-cfi", None, Some(cfi.as_str()), *progression))
@@ -2546,6 +2554,7 @@ fn reading_state_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingSt
     let position = match kind.as_str() {
         "pdf-page" => ReadingPosition::PdfPage {
             page: row.get::<_, Option<i64>>(2)?.unwrap_or(1).max(1) as u64,
+            progression: row.get(4)?,
         },
         "epub-cfi" => ReadingPosition::EpubCfi {
             cfi: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
@@ -2575,6 +2584,7 @@ fn bookmark_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookmarkDto> {
     let position = match kind.as_str() {
         "pdf-page" => ReadingPosition::PdfPage {
             page: row.get::<_, Option<i64>>(3)?.unwrap_or(1).max(1) as u64,
+            progression: row.get(5)?,
         },
         "epub-cfi" => ReadingPosition::EpubCfi {
             cfi: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
@@ -2607,6 +2617,7 @@ fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationDt
     let position = match pos_kind.as_str() {
         "pdf-page" => ReadingPosition::PdfPage {
             page: row.get::<_, Option<i64>>(4)?.unwrap_or(1).max(1) as u64,
+            progression: row.get(6)?,
         },
         "epub-cfi" => ReadingPosition::EpubCfi {
             cfi: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
@@ -2837,7 +2848,10 @@ mod tests {
         // 1. PDF reading-state roundtrip
         let valid_pdf_state = ReadingState {
             document_id: doc_id.clone(),
-            position: ReadingPosition::PdfPage { page: 5 },
+            position: ReadingPosition::PdfPage {
+                page: 5,
+                progression: Some(0.5),
+            },
             last_opened_at: "2026-10-01T12:00:00Z".to_string(),
             updated_at: "2026-10-01T12:00:00Z".to_string(),
         };
@@ -2849,8 +2863,27 @@ mod tests {
             .expect("get reading state")
             .expect("some state");
         assert_eq!(retrieved_pdf.document_id, doc_id);
+        let pdf_position_json =
+            serde_json::to_value(&retrieved_pdf.position).expect("serialize pdf position");
+        assert_eq!(pdf_position_json["kind"].as_str(), Some("pdf-page"));
+        assert_eq!(pdf_position_json["progression"].as_f64(), Some(0.5));
+        let legacy_pdf_position: ReadingPosition = serde_json::from_value(serde_json::json!({
+            "kind": "pdf-page",
+            "page": 5,
+        }))
+        .expect("deserialize PDF position without progression");
+        assert!(matches!(
+            legacy_pdf_position,
+            ReadingPosition::PdfPage {
+                page: 5,
+                progression: None
+            }
+        ));
         match retrieved_pdf.position {
-            ReadingPosition::PdfPage { page } => assert_eq!(page, 5),
+            ReadingPosition::PdfPage { page, progression } => {
+                assert_eq!(page, 5);
+                assert_eq!(progression, Some(0.5));
+            }
             _ => panic!("expected pdf-page"),
         }
 
@@ -2881,11 +2914,25 @@ mod tests {
         }
         let invalid_page_state = ReadingState {
             document_id: doc_id.clone(),
-            position: ReadingPosition::PdfPage { page: 0 },
+            position: ReadingPosition::PdfPage {
+                page: 0,
+                progression: None,
+            },
             last_opened_at: "2026-10-01T12:00:00Z".to_string(),
             updated_at: "2026-10-01T12:00:00Z".to_string(),
         };
         assert!(db.set_reading_state(invalid_page_state).is_err());
+
+        let invalid_pdf_progression_state = ReadingState {
+            document_id: doc_id.clone(),
+            position: ReadingPosition::PdfPage {
+                page: 2,
+                progression: Some(1.5),
+            },
+            last_opened_at: "2026-10-01T12:00:00Z".to_string(),
+            updated_at: "2026-10-01T12:00:00Z".to_string(),
+        };
+        assert!(db.set_reading_state(invalid_pdf_progression_state).is_err());
 
         let invalid_progression_state = ReadingState {
             document_id: doc_id.clone(),
@@ -2900,7 +2947,10 @@ mod tests {
 
         let unknown_doc_state = ReadingState {
             document_id: "unknown-uuid".to_string(),
-            position: ReadingPosition::PdfPage { page: 1 },
+            position: ReadingPosition::PdfPage {
+                page: 1,
+                progression: None,
+            },
             last_opened_at: "2026-10-01T12:00:00Z".to_string(),
             updated_at: "2026-10-01T12:00:00Z".to_string(),
         };
@@ -2931,14 +2981,17 @@ mod tests {
         let bm1 = db
             .create_bookmark(
                 &doc_id,
-                ReadingPosition::PdfPage { page: 12 },
+                ReadingPosition::PdfPage {
+                    page: 12,
+                    progression: None,
+                },
                 Some("Chapter 2"),
             )
             .expect("create bookmark 1");
         assert_eq!(bm1.document_id, doc_id);
         assert_eq!(bm1.title, Some("Chapter 2".to_string()));
         match bm1.position {
-            ReadingPosition::PdfPage { page } => assert_eq!(page, 12),
+            ReadingPosition::PdfPage { page, .. } => assert_eq!(page, 12),
             _ => panic!("expected pdf-page"),
         }
 
@@ -2965,7 +3018,14 @@ mod tests {
 
         // 5. Validation: Reject invalid page 0
         assert!(db
-            .create_bookmark(&doc_id, ReadingPosition::PdfPage { page: 0 }, None)
+            .create_bookmark(
+                &doc_id,
+                ReadingPosition::PdfPage {
+                    page: 0,
+                    progression: None
+                },
+                None
+            )
             .is_err());
 
         // 6. Validation: Reject empty CFI
@@ -2994,7 +3054,14 @@ mod tests {
 
         // 8. Validation: Reject unknown document ID
         assert!(db
-            .create_bookmark("unknown-doc", ReadingPosition::PdfPage { page: 1 }, None)
+            .create_bookmark(
+                "unknown-doc",
+                ReadingPosition::PdfPage {
+                    page: 1,
+                    progression: None
+                },
+                None
+            )
             .is_err());
 
         // 9. Delete bookmark
@@ -3029,7 +3096,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "highlight",
-                ReadingPosition::PdfPage { page: 3 },
+                ReadingPosition::PdfPage {
+                    page: 3,
+                    progression: None,
+                },
                 Some("Important sentence"),
                 Some("Check reference later"),
                 None,
@@ -3050,7 +3120,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "",
-                ReadingPosition::PdfPage { page: 3 },
+                ReadingPosition::PdfPage {
+                    page: 3,
+                    progression: None
+                },
                 None,
                 None,
                 None,
@@ -3117,7 +3190,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "highlight",
-                ReadingPosition::PdfPage { page: 5 },
+                ReadingPosition::PdfPage {
+                    page: 5,
+                    progression: None,
+                },
                 Some("Some text"),
                 None,
                 Some(pdf_locator),
@@ -3130,7 +3206,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "note",
-                ReadingPosition::PdfPage { page: 1 },
+                ReadingPosition::PdfPage {
+                    page: 1,
+                    progression: None,
+                },
                 None,
                 Some("A plain note"),
                 None,
@@ -3143,7 +3222,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "note",
-                ReadingPosition::PdfPage { page: 2 },
+                ReadingPosition::PdfPage {
+                    page: 2,
+                    progression: None,
+                },
                 None,
                 None,
                 Some(""),
@@ -3156,7 +3238,10 @@ mod tests {
             .create_annotation(
                 &doc_id,
                 "highlight",
-                ReadingPosition::PdfPage { page: 1 },
+                ReadingPosition::PdfPage {
+                    page: 1,
+                    progression: None
+                },
                 Some("text"),
                 None,
                 Some("not-json-at-all"),
@@ -3799,7 +3884,10 @@ mod tests {
         let db = LibraryDb::open_in_memory().expect("open db");
         let bm_err = db.create_bookmark(
             "non-catalog-doc",
-            ReadingPosition::PdfPage { page: 1 },
+            ReadingPosition::PdfPage {
+                page: 1,
+                progression: None,
+            },
             None,
         );
         assert!(bm_err.is_err());
@@ -3810,7 +3898,10 @@ mod tests {
         let ann_err = db.create_annotation(
             "non-catalog-doc",
             "highlight",
-            ReadingPosition::PdfPage { page: 1 },
+            ReadingPosition::PdfPage {
+                page: 1,
+                progression: None,
+            },
             Some("text"),
             None,
             None,
@@ -3889,7 +3980,10 @@ mod tests {
             // 3. Reading state writes in session 1 for all 3 locators
             db.set_reading_state(ReadingState {
                 document_id: p_id.clone(),
-                position: ReadingPosition::PdfPage { page: 17 },
+                position: ReadingPosition::PdfPage {
+                    page: 17,
+                    progression: None,
+                },
                 last_opened_at: "2026-10-02T16:00:00Z".to_string(),
                 updated_at: "2026-10-02T16:00:00Z".to_string(),
             })
@@ -3917,7 +4011,10 @@ mod tests {
             let bm = db
                 .create_bookmark(
                     &p_id,
-                    ReadingPosition::PdfPage { page: 17 },
+                    ReadingPosition::PdfPage {
+                        page: 17,
+                        progression: None,
+                    },
                     Some("Important Section"),
                 )
                 .expect("create bookmark");
@@ -3927,7 +4024,10 @@ mod tests {
                 .create_annotation(
                     &p_id,
                     "highlight",
-                    ReadingPosition::PdfPage { page: 17 },
+                    ReadingPosition::PdfPage {
+                        page: 17,
+                        progression: None,
+                    },
                     Some("highlighted text"),
                     Some("my note"),
                     Some("{\"page\":17}"),
@@ -3961,7 +4061,7 @@ mod tests {
                 .unwrap()
                 .expect("pdf state");
             match p_state.position {
-                ReadingPosition::PdfPage { page } => assert_eq!(page, 17),
+                ReadingPosition::PdfPage { page, .. } => assert_eq!(page, 17),
                 _ => panic!("Expected PdfPage"),
             }
 
@@ -4036,7 +4136,10 @@ mod tests {
         // Set reading state
         db.set_reading_state(ReadingState {
             document_id: doc_id.clone(),
-            position: ReadingPosition::PdfPage { page: 5 },
+            position: ReadingPosition::PdfPage {
+                page: 5,
+                progression: None,
+            },
             last_opened_at: "2026-10-03T10:00:00Z".to_string(),
             updated_at: "2026-10-03T10:00:00Z".to_string(),
         })
@@ -4051,7 +4154,7 @@ mod tests {
         let docs_with_state = db.list_documents(Some(&root.id), false).expect("list");
         assert!(docs_with_state[0].reading_state.is_some());
         match docs_with_state[0].reading_state.as_ref().unwrap().position {
-            ReadingPosition::PdfPage { page } => assert_eq!(page, 5),
+            ReadingPosition::PdfPage { page, .. } => assert_eq!(page, 5),
             _ => panic!("Expected PdfPage"),
         }
 
@@ -4104,7 +4207,10 @@ mod tests {
         // Add reading state to the document
         db.set_reading_state(ReadingState {
             document_id: doc_id.clone(),
-            position: ReadingPosition::PdfPage { page: 12 },
+            position: ReadingPosition::PdfPage {
+                page: 12,
+                progression: None,
+            },
             last_opened_at: timestamp(),
             updated_at: timestamp(),
         })
@@ -4133,7 +4239,7 @@ mod tests {
         // Reading state was preserved across relink
         assert!(relinked.reading_state.is_some());
         match relinked.reading_state.unwrap().position {
-            ReadingPosition::PdfPage { page } => assert_eq!(page, 12),
+            ReadingPosition::PdfPage { page, .. } => assert_eq!(page, 12),
             _ => panic!("Expected PdfPage 12"),
         }
 

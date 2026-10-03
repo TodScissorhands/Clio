@@ -445,6 +445,29 @@ describe("OD-5: Continue Reading vs Recently Read", () => {
     },
   };
 
+  const docFinishedPdf: StoredDocument = {
+    ...docInProgressPdf,
+    record: { ...docInProgressPdf.record, id: "pdf-finished" },
+    readingState: {
+      documentId: "pdf-finished",
+      position: { kind: "pdf-page", page: 100, progression: 1 },
+      lastOpenedAt: "2026-02-06T12:00:00Z",
+      updatedAt: "2026-02-06T12:00:00Z",
+    },
+  };
+
+  const docJustOpenedText: StoredDocument = {
+    ...docTxt1,
+    record: { ...docTxt1.record, id: "txt-just-opened" },
+    availability: "present",
+    readingState: {
+      documentId: "txt-just-opened",
+      position: { kind: "text-scroll", progression: 0 },
+      lastOpenedAt: "2026-02-07T12:00:00Z",
+      updatedAt: "2026-02-07T12:00:00Z",
+    },
+  };
+
   const docMissing: StoredDocument = {
     ...docPdf1,
     record: { ...docPdf1.record, id: "doc-missing" },
@@ -460,26 +483,48 @@ describe("OD-5: Continue Reading vs Recently Read", () => {
   it("identifies finished documents correctly", () => {
     expect(isDocumentFinished(docFinishedEpub)).toBe(true);
     expect(isDocumentFinished(docFinishedText)).toBe(true);
+    expect(isDocumentFinished(docFinishedPdf)).toBe(true);
+    expect(
+      isDocumentFinished({
+        ...docInProgressPdf,
+        readingState: {
+          ...docInProgressPdf.readingState!,
+          position: { kind: "pdf-page", page: 49, progression: 0.98 },
+        },
+      })
+    ).toBe(false);
     expect(isDocumentFinished(docInProgressEpub)).toBe(false);
     expect(isDocumentFinished(docInProgressPdf)).toBe(false);
   });
 
-  it("identifies started documents correctly", () => {
+  it("identifies opened and progressed documents as started", () => {
     expect(isDocumentStarted(docInProgressEpub)).toBe(true);
     expect(isDocumentStarted(docFinishedEpub)).toBe(true);
     expect(isDocumentStarted(docInProgressPdf)).toBe(true);
+    expect(isDocumentStarted(docJustOpenedText)).toBe(true);
     expect(isDocumentStarted(docTxt1)).toBe(false); // no reading state
   });
 
   it("deriveContinueDocuments excludes finished and missing documents (OD-5)", () => {
-    const all = [docInProgressEpub, docFinishedEpub, docFinishedText, docInProgressPdf, docMissing, docTxt1];
+    const all = [
+      docInProgressEpub,
+      docFinishedEpub,
+      docFinishedText,
+      docInProgressPdf,
+      docFinishedPdf,
+      docJustOpenedText,
+      docMissing,
+      docTxt1,
+    ];
     const continueDocs = deriveContinueDocuments(all);
 
     const continueIds = continueDocs.map((d) => d.record.id);
     expect(continueIds).toContain("epub-in-progress");
     expect(continueIds).toContain("pdf-in-progress");
+    expect(continueIds).toContain("txt-just-opened");
     expect(continueIds).not.toContain("epub-finished"); // finished leaves continue reading
     expect(continueIds).not.toContain("txt-finished"); // finished leaves continue reading
+    expect(continueIds).not.toContain("pdf-finished");
     expect(continueIds).not.toContain("doc-missing"); // missing excluded
     expect(continueIds).not.toContain("txt-1"); // unstarted excluded
   });

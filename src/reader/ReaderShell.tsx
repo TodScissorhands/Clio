@@ -38,7 +38,13 @@ import type {
   TextSelection,
 } from "./types";
 import "./ReaderShell.css";
-import { parseReaderTheme, TOPBAR_HIDE_DELAY } from "./readerLogic";
+import {
+  getReaderZoomLimits,
+  parseReaderTheme,
+  resolveEscapeAction,
+  isCurrentReaderOperation,
+  TOPBAR_HIDE_DELAY,
+} from "./readerLogic";
 
 // ── Persistence helpers (browser-side wrappers around pure parseReaderTheme) ──
 
@@ -65,7 +71,7 @@ export type ReaderShellProps = {
   /** The matching StoredDocument from the library catalog (for command context). */
   storedDocument?: StoredDocument | null;
   collections?: Collection[];
-  onBack?: () => void;
+  onBack?: () => void | Promise<void>;
   onOpen?: () => void;
   openDisabled?: boolean;
   onRemoveFromLibrary?: (docIds: string[]) => Promise<void>;
@@ -115,6 +121,9 @@ export function ReaderShell({
   onExtractPages,
   onAddToLibrary,
 }: ReaderShellProps) {
+  const zoomLimits = getReaderZoomLimits(document?.record.format);
+  const documentEpochRef = useRef(0);
+  const searchRequestRef = useRef(0);
   const engineRef = useRef<ReaderEngineHandle | null>(null);
 
   // ── Reader display preferences (persisted) ───────────────────────────────────
@@ -175,6 +184,11 @@ export function ReaderShell({
     () => new ReadingStateCoordinator({ getReadingState, setReadingState }),
     []
   );
+
+  const handleBack = useCallback(async () => {
+    await coordinator.flush();
+    await onBack?.();
+  }, [coordinator, onBack]);
 
   // ── Callbacks forwarded to engines ──────────────────────────────────────────
   const onPositionChange = useCallback(
@@ -262,6 +276,7 @@ export function ReaderShell({
       setToc([]);
       setQuery("");
       setSearchResult(null);
+      setSearchPending(false);
       setSearchActiveQuery("");
       setZoomPercent(100);
       setBookmarks([]);
@@ -282,6 +297,8 @@ export function ReaderShell({
       return;
     }
 
+    const requestEpoch = ++documentEpochRef.current;
+    searchRequestRef.current += 1;
     let cancelled = false;
     const docId = document.record.id;
     // Reset per-document transient state
@@ -293,6 +310,7 @@ export function ReaderShell({
     setQuery("");
     setSearchResult(null);
     setSearchActiveQuery("");
+    setSearchPending(false);
     setZoomPercent(100);
     setBookmarks([]);
     setAnnotations([]);
@@ -312,21 +330,23 @@ export function ReaderShell({
     setTopbarVisible(true);
 
     coordinator.loadInitialPosition(docId).then((pos) => {
-      if (cancelled) return;
+      if (cancelled || !isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) return;
       setInitialPosition(pos);
       if (pos) setCurrentPosition(pos);
       setPositionLoaded(true);
     });
 
     listBookmarks(docId)
-      .then((list) => { if (!cancelled) setBookmarks(list); })
-      .catch(() => { if (!cancelled) setBookmarks([]); });
+      .then((list) => { if (!cancelled && isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) setBookmarks(list); })
+      .catch(() => { if (!cancelled && isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) setBookmarks([]); });
 
     setAnnotationsLoading(true);
     listAnnotations(docId)
-      .then((list) => { if (!cancelled) setAnnotations(list); })
+      .then((list) => {
+        if (!cancelled && isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) setAnnotations(list);
+      })
       .catch((error: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) {
           setAnnotations([]);
           onState(
             "error",
@@ -334,10 +354,14 @@ export function ReaderShell({
           );
         }
       })
-      .finally(() => { if (!cancelled) setAnnotationsLoading(false); });
+      .finally(() => {
+        if (!cancelled && isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) setAnnotationsLoading(false);
+      });
 
     return () => {
       cancelled = true;
+      if (isCurrentReaderOperation(requestEpoch, documentEpochRef.current)) documentEpochRef.current += 1;
+      searchRequestRef.current += 1;
       void coordinator.flush();
     };
   }, [coordinator, document, onState, clearHideTimer]);
@@ -351,23 +375,31 @@ export function ReaderShell({
   const toggleBookmark = useCallback(async () => {
     if (!document || !currentPosition) return;
     const docId = document.record.id;
+    const operationEpoch = documentEpochRef.current;
     if (activeBookmark) {
       try {
         await deleteBookmark(activeBookmark.id);
-        setBookmarks((prev) => prev.filter((b) => b.id !== activeBookmark.id));
+        if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+          setBookmarks((prev) => prev.filter((b) => b.id !== activeBookmark.id));
+        }
       } catch {}
     } else {
       try {
         const newBm = await createBookmark(docId, currentPosition);
-        setBookmarks((prev) => [...prev, newBm]);
+        if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+          setBookmarks((prev) => [...prev, newBm]);
+        }
       } catch {}
     }
   }, [activeBookmark, currentPosition, document]);
 
   const removeBookmark = useCallback(async (bookmarkId: string) => {
+    const operationEpoch = documentEpochRef.current;
     try {
       await deleteBookmark(bookmarkId);
-      setBookmarks((prev) => prev.filter((b) => b.id !== bookmarkId));
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+        setBookmarks((prev) => prev.filter((b) => b.id !== bookmarkId));
+      }
     } catch {}
   }, []);
 
@@ -375,75 +407,96 @@ export function ReaderShell({
   const saveAnnotationFromSelection = useCallback(async () => {
     if (!document || !currentPosition || !pendingTextSelection) return;
     const docId = document.record.id;
+    const operationEpoch = documentEpochRef.current;
     const { locator, selectedText } = pendingTextSelection;
     const note = annotationNoteInput.trim() ? annotationNoteInput.trim() : undefined;
     try {
       const newAnn = await createAnnotation(docId, "highlight", currentPosition, selectedText, note, locator);
+      if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) return;
       setAnnotations((prev) => [...prev, newAnn]);
       setPendingTextSelection(null);
       setAnnotationNoteInput("");
     } catch (error) {
-      onState("error", `Could not save annotation: ${error instanceof Error ? error.message : String(error)}`);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+        onState("error", `Could not save annotation: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }, [annotationNoteInput, currentPosition, document, onState, pendingTextSelection]);
 
   const handleQuickHighlight = useCallback(async () => {
     if (!document || !currentPosition || !pendingTextSelection) return;
     const docId = document.record.id;
+    const operationEpoch = documentEpochRef.current;
     const { locator, selectedText } = pendingTextSelection;
     try {
       const newAnn = await createAnnotation(docId, "highlight", currentPosition, selectedText, undefined, locator);
+      if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) return;
       setAnnotations((prev) => [...prev, newAnn]);
       setPendingTextSelection(null);
       setAnnotationNoteInput("");
       setIsAddingNote(false);
     } catch (error) {
-      onState("error", `Could not save highlight: ${error instanceof Error ? error.message : String(error)}`);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+        onState("error", `Could not save highlight: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }, [currentPosition, document, onState, pendingTextSelection]);
 
   const handleCopySelection = useCallback(async () => {
     if (!pendingTextSelection?.selectedText) return;
+    const operationEpoch = documentEpochRef.current;
     try {
       await navigator.clipboard.writeText(pendingTextSelection.selectedText);
     } catch {
       // ignore clipboard error
     }
+    if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) return;
     setPendingTextSelection(null);
     setAnnotationNoteInput("");
     setIsAddingNote(false);
   }, [pendingTextSelection]);
 
   const saveAnnotationNote = useCallback(async (annotationId: string) => {
+    const operationEpoch = documentEpochRef.current;
     try {
       const updated = await updateAnnotation(annotationId, editingNoteText.trim() ? editingNoteText.trim() : undefined);
+      if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) return;
       setAnnotations((prev) => prev.map((a) => (a.id === annotationId ? updated : a)));
       setEditingAnnotationId(null);
       setEditingNoteText("");
     } catch (error) {
-      onState("error", `Could not update annotation note: ${error instanceof Error ? error.message : String(error)}`);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+        onState("error", `Could not update annotation note: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }, [editingNoteText, onState]);
 
   const removeAnnotation = useCallback(async (annotationId: string) => {
+    const operationEpoch = documentEpochRef.current;
     try {
       await deleteAnnotation(annotationId);
+      if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) return;
       setAnnotations((prev) => prev.filter((a) => a.id !== annotationId));
       if (editingAnnotationId === annotationId) {
         setEditingAnnotationId(null);
         setEditingNoteText("");
       }
     } catch (error) {
-      onState("error", `Could not delete annotation: ${error instanceof Error ? error.message : String(error)}`);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current)) {
+        onState("error", `Could not delete annotation: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }, [editingAnnotationId, onState]);
+
 
   // ── Find (search) ─────────────────────────────────────────────────────────────
 
   const clearSearch = useCallback(() => {
+    searchRequestRef.current += 1;
     setQuery("");
     setSearchResult(null);
     setSearchActiveQuery("");
+    setSearchPending(false);
     void engineRef.current?.clearSearch?.();
   }, []);
 
@@ -471,44 +524,64 @@ export function ReaderShell({
 
   const runSearch = useCallback(async () => {
     const trimmed = query.trim();
-    if (!trimmed || !engineRef.current) return;
+    const engine = engineRef.current;
+    if (!trimmed || !engine) return;
+    const requestId = ++searchRequestRef.current;
+    const operationEpoch = documentEpochRef.current;
     setSearchPending(true);
     try {
-      const result = await engineRef.current.search(trimmed);
+      const result = await engine.search(trimmed);
+      if (!isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) return;
       setSearchResult(result);
       setSearchActiveQuery(trimmed);
     } finally {
-      setSearchPending(false);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) {
+        setSearchPending(false);
+      }
     }
   }, [query]);
 
   const nextMatch = useCallback(async () => {
-    if (!engineRef.current) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    const requestId = ++searchRequestRef.current;
+    const operationEpoch = documentEpochRef.current;
     setSearchPending(true);
     try {
-      if (engineRef.current.nextSearchResult) {
-        const result = await engineRef.current.nextSearchResult();
-        setSearchResult(result);
+      if (engine.nextSearchResult) {
+        const result = await engine.nextSearchResult();
+        if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) {
+          setSearchResult(result);
+        }
       } else {
         await runSearch();
       }
     } finally {
-      setSearchPending(false);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) {
+        setSearchPending(false);
+      }
     }
   }, [runSearch]);
 
   const prevMatch = useCallback(async () => {
-    if (!engineRef.current) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    const requestId = ++searchRequestRef.current;
+    const operationEpoch = documentEpochRef.current;
     setSearchPending(true);
     try {
-      if (engineRef.current.previousSearchResult) {
-        const result = await engineRef.current.previousSearchResult();
-        setSearchResult(result);
+      if (engine.previousSearchResult) {
+        const result = await engine.previousSearchResult();
+        if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) {
+          setSearchResult(result);
+        }
       } else {
         await runSearch();
       }
     } finally {
-      setSearchPending(false);
+      if (isCurrentReaderOperation(operationEpoch, documentEpochRef.current, requestId, searchRequestRef.current)) {
+        setSearchPending(false);
+      }
     }
   }, [runSearch]);
 
@@ -590,54 +663,59 @@ export function ReaderShell({
         return;
       }
 
-      // Alt+Left or Cmd+[ → back to Library
+      // Alt+Left or Cmd+[ → flush reading state before returning to Library
       if (
         (event.altKey && event.key === "ArrowLeft") ||
         (event.metaKey && event.key === "[")
       ) {
         if (!isInput) {
           event.preventDefault();
-          onBack?.();
+          void handleBack();
           return;
         }
       }
 
-      // Escape: dismiss transient UI layers (NOT navigation)
+      // Escape dismisses transient UI in one tested priority order; it never navigates.
       if (event.key === "Escape") {
-        if (editingAnnotationId) {
-          setEditingAnnotationId(null);
-          setEditingNoteText("");
-          return;
+        event.preventDefault();
+        switch (resolveEscapeAction({
+          editingAnnotationId,
+          isAddingNote,
+          pendingTextSelection: Boolean(pendingTextSelection),
+          findOpen,
+          navigatorOpen,
+          displayOpen,
+          docMenuOpen,
+        })) {
+          case "dismissAnnotationEdit":
+            setEditingAnnotationId(null);
+            setEditingNoteText("");
+            break;
+          case "dismissNoteEditor":
+            setIsAddingNote(false);
+            break;
+          case "dismissTextSelection":
+            setPendingTextSelection(null);
+            setAnnotationNoteInput("");
+            setIsAddingNote(false);
+            break;
+          case "closeFind":
+            closeFind();
+            break;
+          case "closeNavigator":
+            setNavigatorOpen(false);
+            break;
+          case "closeDisplay":
+            setDisplayOpen(false);
+            break;
+          case "closeDocMenu":
+            setDocMenuOpen(false);
+            setRemoveConfirm(false);
+            break;
+          case "toggleTopbar":
+            setTopbarVisible((visible) => !visible);
+            break;
         }
-        if (isAddingNote) {
-          setIsAddingNote(false);
-          return;
-        }
-        if (pendingTextSelection) {
-          setPendingTextSelection(null);
-          setAnnotationNoteInput("");
-          setIsAddingNote(false);
-          return;
-        }
-        if (findOpen) {
-          closeFind();
-          return;
-        }
-        if (navigatorOpen) {
-          setNavigatorOpen(false);
-          return;
-        }
-        if (displayOpen) {
-          setDisplayOpen(false);
-          return;
-        }
-        if (docMenuOpen) {
-          setDocMenuOpen(false);
-          setRemoveConfirm(false);
-          return;
-        }
-        // Toggle topbar reveal if nothing else to dismiss
-        setTopbarVisible((v) => !v);
         return;
       }
 
@@ -667,8 +745,8 @@ export function ReaderShell({
       if (event.key === "ArrowLeft") void engineRef.current?.previous();
       if (event.key === "ArrowRight") void engineRef.current?.next();
 
-      // PDF zoom
-      if (document.record.format === "pdf") {
+      // Zoom only when the active engine implements it.
+      if (zoomLimits) {
         if ((event.ctrlKey || event.metaKey) && (event.key === "=" || event.key === "+")) {
           event.preventDefault();
           void engineRef.current?.zoomIn();
@@ -692,6 +770,7 @@ export function ReaderShell({
   }, [
     document,
     editingAnnotationId,
+    isAddingNote,
     findOpen,
     navigatorOpen,
     displayOpen,
@@ -700,7 +779,7 @@ export function ReaderShell({
     query,
     searchResult,
     searchActiveQuery,
-    onBack,
+    handleBack,
     revealTopbar,
     openFind,
     closeFind,
@@ -708,6 +787,7 @@ export function ReaderShell({
     nextMatch,
     prevMatch,
     runSearch,
+    zoomLimits,
   ]);
 
   // ── Engine selection ──────────────────────────────────────────────────────────
@@ -721,7 +801,6 @@ export function ReaderShell({
       : null;
 
   // ── Capabilities (derived from format, before engine mounts) ─────────────────
-  const canZoom = document?.record.format === "pdf";
   const canHighlight = document
     ? hasCapability(document.record.format, "textSelection")
     : false;
@@ -734,7 +813,7 @@ export function ReaderShell({
   // ── Progress label ────────────────────────────────────────────────────────────
   const progressLabel = (() => {
     if (!document) return null;
-    if (document.record.format === "pdf" && progress.total) {
+    if (document.record.format === "pdf" && progress.total != null) {
       return `${progress.current} / ${progress.total}`;
     }
     if (progress.fraction != null) {
@@ -792,7 +871,7 @@ export function ReaderShell({
             <button
               type="button"
               className="reader-topbar-btn reader-back-btn"
-              onClick={onBack}
+              onClick={() => void handleBack()}
               title="Back to Library (Alt+Left)"
               aria-label="Back to Library"
             >
@@ -910,7 +989,7 @@ export function ReaderShell({
               ))}
             </div>
 
-            {canZoom && (
+            {zoomLimits && (
               <>
                 <div className="reader-popover-section-label">Zoom</div>
                 <div className="reader-zoom-row">
@@ -918,7 +997,7 @@ export function ReaderShell({
                     type="button"
                     className="reader-zoom-btn"
                     onClick={() => void engineRef.current?.zoomOut()}
-                    disabled={zoomPercent <= 50}
+                    disabled={zoomPercent <= zoomLimits.min}
                     aria-label="Zoom out (Ctrl –)"
                     title="Zoom out (Ctrl –)"
                   >
@@ -936,7 +1015,7 @@ export function ReaderShell({
                     type="button"
                     className="reader-zoom-btn"
                     onClick={() => void engineRef.current?.zoomIn()}
-                    disabled={zoomPercent >= 250}
+                    disabled={zoomPercent >= zoomLimits.max}
                     aria-label="Zoom in (Ctrl +)"
                     title="Zoom in (Ctrl +)"
                   >
@@ -998,7 +1077,7 @@ export function ReaderShell({
                                 void onRemoveFromLibrary?.([storedDocument.record.id]);
                                 setDocMenuOpen(false);
                                 setRemoveConfirm(false);
-                                onBack?.();
+                                void handleBack();
                               }}
                             >
                               Remove

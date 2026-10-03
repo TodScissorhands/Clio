@@ -194,7 +194,7 @@ export function isDocumentFinished(document: StoredDocument): boolean {
   if (!state) return false;
   switch (state.position.kind) {
     case "pdf-page":
-      return false;
+      return typeof state.position.progression === "number" && state.position.progression >= 1;
     case "epub-cfi":
       return typeof state.position.progression === "number" && state.position.progression >= 0.98;
     case "text-scroll":
@@ -211,7 +211,7 @@ export function isDocumentStarted(document: StoredDocument): boolean {
     case "epub-cfi":
       return Boolean(state.position.cfi || (state.position.progression && state.position.progression > 0));
     case "text-scroll":
-      return state.position.progression > 0.005;
+      return true;
   }
 }
 

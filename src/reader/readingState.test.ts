@@ -82,6 +82,50 @@ describe("ReadingStateCoordinator", () => {
     expect(storage.setCalls[0].position).toEqual({ kind: "pdf-page", page: 4 });
   });
 
+  it("serializes overlapping flushes so a newer position cannot be overwritten", async () => {
+    let signalFirstWriteStarted!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      signalFirstWriteStarted = resolve;
+    });
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    const writes: ReadingPosition[] = [];
+    let callCount = 0;
+    let persisted: ReadingState | null = null;
+    const storage: ReadingStateStorage = {
+      getReadingState: async () => null,
+      setReadingState: async (state) => {
+        callCount += 1;
+        if (callCount === 1) {
+          signalFirstWriteStarted();
+          await firstWriteGate;
+        }
+        writes.push(state.position);
+        persisted = state;
+      },
+    };
+    const coordinator = new ReadingStateCoordinator(storage, 1000);
+
+    coordinator.recordPositionChange("doc-ordered", { kind: "pdf-page", page: 2 });
+    const firstFlush = coordinator.flush();
+    await firstWriteStarted;
+    coordinator.recordPositionChange("doc-ordered", { kind: "pdf-page", page: 3 });
+    const secondFlush = coordinator.flush();
+    await Promise.resolve();
+
+    expect(callCount).toBe(1);
+    releaseFirstWrite();
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(writes).toEqual([
+      { kind: "pdf-page", page: 2 },
+      { kind: "pdf-page", page: 3 },
+    ]);
+    expect(persisted?.position).toEqual({ kind: "pdf-page", page: 3 });
+  });
+
   it("replacing document flushes previous document position under the previous document ID", async () => {
     const storage = new MockReadingStateStorage();
     const docA = "doc-a";
