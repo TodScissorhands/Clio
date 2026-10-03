@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import type { ReadingState, StoredDocument } from "../storage/domain";
 import {
+  deriveContinueDocuments,
+  deriveRecentlyReadDocuments,
   filterDocuments,
   formatReadingProgress,
   formatRelativeTime,
+  isDocumentFinished,
+  isDocumentStarted,
   matchesFormat,
   matchesSearch,
   sortDocuments,
@@ -392,5 +396,110 @@ describe("filterDocuments regression: selectedRootId scoping", () => {
     const betaDocs = filterDocuments(rootDocs, "", "all", "root-beta");
     expect(betaDocs.length).toBe(1);
     expect(betaDocs[0].record.id).toBe("r2-doc1");
+  });
+});
+
+describe("OD-5: Continue Reading vs Recently Read", () => {
+  const docInProgressEpub: StoredDocument = {
+    ...docEpub1,
+    record: { ...docEpub1.record, id: "epub-in-progress" },
+    readingState: {
+      documentId: "epub-in-progress",
+      position: { kind: "epub-cfi", cfi: "cfi/1", progression: 0.45 },
+      lastOpenedAt: "2026-02-01T12:00:00Z",
+      updatedAt: "2026-02-01T12:00:00Z",
+    },
+  };
+
+  const docFinishedEpub: StoredDocument = {
+    ...docEpub1,
+    record: { ...docEpub1.record, id: "epub-finished" },
+    readingState: {
+      documentId: "epub-finished",
+      position: { kind: "epub-cfi", cfi: "cfi/end", progression: 0.99 },
+      lastOpenedAt: "2026-02-02T12:00:00Z",
+      updatedAt: "2026-02-02T12:00:00Z",
+    },
+  };
+
+  const docFinishedText: StoredDocument = {
+    ...docTxt1,
+    record: { ...docTxt1.record, id: "txt-finished" },
+    availability: "present",
+    readingState: {
+      documentId: "txt-finished",
+      position: { kind: "text-scroll", progression: 1.0 },
+      lastOpenedAt: "2026-02-03T12:00:00Z",
+      updatedAt: "2026-02-03T12:00:00Z",
+    },
+  };
+
+  const docInProgressPdf: StoredDocument = {
+    ...docPdf1,
+    record: { ...docPdf1.record, id: "pdf-in-progress" },
+    readingState: {
+      documentId: "pdf-in-progress",
+      position: { kind: "pdf-page", page: 4 },
+      lastOpenedAt: "2026-02-04T12:00:00Z",
+      updatedAt: "2026-02-04T12:00:00Z",
+    },
+  };
+
+  const docMissing: StoredDocument = {
+    ...docPdf1,
+    record: { ...docPdf1.record, id: "doc-missing" },
+    availability: "missing",
+    readingState: {
+      documentId: "doc-missing",
+      position: { kind: "pdf-page", page: 2 },
+      lastOpenedAt: "2026-02-05T12:00:00Z",
+      updatedAt: "2026-02-05T12:00:00Z",
+    },
+  };
+
+  it("identifies finished documents correctly", () => {
+    expect(isDocumentFinished(docFinishedEpub)).toBe(true);
+    expect(isDocumentFinished(docFinishedText)).toBe(true);
+    expect(isDocumentFinished(docInProgressEpub)).toBe(false);
+    expect(isDocumentFinished(docInProgressPdf)).toBe(false);
+  });
+
+  it("identifies started documents correctly", () => {
+    expect(isDocumentStarted(docInProgressEpub)).toBe(true);
+    expect(isDocumentStarted(docFinishedEpub)).toBe(true);
+    expect(isDocumentStarted(docInProgressPdf)).toBe(true);
+    expect(isDocumentStarted(docTxt1)).toBe(false); // no reading state
+  });
+
+  it("deriveContinueDocuments excludes finished and missing documents (OD-5)", () => {
+    const all = [docInProgressEpub, docFinishedEpub, docFinishedText, docInProgressPdf, docMissing, docTxt1];
+    const continueDocs = deriveContinueDocuments(all);
+
+    const continueIds = continueDocs.map((d) => d.record.id);
+    expect(continueIds).toContain("epub-in-progress");
+    expect(continueIds).toContain("pdf-in-progress");
+    expect(continueIds).not.toContain("epub-finished"); // finished leaves continue reading
+    expect(continueIds).not.toContain("txt-finished"); // finished leaves continue reading
+    expect(continueIds).not.toContain("doc-missing"); // missing excluded
+    expect(continueIds).not.toContain("txt-1"); // unstarted excluded
+  });
+
+  it("deriveRecentlyReadDocuments retains finished documents in chronological order (OD-5)", () => {
+    const all = [docInProgressEpub, docFinishedEpub, docFinishedText, docInProgressPdf, docMissing, docTxt1];
+    const recentDocs = deriveRecentlyReadDocuments(all);
+
+    const recentIds = recentDocs.map((d) => d.record.id);
+    // All finished and unfinished started documents are in Recently Read
+    expect(recentIds).toContain("epub-in-progress");
+    expect(recentIds).toContain("pdf-in-progress");
+    expect(recentIds).toContain("epub-finished"); // OD-5: Finished documents leave Continue Reading but remain in Recently Read
+    expect(recentIds).toContain("txt-finished");
+    expect(recentIds).not.toContain("doc-missing");
+
+    // Chronological order: most recent first
+    expect(recentIds[0]).toBe("pdf-in-progress"); // 2026-02-04
+    expect(recentIds[1]).toBe("txt-finished"); // 2026-02-03
+    expect(recentIds[2]).toBe("epub-finished"); // 2026-02-02
+    expect(recentIds[3]).toBe("epub-in-progress"); // 2026-02-01
   });
 });

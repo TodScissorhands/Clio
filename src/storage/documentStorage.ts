@@ -223,6 +223,16 @@ export async function removeLibraryDocument(documentId: DocumentId): Promise<voi
   await invoke("library_document_remove", { documentId });
 }
 
+export async function relinkLibraryDocument(documentId: DocumentId, newPath: string): Promise<StoredDocument> {
+  const doc = await invoke<NativeDocument>("library_document_relink", { documentId, newPath });
+  return normalizeStoredDocument(doc);
+}
+
+export async function addExternalDocumentToLibrary(filePath: string): Promise<StoredDocument> {
+  const doc = await invoke<NativeDocument>("library_document_add_external", { filePath });
+  return normalizeStoredDocument(doc);
+}
+
 export async function getLibraryDocumentPath(documentId: DocumentId): Promise<string> {
   return invoke<string>("library_document_path", { documentId });
 }

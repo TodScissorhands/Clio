@@ -7,6 +7,7 @@ export interface DocumentPropertiesModalProps {
   document: StoredDocument | null;
   roots: LibraryRoot[];
   collections: Collection[];
+  onLocate?: (doc: StoredDocument) => void;
   onClose: () => void;
 }
 
@@ -14,6 +15,7 @@ export function DocumentPropertiesModal({
   document,
   roots,
   collections,
+  onLocate,
   onClose,
 }: DocumentPropertiesModalProps) {
   useEffect(() => {
@@ -165,6 +167,18 @@ export function DocumentPropertiesModal({
         </div>
 
         <footer className="modal-footer">
+          {document.availability === "missing" && onLocate && (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                onClose();
+                onLocate(document);
+              }}
+            >
+              Locate file…
+            </button>
+          )}
           <button type="button" className="secondary-button" onClick={onClose}>
             Close
           </button>

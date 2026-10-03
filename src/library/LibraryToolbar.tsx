@@ -21,11 +21,31 @@ export interface LibraryToolbarProps {
   onConvertSelection: () => void;
   onExtractPagesSelection: () => void;
   onMergeSelection: () => void;
+
   onPropertiesSelection: () => void;
+  onLocateSelection?: () => void;
   onRemoveSelection: () => void;
   onOpenAppMenu?: () => void;
 }
 
+function getScopeLabel(scope: LibraryScope, roots: LibraryRoot[]): string {
+  switch (scope.kind) {
+    case "all":
+      return "Entire Library";
+    case "root": {
+      const root = roots.find((r) => r.id === scope.rootId);
+      return root?.label ?? "Folder";
+    }
+    case "folder": {
+      const parts = scope.relativePath.split("/").filter(Boolean);
+      return parts[parts.length - 1] ?? "Folder";
+    }
+    case "collection":
+      return "Current Collection";
+    case "search":
+      return "Search";
+  }
+}
 export function LibraryToolbar({
   activeScope,
   roots,
@@ -44,6 +64,7 @@ export function LibraryToolbar({
   onExtractPagesSelection,
   onMergeSelection,
   onPropertiesSelection,
+  onLocateSelection,
   onRemoveSelection,
   onOpenAppMenu,
 }: LibraryToolbarProps) {
@@ -155,6 +176,17 @@ export function LibraryToolbar({
               title="Document properties"
             >
               Properties
+            </button>
+          )}
+
+          {caps.canLocate && onLocateSelection && (
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => { setRemoveConfirm(false); onLocateSelection(); }}
+              title="Locate moved or renamed file"
+            >
+              Locate file…
             </button>
           )}
 
@@ -292,11 +324,22 @@ export function LibraryToolbar({
             ref={searchInputRef}
             type="text"
             className="toolbar-search-input"
-            placeholder="Search library…"
+            placeholder={activeScope.kind === "all" ? "Search library…" : `Search in ${getScopeLabel(activeScope, roots)}…`}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             aria-label="Search library"
           />
+          {activeScope.kind !== "all" && searchQuery && (
+            <button
+              type="button"
+              className="search-scope-pill"
+              onClick={() => onSelectScope({ kind: "all" })}
+              title={`Searching in ${getScopeLabel(activeScope, roots)}. Click to search Entire Library.`}
+            >
+              <span>Scope: {getScopeLabel(activeScope, roots)}</span>
+              <span className="scope-all-action">✕ All</span>
+            </button>
+          )}
           {!searchQuery && (
             <kbd className="search-shortcut-hint" aria-hidden="true" title="Press / to search">
               /

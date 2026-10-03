@@ -17,18 +17,19 @@ Library → Document → Reading / Contextual Actions
    - Clicking a document navigates to the document reading route (`src/reader/ReaderShell.tsx`).
    - The reading surface fills the viewport, restoring the exact last-read position (PDF page, EPUB CFI, TextScroll progression).
    - Back button returns to the previous Library state, restoring scope, scroll position, search query, and selection.
-3. **Contextual Document Actions**:
-   - Selection action bar (`src/library/LibraryToolbar.tsx`): capability-filtered buttons (Open, Add to collection, Convert, Extract pages, Merge PDFs, Properties, Remove) derived from `getSelectionCapabilities`. Remove requires inline confirmation. `canMerge` uses the authoritative `canMergeSelected` from `documentCommands.ts`.
-   - Context menus (`src/library/DocumentContextMenu.tsx`): Remove from library requires inline confirmation; does not delete the underlying file.
-
+3. **Contextual Document Actions & Foundation**:
+   - Selection action bar (`src/library/LibraryToolbar.tsx`): capability-filtered buttons (Open, Add to collection, Convert, Extract pages, Merge PDFs, Properties, Locate, Remove) derived from `getSelectionCapabilities`. Remove requires inline confirmation. `canMerge` uses the authoritative `canMergeSelected` from `documentCommands.ts`. Search bar provides an explicit, switchable scope indicator (OD-10).
+   - Context menus (`src/library/DocumentContextMenu.tsx`): Remove from library requires inline confirmation; missing documents expose Locate file… (OD-2); unselected right-click targets the clicked document while selected right-click operates on selection (OD-6).
+   - Global App Menu (`src/App.tsx`): reachable from toolbar and mobile touch targets; provides Appearance, Open external document, Keyboard shortcuts, and About Clio (OD-7).
 ## Frontend Subsystems (`src/`)
 
 - `src/App.tsx`: Top-level application shell, routing state (`AppRoute`), restoration stack, and native window bridge.
 - `src/navigation/navigation.ts`: Route definitions (`AppRoute`, `LibraryScope`, `LibraryRestorationState`, `DEFAULT_LIBRARY_SCOPE`).
-- `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars. Contains `canMergeSelected` and `CommandContext`.
-- `src/commands/selectionCommands.ts`: Pure selection capability derivation (`getSelectionCapabilities`) — maps a set of selected documents to available actions (open, convert, extract pages, merge PDFs, properties, reveal, add to collection, remove). Used by `LibraryToolbar` to render only applicable action bar buttons.
+- `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars. Contains `canMergeSelected`, `locate` command, and `CommandContext`.
+- `src/commands/selectionCommands.ts`: Pure selection capability derivation (`getSelectionCapabilities`) — maps a set of selected documents to available actions (open, convert, extract pages, merge PDFs, properties, reveal, locate, add to collection, remove). Used by `LibraryToolbar` to render only applicable action bar buttons.
+- `src/library/`: Library components, filtering (`libraryFilter.ts`), reading shelves (`ContinueSection.tsx`), presentation views (`DocumentGrid.tsx`, `DocumentList.tsx`), and dialog modals (`DocumentPropertiesModal.tsx`, `UnsupportedFormatModal.tsx`, `MissingDocumentModal.tsx`, `KeyboardShortcutsModal.tsx`, `AboutClioModal.tsx`).
 - `src/reader/`:
-  - `ReaderShell.tsx`: Document-first reader surface. The document viewport fills 100vh. Reader chrome is transient: a compact top bar (`reader-topbar`) overlays the document and auto-hides after inactivity; it is revealed by pointer proximity to the top edge, keyboard activation, or opening a panel. Controls: ‹ Library (D1 back), title, Find, Navigator, Display, ⋯ document menu.
+  - `ReaderShell.tsx`: Document-first reader surface. The document viewport fills 100vh. Reader chrome is transient: a compact top bar overlays the document and auto-hides after inactivity; it is revealed by pointer proximity, touch tap, or keyboard. Controls: ‹ Library, title, Find, Navigator, Display, ⋯ document menu. Annotation toolbar exposes contextual Highlight, Add note, and Copy actions without auto-focusing note entry (OD-12). External documents support explicit Add to Library (OD-3).
   - Navigator panel (`reader-navigator`): overlay drawer (right side) with three tabs — Contents (TOC), Bookmarks, Notes. Does not reflow the document.
   - Find bar (`reader-find-bar`): floating overlay, no document layout shift. Keyboard: `Ctrl/Cmd+F` open, `Enter`/`Shift+Enter` next/prev, `Escape` close.
   - Display popover (`reader-display-popover`): theme (light/sepia/dark), zoom (PDF only). Theme persisted to `localStorage` (`clio-reader-theme`).

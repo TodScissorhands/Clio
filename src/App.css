@@ -774,6 +774,23 @@ a {
   border: 1px solid var(--status-info-border);
 }
 
+.alert-dismiss-btn {
+  margin-left: auto;
+  padding: 1px 6px;
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  color: inherit;
+  opacity: 0.65;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: opacity var(--transition-fast);
+}
+
+.alert-dismiss-btn:hover {
+  opacity: 1;
+}
+
 
 .library-search-wrap {
   position: relative;
@@ -2815,4 +2832,224 @@ a {
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     max-height: 90vh;
   }
+}
+
+/* ── D4 Global UI & Interaction Foundation Styles ────────────────────────── */
+
+/* Search scope pill */
+.search-scope-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-text);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.search-scope-pill:hover {
+  background: var(--accent-primary);
+  color: var(--accent-contrast);
+}
+
+.scope-all-action {
+  opacity: 0.8;
+  margin-left: 2px;
+}
+
+/* Continue Reading vs Recently Read tabs (OD-5) */
+.continue-header-tabs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.continue-tab-btn {
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: var(--transition-fast);
+}
+
+.continue-tab-btn:hover {
+  color: var(--text-main);
+}
+
+.continue-tab-btn.selected {
+  color: var(--text-main);
+  border-bottom-color: var(--accent-primary);
+}
+
+/* Adaptive document card metadata (OD-11) */
+.doc-grid-author,
+.continue-author {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.doc-grid-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.doc-grid-format-badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.doc-row-author {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.doc-row-filename {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+/* Modals (OD-4, OD-2, OD-7) */
+.unsupported-format-card,
+.missing-doc-card,
+.shortcuts-modal-card,
+.about-modal-card {
+  max-width: 480px;
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: 20px;
+}
+
+.unsupported-format-lead,
+.missing-doc-lead {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 6px;
+}
+
+.unsupported-format-desc,
+.missing-doc-desc {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.unsupported-format-actions,
+.missing-doc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Shortcuts modal */
+.shortcuts-modal-card {
+  max-width: 560px;
+}
+
+.shortcuts-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 12px 0 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.shortcuts-section-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 16px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.shortcut-row kbd {
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-default);
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-main);
+}
+
+/* About modal */
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.about-brand-icon {
+  font-size: 28px;
+}
+
+.about-version {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.about-modal-body {
+  margin: 14px 0 20px;
+}
+
+.about-lead {
+  font-size: var(--text-sm);
+  color: var(--text-main);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.about-features-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.4;
 }

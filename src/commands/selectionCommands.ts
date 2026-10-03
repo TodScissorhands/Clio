@@ -26,6 +26,8 @@ export interface SelectionCapabilities {
   canViewProperties: boolean;
   /** True when exactly one document is selected and its source is a library path. */
   canReveal: boolean;
+  /** True when exactly one document is selected and it is currently missing. */
+  canLocate: boolean;
   /** True when one or more documents are selected (always available for any selection). */
   canAddToCollection: boolean;
   /** True when 2+ selected documents are all present PDFs. */
@@ -63,7 +65,12 @@ export function getSelectionCapabilities(selection: StoredDocument[]): Selection
 
     canViewProperties: single !== null,
 
-    canReveal: single !== null && single.source.kind === "library",
+    canReveal:
+      single !== null &&
+      single.source.kind === "library" &&
+      single.availability === "present",
+
+    canLocate: single !== null && single.availability === "missing",
 
     canAddToCollection: count > 0,
 

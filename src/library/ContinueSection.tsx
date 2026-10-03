@@ -1,8 +1,11 @@
+import { useState } from "react";
 import type { StoredDocument } from "../storage/domain";
+import { getDocumentDisplayTitle } from "../storage/domain";
 import { formatReadingProgress } from "./libraryFilter";
 
 export interface ContinueSectionProps {
   documents: StoredDocument[];
+  recentDocuments?: StoredDocument[];
   onOpenDocument: (doc: StoredDocument) => void;
   onOpenContextMenu: (doc: StoredDocument, e: React.MouseEvent) => void;
   renderThumbnail: (doc: StoredDocument) => React.ReactNode;
@@ -10,23 +13,56 @@ export interface ContinueSectionProps {
 
 export function ContinueSection({
   documents,
+  recentDocuments = [],
   onOpenDocument,
   onOpenContextMenu,
   renderThumbnail,
 }: ContinueSectionProps) {
-  if (documents.length === 0) {
+  const [activeTab, setActiveTab] = useState<"continue" | "recent">("continue");
+  const hasContinue = documents.length > 0;
+  const hasRecent = recentDocuments.length > 0;
+
+  if (!hasContinue && !hasRecent) {
     return null;
   }
 
-  return (
-    <section className="continue-section" aria-label="Continue reading">
-      <div className="section-header">
-        <h2 className="section-title">Continue</h2>
-      </div>
+  const effectiveTab = hasContinue ? activeTab : "recent";
+  const activeDocs = effectiveTab === "continue" ? documents : recentDocuments;
 
+  return (
+    <section className="continue-section" aria-label="Reading shelves">
+      <div className="section-header continue-header-tabs" role="tablist" aria-label="Reading history tabs">
+        {hasContinue && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={effectiveTab === "continue"}
+            className={`continue-tab-btn ${effectiveTab === "continue" ? "selected" : ""}`}
+            onClick={() => setActiveTab("continue")}
+          >
+            Continue Reading
+          </button>
+        )}
+        {hasRecent && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={effectiveTab === "recent"}
+            className={`continue-tab-btn ${effectiveTab === "recent" ? "selected" : ""}`}
+            onClick={() => setActiveTab("recent")}
+          >
+            Recently Read
+          </button>
+        )}
+      </div>
       <div className="continue-grid" role="list">
-        {documents.map((doc) => {
+        {activeDocs.map((doc) => {
+          const displayTitle = getDocumentDisplayTitle(doc.record);
+          const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
+          const authorStr = authors.length > 0 ? authors.join(", ") : null;
           const progressLabel = formatReadingProgress(doc.readingState ?? undefined);
+          const formatStr = doc.record.format.toUpperCase();
+          const metaLine = progressLabel ? `${formatStr} · ${progressLabel}` : formatStr;
           let progressPercent: number | null = null;
           if (doc.readingState?.position) {
             const pos = doc.readingState.position;
@@ -55,7 +91,7 @@ export function ContinueSection({
                   onOpenDocument(doc);
                 }
               }}
-              title={`Continue reading ${doc.record.name}`}
+              title={`Open ${displayTitle}`}
             >
               <div className="continue-thumbnail-wrap">
                 {renderThumbnail(doc)}
@@ -67,27 +103,32 @@ export function ContinueSection({
                     onOpenContextMenu(doc, e);
                   }}
                   title="Document options"
-                  aria-label={`Options for ${doc.record.name}`}
+                  aria-label={`Options for ${displayTitle}`}
                 >
                   ⋯
                 </button>
               </div>
 
               <div className="continue-meta">
-                <strong className="continue-title">{doc.record.name}</strong>
-                {progressLabel && (
-                  <div className="continue-progress-row">
-                    <span className="continue-progress-text">{progressLabel}</span>
-                    {progressPercent !== null && (
-                      <div className="thin-progress-bar-bg" aria-hidden="true">
-                        <div
-                          className="thin-progress-bar-fill"
-                          style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                        />
-                      </div>
-                    )}
-                  </div>
+                <strong className="continue-title" title={displayTitle}>
+                  {displayTitle}
+                </strong>
+                {authorStr && (
+                  <span className="continue-author" title={authorStr}>
+                    {authorStr}
+                  </span>
                 )}
+                <div className="continue-progress-row">
+                  <span className="continue-progress-text">{metaLine}</span>
+                  {progressPercent !== null && (
+                    <div className="thin-progress-bar-bg" aria-hidden="true">
+                      <div
+                        className="thin-progress-bar-fill"
+                        style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
             </article>
           );

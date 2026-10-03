@@ -31,6 +31,7 @@ export function parseReaderTheme(raw: string | null | undefined): ReaderTheme {
  */
 export interface EscapeReaderState {
   editingAnnotationId: string | null;
+  isAddingNote?: boolean;
   pendingTextSelection: boolean;
   findOpen: boolean;
   navigatorOpen: boolean;
@@ -54,6 +55,7 @@ export interface EscapeReaderState {
  */
 export type EscapeAction =
   | "dismissAnnotationEdit"
+  | "dismissNoteEditor"
   | "dismissTextSelection"
   | "closeFind"
   | "closeNavigator"
@@ -63,6 +65,7 @@ export type EscapeAction =
 
 export function resolveEscapeAction(state: EscapeReaderState): EscapeAction {
   if (state.editingAnnotationId) return "dismissAnnotationEdit";
+  if (state.isAddingNote) return "dismissNoteEditor";
   if (state.pendingTextSelection) return "dismissTextSelection";
   if (state.findOpen) return "closeFind";
   if (state.navigatorOpen) return "closeNavigator";

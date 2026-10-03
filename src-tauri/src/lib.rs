@@ -237,6 +237,8 @@ pub fn run() {
             storage::library_document_list,
             storage::library_document_path,
             storage::library_document_remove,
+            storage::library_document_relink,
+            storage::library_document_add_external,
             storage::reading_state_get,
             storage::reading_state_set,
             storage::reading_state_list,

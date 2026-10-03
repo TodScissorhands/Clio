@@ -13,7 +13,7 @@ use uuid::Uuid;
 const SUPPORTED_FORMATS: &[&str] = &[
     "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "markdown", "txt",
 ];
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone)]
 pub struct LibraryDb {
@@ -281,6 +281,17 @@ impl LibraryDb {
                 .map_err(db_error)?;
             transaction.commit().map_err(db_error)?;
         }
+        if version < 5 {
+            let transaction = connection.transaction().map_err(db_error)?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE documents ADD COLUMN excluded_at TEXT;
+                     CREATE INDEX IF NOT EXISTS idx_documents_excluded_at ON documents(excluded_at);
+                     PRAGMA user_version = 5;",
+                )
+                .map_err(db_error)?;
+            transaction.commit().map_err(db_error)?;
+        }
         Ok(())
     }
 
@@ -377,6 +388,18 @@ impl LibraryDb {
             .collect()
     }
 
+    fn raw_roots(&self) -> Result<Vec<RootRow>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+                 FROM library_roots ORDER BY label COLLATE NOCASE, id",
+            )
+            .map_err(db_error)?;
+        let rows = statement.query_map([], root_from_row).map_err(db_error)?;
+        rows.map(|r| r.map_err(db_error)).collect()
+    }
+
     pub fn remove_root(&self, root_id: &str) -> Result<(), String> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(db_error)?;
@@ -450,15 +473,25 @@ impl LibraryDb {
                 Some(value) => value,
                 None => continue,
             };
-            let existing_id: Option<String> = transaction
+            let existing: Option<(String, Option<String>)> = transaction
                 .query_row(
-                    "SELECT id FROM documents WHERE root_id = ?1 AND relative_path = ?2",
+                    "SELECT id, excluded_at FROM documents WHERE root_id = ?1 AND relative_path = ?2",
                     params![root_id, relative_path],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(db_error)?;
-            let doc_id = if let Some(document_id) = existing_id {
+            let doc_id = if let Some((document_id, excluded_at)) = existing {
+                if excluded_at.is_some() {
+                    // OD-1: Excluded document stays excluded across future scans
+                    transaction
+                        .execute(
+                            "UPDATE documents SET last_seen_scan = ?1, availability = 'present' WHERE id = ?2",
+                            params![scan_marker, document_id],
+                        )
+                        .map_err(db_error)?;
+                    continue;
+                }
                 transaction
                     .execute(
                         "UPDATE documents
@@ -559,7 +592,7 @@ impl LibraryDb {
             .map_err(db_error)?;
         let missing: i64 = transaction
             .query_row(
-                "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing'",
+                "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL",
                 [root_id],
                 |row| row.get(0),
             )
@@ -591,7 +624,7 @@ impl LibraryDb {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing'",
+                "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL",
                 [root_id],
                 |row| row.get::<_, i64>(0),
             )
@@ -641,7 +674,7 @@ impl LibraryDb {
                         dm.description, dm.language, dm.identifiers, dm.provenance, dm.thumbnail_path
                  FROM documents d
                  LEFT JOIN document_metadata dm ON dm.document_id = d.id
-                 WHERE (?1 IS NULL OR d.root_id = ?1) AND (?2 OR d.availability = 'present')
+                 WHERE (?1 IS NULL OR d.root_id = ?1) AND (?2 OR d.availability = 'present') AND d.excluded_at IS NULL
                  ORDER BY d.name COLLATE NOCASE, d.id",
             )
             .map_err(db_error)?;
@@ -660,8 +693,12 @@ impl LibraryDb {
     pub fn remove_document(&self, document_id: &str) -> Result<(), String> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(db_error)?;
+        let now = timestamp();
         transaction
-            .execute("DELETE FROM documents WHERE id = ?1", [document_id])
+            .execute(
+                "UPDATE documents SET excluded_at = ?1 WHERE id = ?2",
+                params![now, document_id],
+            )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }
@@ -711,6 +748,167 @@ impl LibraryDb {
         }
         let path = canonical_library_path(&document.root_locator, &document.relative_path)?;
         Ok(path.to_string_lossy().into_owned())
+    }
+
+    pub fn relink_document(
+        &self,
+        document_id: &str,
+        new_path: &str,
+    ) -> Result<DocumentDto, String> {
+        let p = Path::new(new_path);
+        let canonical_p = p
+            .canonicalize()
+            .map_err(|e| format!("Failed to access file: {e}"))?;
+        if !canonical_p.is_file() {
+            return Err("The selected path is not a file.".to_string());
+        }
+
+        let roots = self.raw_roots()?;
+        let mut target_root_id = None;
+        let mut target_rel_path = None;
+
+        for root in &roots {
+            if root.locator_kind != "filesystem-directory" {
+                continue;
+            }
+            if let Ok(root_canon) = Path::new(&root.locator_value).canonicalize() {
+                if let Ok(rel) = canonical_p.strip_prefix(&root_canon) {
+                    target_root_id = Some(root.id.clone());
+                    target_rel_path = Some(rel.to_string_lossy().replace('\\', "/"));
+                    break;
+                }
+            }
+        }
+
+        let (root_id, relative_path) = match (target_root_id, target_rel_path) {
+            (Some(rid), Some(rp)) => (rid, rp),
+            _ => {
+                return Err(
+                    "The selected file is not inside any Library folder. Add its folder to the Library first."
+                        .to_string(),
+                );
+            }
+        };
+
+        let format_id = match FormatId::from_path(&canonical_p) {
+            Some(f) => f,
+            None => return Err("The selected file is not a supported document format.".to_string()),
+        };
+
+        let metadata = fs::metadata(&canonical_p).map_err(|e| e.to_string())?;
+        let name = canonical_p
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("Untitled document")
+            .to_string();
+        let now = timestamp();
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+
+        // Ensure target document exists
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
+                [document_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !exists {
+            return Err("Document was not found.".to_string());
+        }
+
+        // If another document is already registered at this (root_id, relative_path):
+        // If it was created during a recent scan after move, remove it so relink succeeds.
+        let conflicting_id: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM documents WHERE root_id = ?1 AND relative_path = ?2 AND id != ?3",
+                params![root_id, relative_path, document_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+
+        if let Some(conflict) = conflicting_id {
+            transaction
+                .execute("DELETE FROM documents WHERE id = ?1", [&conflict])
+                .map_err(db_error)?;
+        }
+
+        transaction
+            .execute(
+                "UPDATE documents
+                 SET root_id = ?1, relative_path = ?2, name = ?3, format_id = ?4, size_bytes = ?5,
+                     updated_at = ?6, availability = 'present', excluded_at = NULL
+                 WHERE id = ?7",
+                params![
+                    root_id,
+                    relative_path,
+                    name,
+                    format_id.as_str(),
+                    metadata.len() as i64,
+                    now,
+                    document_id
+                ],
+            )
+            .map_err(db_error)?;
+
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+
+        // Fetch and return the updated DocumentDto
+        let docs = self.list_documents(Some(&root_id), true)?;
+        docs.into_iter()
+            .find(|d| d.id == document_id)
+            .ok_or_else(|| "Failed to retrieve relinked document.".to_string())
+    }
+
+    pub fn add_external_document_to_library(&self, file_path: &str) -> Result<DocumentDto, String> {
+        let p = Path::new(file_path);
+        let canonical_p = p
+            .canonicalize()
+            .map_err(|e| format!("Failed to access file: {e}"))?;
+        if !canonical_p.is_file() {
+            return Err("The selected path is not a file.".to_string());
+        }
+
+        let roots = self.raw_roots()?;
+        let mut matching_root = None;
+        for root in &roots {
+            if root.locator_kind != "filesystem-directory" {
+                continue;
+            }
+            if let Ok(root_canon) = Path::new(&root.locator_value).canonicalize() {
+                if canonical_p.starts_with(&root_canon) {
+                    matching_root = Some(root.id.clone());
+                    break;
+                }
+            }
+        }
+
+        let root_id = match matching_root {
+            Some(rid) => rid,
+            None => {
+                let parent = canonical_p
+                    .parent()
+                    .ok_or_else(|| "File has no parent directory.".to_string())?;
+                let new_root = self.add_root(&parent.to_string_lossy(), None)?;
+                new_root.id
+            }
+        };
+
+        self.scan_root(&root_id)?;
+        let docs = self.list_documents(Some(&root_id), false)?;
+        for doc in docs {
+            if let Ok(path) = self.document_path(&doc.id) {
+                if let Ok(p_canon) = Path::new(&path).canonicalize() {
+                    if p_canon == canonical_p {
+                        return Ok(doc);
+                    }
+                }
+            }
+        }
+        Err("Document could not be located after scanning.".to_string())
     }
 
     pub fn set_reading_state(&self, state: ReadingState) -> Result<(), String> {
@@ -1205,7 +1403,7 @@ impl LibraryDb {
                  FROM documents d
                  JOIN document_collections dc ON dc.document_id = d.id
                  LEFT JOIN document_metadata dm ON dm.document_id = d.id
-                 WHERE dc.collection_id = ?1
+                 WHERE dc.collection_id = ?1 AND d.excluded_at IS NULL
                  ORDER BY d.name COLLATE NOCASE, d.id",
             )
             .map_err(db_error)?;
@@ -1798,6 +1996,21 @@ pub fn library_document_remove(
     document_id: String,
 ) -> Result<(), String> {
     db.remove_document(&document_id)
+}
+#[tauri::command]
+pub fn library_document_relink(
+    db: State<'_, LibraryDb>,
+    document_id: String,
+    new_path: String,
+) -> Result<DocumentDto, String> {
+    db.relink_document(&document_id, &new_path)
+}
+#[tauri::command]
+pub fn library_document_add_external(
+    db: State<'_, LibraryDb>,
+    file_path: String,
+) -> Result<DocumentDto, String> {
+    db.add_external_document_to_library(&file_path)
 }
 
 #[tauri::command]
@@ -2456,7 +2669,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("query user_version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -3849,13 +4062,80 @@ mod tests {
         let docs_after = db.list_documents(Some(&root.id), false).expect("list");
         assert_eq!(docs_after.len(), 0);
 
-        // Reading state was cascaded
+        // OD-1: Reading state is PRESERVED, not destroyed!
         let states_after = db.list_reading_states().expect("list states");
-        assert_eq!(states_after.len(), 0);
+        assert_eq!(states_after.len(), 1);
+        assert_eq!(states_after[0].document_id, *doc_id);
 
+        // OD-1: Rescan does not re-add the excluded document!
+        let scan_result = db.scan_root(&root.id).expect("rescan");
+        assert_eq!(scan_result.inserted, 0);
+        let docs_after_rescan = db.list_documents(Some(&root.id), false).expect("list");
+        assert_eq!(docs_after_rescan.len(), 0);
         // CRUCIAL: Underlying filesystem file MUST still exist!
         assert!(file_path.exists());
         assert_eq!(fs::read(&file_path).unwrap(), b"%PDF sample file bytes");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_relink_document_preserves_state() {
+        let temp_dir = std::env::temp_dir().join(format!("clio-relink-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create dir");
+        let root_dir = temp_dir.join("library");
+        fs::create_dir_all(&root_dir).expect("create root dir");
+
+        let old_file = root_dir.join("old_name.pdf");
+        fs::write(&old_file, b"%PDF sample file").expect("write file");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        db.migrate().expect("migrate");
+
+        let root = db
+            .add_root(&root_dir.to_string_lossy(), Some("Books"))
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan root");
+
+        let docs = db.list_documents(Some(&root.id), false).expect("list");
+        assert_eq!(docs.len(), 1);
+        let doc_id = docs[0].id.clone();
+
+        // Add reading state to the document
+        db.set_reading_state(ReadingState {
+            document_id: doc_id.clone(),
+            position: ReadingPosition::PdfPage { page: 12 },
+            last_opened_at: timestamp(),
+            updated_at: timestamp(),
+        })
+        .expect("set reading state");
+
+        // Simulate moving the file externally
+        let new_file = root_dir.join("new_renamed.pdf");
+        fs::rename(&old_file, &new_file).expect("rename file");
+
+        // Scan marks old document missing
+        db.scan_root(&root.id).expect("scan after move");
+        let missing_docs = db
+            .list_documents(Some(&root.id), true)
+            .expect("list missing");
+        let missing_target = missing_docs.iter().find(|d| d.id == doc_id).unwrap();
+        assert_eq!(missing_target.availability, "missing");
+
+        // Relink the missing document to the new file
+        let relinked = db
+            .relink_document(&doc_id, &new_file.to_string_lossy())
+            .expect("relink document");
+        assert_eq!(relinked.id, doc_id);
+        assert_eq!(relinked.availability, "present");
+        assert_eq!(relinked.relative_path, "new_renamed.pdf");
+
+        // Reading state was preserved across relink
+        assert!(relinked.reading_state.is_some());
+        match relinked.reading_state.unwrap().position {
+            ReadingPosition::PdfPage { page } => assert_eq!(page, 12),
+            _ => panic!("Expected PdfPage 12"),
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

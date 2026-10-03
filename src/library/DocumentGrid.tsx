@@ -1,4 +1,5 @@
 import type { StoredDocument } from "../storage/domain";
+import { getDocumentDisplayTitle } from "../storage/domain";
 import { formatReadingProgress } from "./libraryFilter";
 
 export interface DocumentGridProps {
@@ -22,7 +23,12 @@ export function DocumentGrid({
     <div className="document-grid" role="list" aria-label="Documents">
       {documents.map((doc) => {
         const isSelected = selectedDocIds.has(doc.record.id);
+        const displayTitle = getDocumentDisplayTitle(doc.record);
+        const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
+        const authorStr = authors.length > 0 ? authors.join(", ") : null;
+        const formatStr = doc.record.format.toUpperCase();
         const progressLabel = formatReadingProgress(doc.readingState ?? undefined);
+        const formatProgressLabel = progressLabel ? `${formatStr} · ${progressLabel}` : formatStr;
         let progressPercent: number | null = null;
         if (doc.readingState?.position) {
           const pos = doc.readingState.position;
@@ -101,20 +107,26 @@ export function DocumentGrid({
 
             {/* Document Info */}
             <div className="doc-grid-info">
-              <strong className="doc-grid-title" title={doc.record.name}>
-                {doc.record.name}
+              <strong className="doc-grid-title" title={displayTitle}>
+                {displayTitle}
               </strong>
-              {progressLabel && (
-                <div className="doc-grid-progress-wrap">
-                  <span className="doc-grid-progress-text">{progressLabel}</span>
-                  {progressPercent !== null && (
-                    <div className="thin-progress-bar-bg" aria-hidden="true">
-                      <div
-                        className="thin-progress-bar-fill"
-                        style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                      />
-                    </div>
-                  )}
+              {authorStr && (
+                <span className="doc-grid-author" title={authorStr}>
+                  {authorStr}
+                </span>
+              )}
+              <div className="doc-grid-meta-line">
+                <span className="doc-grid-format-badge">{formatProgressLabel}</span>
+                {doc.availability === "missing" && (
+                  <span className="doc-missing-pill">Missing</span>
+                )}
+              </div>
+              {progressPercent !== null && (
+                <div className="thin-progress-bar-bg" aria-hidden="true">
+                  <div
+                    className="thin-progress-bar-fill"
+                    style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
+                  />
                 </div>
               )}
             </div>

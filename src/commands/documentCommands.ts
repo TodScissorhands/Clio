@@ -15,6 +15,7 @@ export interface CommandContext {
   onExtractPages: (doc: StoredDocument) => void;
   onProperties: (doc: StoredDocument) => void;
   onRevealInFileManager: (doc: StoredDocument) => Promise<void>;
+  onLocate?: (doc: StoredDocument) => Promise<void>;
 }
 
 export interface DocumentCommand {
@@ -102,11 +103,26 @@ export const documentCommands: DocumentCommand[] = [
     group: 2,
     isAvailable: (ctx) => {
       const doc = getTargetDocument(ctx);
-      return doc !== null && doc.source.kind === "library";
+      return doc !== null && doc.source.kind === "library" && doc.availability === "present";
     },
     execute: async (ctx) => {
       const doc = getTargetDocument(ctx);
       if (doc) await ctx.onRevealInFileManager(doc);
+    },
+  },
+  {
+    id: "locate",
+    label: "Locate file…",
+    group: 2,
+    isAvailable: (ctx) => {
+      const doc = getTargetDocument(ctx);
+      return doc !== null && doc.availability === "missing";
+    },
+    execute: async (ctx) => {
+      const doc = getTargetDocument(ctx);
+      if (doc && ctx.onLocate) {
+        await ctx.onLocate(doc);
+      }
     },
   },
 

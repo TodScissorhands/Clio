@@ -1204,6 +1204,43 @@ foliate-view {
   box-shadow: var(--shadow-md);
 }
 
+.reader-selection-action-row,
+.reader-note-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reader-annotate-action-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--reader-input-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-elevated);
+  color: var(--reader-panel-text);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.reader-annotate-action-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.reader-annotate-action-btn.highlight-btn {
+  background: var(--accent-subtle);
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.reader-annotate-action-btn.highlight-btn:hover:not(:disabled) {
+  background: var(--accent-primary);
+  color: var(--accent-contrast);
+}
+
 .reader-annotate-note-input {
   width: 150px;
   height: 26px;

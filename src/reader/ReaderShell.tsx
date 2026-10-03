@@ -72,6 +72,7 @@ export type ReaderShellProps = {
   onRevealInFileManager?: (doc: StoredDocument) => Promise<void>;
   onConvert?: (doc: StoredDocument) => void;
   onExtractPages?: (doc: StoredDocument) => void;
+  onAddToLibrary?: () => Promise<void>;
 };
 
 // ── Navigator panel tab type ───────────────────────────────────────────────────
@@ -112,6 +113,7 @@ export function ReaderShell({
   onRevealInFileManager,
   onConvert,
   onExtractPages,
+  onAddToLibrary,
 }: ReaderShellProps) {
   const engineRef = useRef<ReaderEngineHandle | null>(null);
 
@@ -151,6 +153,7 @@ export function ReaderShell({
   const [editingNoteText, setEditingNoteText] = useState("");
   const [annotationNoteInput, setAnnotationNoteInput] = useState("");
   const [pendingTextSelection, setPendingTextSelection] = useState<TextSelection | null>(null);
+  const [isAddingNote, setIsAddingNote] = useState(false);
 
   // ── Transient chrome visibility ──────────────────────────────────────────────
   const [topbarVisible, setTopbarVisible] = useState(true);
@@ -274,6 +277,7 @@ export function ReaderShell({
       setDocMenuOpen(false);
       setRemoveConfirm(false);
       setPendingTextSelection(null);
+      setIsAddingNote(false);
       setTopbarVisible(true);
       return;
     }
@@ -304,6 +308,7 @@ export function ReaderShell({
     setDocMenuOpen(false);
     setRemoveConfirm(false);
     setPendingTextSelection(null);
+    setIsAddingNote(false);
     setTopbarVisible(true);
 
     coordinator.loadInitialPosition(docId).then((pos) => {
@@ -381,6 +386,33 @@ export function ReaderShell({
       onState("error", `Could not save annotation: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [annotationNoteInput, currentPosition, document, onState, pendingTextSelection]);
+
+  const handleQuickHighlight = useCallback(async () => {
+    if (!document || !currentPosition || !pendingTextSelection) return;
+    const docId = document.record.id;
+    const { locator, selectedText } = pendingTextSelection;
+    try {
+      const newAnn = await createAnnotation(docId, "highlight", currentPosition, selectedText, undefined, locator);
+      setAnnotations((prev) => [...prev, newAnn]);
+      setPendingTextSelection(null);
+      setAnnotationNoteInput("");
+      setIsAddingNote(false);
+    } catch (error) {
+      onState("error", `Could not save highlight: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [currentPosition, document, onState, pendingTextSelection]);
+
+  const handleCopySelection = useCallback(async () => {
+    if (!pendingTextSelection?.selectedText) return;
+    try {
+      await navigator.clipboard.writeText(pendingTextSelection.selectedText);
+    } catch {
+      // ignore clipboard error
+    }
+    setPendingTextSelection(null);
+    setAnnotationNoteInput("");
+    setIsAddingNote(false);
+  }, [pendingTextSelection]);
 
   const saveAnnotationNote = useCallback(async (annotationId: string) => {
     try {
@@ -541,6 +573,10 @@ export function ReaderShell({
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!document) return;
+      // OD-14/15: Do not process reader navigation keys when a modal or overlay is open
+      if (window.document.querySelector(".modal-backdrop, .conversion-overlay-backdrop, .context-menu-backdrop")) {
+        return;
+      }
 
       const isInput =
         event.target instanceof HTMLInputElement ||
@@ -573,9 +609,14 @@ export function ReaderShell({
           setEditingNoteText("");
           return;
         }
+        if (isAddingNote) {
+          setIsAddingNote(false);
+          return;
+        }
         if (pendingTextSelection) {
           setPendingTextSelection(null);
           setAnnotationNoteInput("");
+          setIsAddingNote(false);
           return;
         }
         if (findOpen) {
@@ -734,6 +775,8 @@ export function ReaderShell({
         className="reader-reveal-zone"
         aria-hidden="true"
         onMouseEnter={revealTopbar}
+        onClick={revealTopbar}
+        onTouchStart={revealTopbar}
       />
 
       {/* ── Compact top bar (transient overlay) ──────────────────────────────────*/}
@@ -822,7 +865,7 @@ export function ReaderShell({
           )}
 
           {/* Document menu */}
-          {document && storedDocument && (
+          {document && (storedDocument || onAddToLibrary) && (
             <button
               type="button"
               className={`reader-topbar-btn reader-topbar-icon-btn${docMenuOpen ? " active" : ""}`}
@@ -907,7 +950,7 @@ export function ReaderShell({
       )}
 
       {/* ── Document menu popover ─────────────────────────────────────────────── */}
-      {docMenuOpen && document && storedDocument && commandCtx && (
+      {docMenuOpen && document && (
         <>
           <div
             className="reader-popover-backdrop"
@@ -920,7 +963,20 @@ export function ReaderShell({
             aria-label="Document actions"
             onMouseEnter={keepTopbarVisible}
           >
-            {documentCommands
+            {!storedDocument && onAddToLibrary && (
+              <button
+                type="button"
+                role="menuitem"
+                className="reader-menu-item"
+                onClick={() => {
+                  setDocMenuOpen(false);
+                  void onAddToLibrary();
+                }}
+              >
+                Add to library
+              </button>
+            )}
+            {storedDocument && commandCtx && documentCommands
               .filter((cmd) => cmd.id !== "open" && cmd.id !== "add-to-collection")
               .map((cmd, i, arr) => {
                 const available = cmd.isAvailable(commandCtx);
@@ -1274,41 +1330,93 @@ export function ReaderShell({
       )}
 
       {/* ── Annotation toolbar (contextual, shown on text selection) ────────── */}
+      {/* ── Annotation toolbar (contextual, shown on text selection, OD-12) ──── */}
       {pendingTextSelection && (
-        <div className="reader-annotate-bar" role="group" aria-label="Annotate selection">
-          <input
-            type="text"
-            className="reader-annotate-note-input"
-            value={annotationNoteInput}
-            onChange={(e) => setAnnotationNoteInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void saveAnnotationFromSelection();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setPendingTextSelection(null);
-                setAnnotationNoteInput("");
-              }
-            }}
-            placeholder="Note (optional)…"
-            autoFocus
-          />
-          <button
-            type="button"
-            className="reader-annotate-save-btn"
-            onClick={() => void saveAnnotationFromSelection()}
-            disabled={!document || !currentPosition}
-          >
-            Save
-          </button>
-          <button
-            type="button"
-            className="reader-annotate-dismiss-btn"
-            onClick={() => { setPendingTextSelection(null); setAnnotationNoteInput(""); }}
-          >
-            ✕
-          </button>
+        <div className="reader-annotate-bar" role="group" aria-label="Selection actions">
+          {!isAddingNote ? (
+            <div className="reader-selection-action-row">
+              <button
+                type="button"
+                className="reader-annotate-action-btn highlight-btn"
+                onClick={() => void handleQuickHighlight()}
+                disabled={!document || !currentPosition}
+                title="Highlight selected text"
+              >
+                Highlight
+              </button>
+              <button
+                type="button"
+                className="reader-annotate-action-btn note-btn"
+                onClick={() => setIsAddingNote(true)}
+                disabled={!document || !currentPosition}
+                title="Add note to selection"
+              >
+                Add note
+              </button>
+              <button
+                type="button"
+                className="reader-annotate-action-btn copy-btn"
+                onClick={() => void handleCopySelection()}
+                title="Copy selected text"
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                className="reader-annotate-dismiss-btn"
+                onClick={() => {
+                  setPendingTextSelection(null);
+                  setAnnotationNoteInput("");
+                  setIsAddingNote(false);
+                }}
+                title="Dismiss (Escape)"
+                aria-label="Dismiss selection"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <div className="reader-note-editor-row">
+              <input
+                type="text"
+                className="reader-annotate-note-input"
+                value={annotationNoteInput}
+                onChange={(e) => setAnnotationNoteInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void saveAnnotationFromSelection();
+                    setIsAddingNote(false);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setIsAddingNote(false);
+                  }
+                }}
+                placeholder="Type note…"
+                autoFocus
+              />
+              <button
+                type="button"
+                className="reader-annotate-save-btn"
+                onClick={() => {
+                  void saveAnnotationFromSelection();
+                  setIsAddingNote(false);
+                }}
+                disabled={!document || !currentPosition}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="reader-annotate-dismiss-btn"
+                onClick={() => setIsAddingNote(false)}
+                title="Cancel note"
+                aria-label="Cancel note"
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       )}
 

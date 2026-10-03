@@ -12,10 +12,10 @@ Clio follows a document-first product architecture:
 Library → Document → Reading / Contextual Actions
 ```
 
-- **Library is Home**: The permanent application landing surface. Features a single contextual toolbar, sidebar (Collections & Folders), a Continue shelf for active reading, and the full document catalog in Grid or List presentation.
-- **Documents as Objects**: Reading is the primary interaction. Clicking a document enters reading mode with persistent reading position restoration.
-- **Contextual Actions**: Format conversion, PDF merging, page extraction, metadata inspection, and collection assignments are contextual actions available from document ellipsis menus, right-click, or the selection action bar.
-
+- **Library is Home**: The permanent application landing surface. Features a single contextual toolbar with explicit search scope switching (OD-10), sidebar (Collections & Folders), Continue Reading and Recently Read shelves (OD-5), and full catalog in Grid or List presentation with adaptive metadata (OD-11) and unified single-click opening (OD-6).
+- **Documents as Objects**: Reading is the primary interaction. Clicking a document enters reading mode with persistent reading position restoration. Non-readable formats present a contextual choice between Open externally and Convert and read (OD-4).
+- **Contextual Actions**: Format conversion, PDF merging, page extraction, metadata inspection, and collection assignments are contextual actions available from document ellipsis menus, right-click, or the selection action bar. Missing files can be relinked via Locate file (OD-2). Excluded documents retain their reading state and annotations (OD-1).
+- **Global Application Menu**: Reachable minimal global menu (OD-7) providing appearance themes, external document opening, keyboard shortcuts reference, and application information.
 ## Architecture
 
 ```text
@@ -23,16 +23,17 @@ Clio (src/App.tsx)
 ├── Library View (src/library/LibraryView.tsx)
 │   ├── Contextual Toolbar & Selection Action Bar (src/library/LibraryToolbar.tsx)
 │   ├── Sidebar: Collections & Folders (src/library/LibrarySidebar.tsx)
-│   ├── Continue Section: Active reading (src/library/ContinueSection.tsx)
-│   ├── Presentation: Grid & List (src/library/DocumentGrid.tsx, DocumentList.tsx)
-│   ├── Command Architecture & Context Menus (src/commands/documentCommands.tsx)
-│   └── Contextual Modals: Properties, Conversion, Collections
+│   ├── Continue Section: Continue Reading & Recently Read shelves (src/library/ContinueSection.tsx)
+│   ├── Presentation: Grid & List with adaptive metadata (src/library/DocumentGrid.tsx, DocumentList.tsx)
+│   ├── Command Architecture & Context Menus (src/commands/documentCommands.ts, selectionCommands.ts)
+│   └── Contextual Modals: Properties, Conversion, Collections, Unsupported Format, Missing Document, Shortcuts, About
 └── Reader Surface (src/reader/ReaderShell.tsx)
     ├── Transient compact top bar: ‹ Library · Title · Find · Navigator · Display · ⋯
     ├── Navigator overlay: Contents / Bookmarks / Notes tabs
     ├── Find bar: floating overlay, no document reflow
     ├── Display popover: theme (light/sepia/dark), zoom (PDF), persisted preferences
-    ├── Document menu (⋯): capability-filtered commands from documentCommands
+    ├── Annotation toolbar: contextual Highlight, Add note, and Copy actions (OD-12)
+    ├── Document menu (⋯): capability-filtered commands from documentCommands, external session support (OD-3)
     ├── Progress strip: thin bar + page or percentage label
     ├── PDF Engine (PDF.js)
     ├── EPUB Engine (foliate-js)

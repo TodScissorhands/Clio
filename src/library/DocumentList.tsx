@@ -1,4 +1,5 @@
 import type { LibraryRoot, StoredDocument } from "../storage/domain";
+import { getDocumentDisplayTitle } from "../storage/domain";
 import { formatReadingProgress, formatRelativeTime, type SortOption } from "./libraryFilter";
 
 export interface DocumentListProps {
@@ -78,15 +79,15 @@ export function DocumentList({
                 tabIndex={0}
                 onClick={(e) => {
                   if (e.metaKey || e.ctrlKey) {
+                    e.preventDefault();
                     onToggleSelect(doc.record.id, false, true);
                   } else if (e.shiftKey) {
+                    e.preventDefault();
                     onToggleSelect(doc.record.id, true, false);
                   } else {
-                    // List selection: plain click selects
-                    onToggleSelect(doc.record.id, false, false);
+                    onOpenDocument(doc);
                   }
                 }}
-                onDoubleClick={() => onOpenDocument(doc)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
@@ -116,9 +117,19 @@ export function DocumentList({
 
                 <td className="td-title">
                   <div className="title-cell">
-                    <span className="doc-row-name" title={doc.record.name}>
-                      {doc.record.name}
+                    <span className="doc-row-name" title={getDocumentDisplayTitle(doc.record)}>
+                      {getDocumentDisplayTitle(doc.record)}
                     </span>
+                    {doc.record.metadata?.authors && doc.record.metadata.authors.length > 0 && (
+                      <span className="doc-row-author" title={doc.record.metadata.authors.join(", ")}>
+                        {doc.record.metadata.authors.join(", ")}
+                      </span>
+                    )}
+                    {getDocumentDisplayTitle(doc.record) !== doc.record.name && (
+                      <span className="doc-row-filename" title={doc.record.name}>
+                        {doc.record.name}
+                      </span>
+                    )}
                     {doc.availability === "missing" && (
                       <span className="doc-missing-pill">Missing</span>
                     )}

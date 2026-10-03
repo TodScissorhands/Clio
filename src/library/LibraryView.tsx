@@ -4,6 +4,7 @@ import { getDocumentThumbnail } from "../storage/documentStorage";
 import type { LibraryScope } from "../navigation/navigation";
 import {
   deriveContinueDocuments,
+  deriveRecentlyReadDocuments,
   filterDocumentsByScope,
   sortDocuments,
   type SortOption,
@@ -49,6 +50,10 @@ export interface LibraryViewProps {
   onRevealInFileManager: (document: StoredDocument) => Promise<void>;
   scrollAnchorId?: string | null;
   onUpdateScrollAnchor?: (anchorId: string | null) => void;
+  onLocateDocument?: (document: StoredDocument) => Promise<void>;
+  onOpenAppMenu?: () => void;
+  onDismissMessage?: () => void;
+  onDismissError?: () => void;
 }
 
 function getDeterministicHue(str: string): number {
@@ -166,6 +171,10 @@ export function LibraryView({
   onRevealInFileManager,
   scrollAnchorId,
   onUpdateScrollAnchor,
+  onLocateDocument,
+  onOpenAppMenu,
+  onDismissMessage,
+  onDismissError,
 }: LibraryViewProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [lastSelectedDocId, setLastSelectedDocId] = useState<string | null>(null);
@@ -195,6 +204,11 @@ export function LibraryView({
   // Continue reading documents: max 6, most recently read first
   const continueDocuments = useMemo(() => {
     return deriveContinueDocuments(documents, 6);
+  }, [documents]);
+
+  // Recently read documents: max 6 (OD-5)
+  const recentDocuments = useMemo(() => {
+    return deriveRecentlyReadDocuments(documents, 6);
   }, [documents]);
 
   // Selected documents objects
@@ -269,12 +283,17 @@ export function LibraryView({
   );
 
   const handleOpenContextMenu = useCallback((doc: StoredDocument, e: React.MouseEvent) => {
+    // OD-6: Right-click on unselected document selects it; on selected operates on selection
+    if (!selectedDocIds.has(doc.record.id)) {
+      onSelectionChange(new Set([doc.record.id]));
+      setLastSelectedDocId(doc.record.id);
+    }
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
       targetDoc: doc,
     });
-  }, []);
+  }, [onSelectionChange, selectedDocIds]);
 
   // Shared command context
   const commandContext: CommandContext = useMemo(
@@ -304,6 +323,11 @@ export function LibraryView({
       onProperties: (doc) => {
         setPropertiesDoc(doc);
       },
+      onLocate: onLocateDocument
+        ? async (doc) => {
+            await onLocateDocument(doc);
+          }
+        : undefined,
       onRevealInFileManager: async (doc) => {
         await onRevealInFileManager(doc);
       },
@@ -340,6 +364,16 @@ export function LibraryView({
         <div className="library-alert info" role="status">
           <span className="library-alert-icon">ℹ</span>
           <span className="library-alert-text">{message}</span>
+          {onDismissMessage && (
+            <button
+              type="button"
+              className="alert-dismiss-btn"
+              onClick={onDismissMessage}
+              aria-label="Dismiss message"
+            >
+              ✕
+            </button>
+          )}
         </div>
       )}
 
@@ -348,6 +382,16 @@ export function LibraryView({
         <div className="library-alert error" role="alert">
           <span className="library-alert-icon">⚠</span>
           <span className="library-alert-text">{error}</span>
+          {onDismissError && (
+            <button
+              type="button"
+              className="alert-dismiss-btn"
+              onClick={onDismissError}
+              aria-label="Dismiss error"
+            >
+              ✕
+            </button>
+          )}
         </div>
       )}
 
@@ -390,6 +434,11 @@ export function LibraryView({
             setPropertiesDoc(selectedDocuments[0]);
           }
         }}
+        onLocateSelection={() => {
+          if (selectedDocuments.length === 1 && selectedDocuments[0] && onLocateDocument) {
+            void onLocateDocument(selectedDocuments[0]);
+          }
+        }}
         onRemoveSelection={() => {
           const ids = selectedDocuments.map((d) => d.record.id);
           if (ids.length > 0) {
@@ -397,6 +446,7 @@ export function LibraryView({
             handleClearSelection();
           }
         }}
+        onOpenAppMenu={onOpenAppMenu}
       />
 
       {/* Main Two-Column Layout */}
@@ -430,8 +480,10 @@ export function LibraryView({
           ) : (
             <>
               {/* 1. Continue Section (Top ~6 items with reading progress) */}
+              {/* 1. Continue Section (Top ~6 items with reading progress, OD-5) */}
               <ContinueSection
                 documents={continueDocuments}
+                recentDocuments={recentDocuments}
                 onOpenDocument={handleOpenDoc}
                 onOpenContextMenu={handleOpenContextMenu}
                 renderThumbnail={renderThumbnail}
@@ -492,6 +544,7 @@ export function LibraryView({
           document={propertiesDoc}
           roots={roots}
           collections={collections}
+          onLocate={onLocateDocument}
           onClose={() => setPropertiesDoc(null)}
         />
       )}
