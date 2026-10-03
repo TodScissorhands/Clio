@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
 
@@ -89,6 +89,24 @@ export function LibrarySidebar({
     x: number;
     y: number;
   } | null>(null);
+  const [rootMenu, setRootMenu] = useState<{ id: string; label: string; x: number; y: number } | null>(null);
+  const [confirmRemoveRoot, setConfirmRemoveRoot] = useState<{ id: string; label: string } | null>(null);
+  const [confirmDeleteCollection, setConfirmDeleteCollection] = useState<{ id: string; name: string } | null>(null);
+
+  useEffect(() => {
+    function dismissOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (!activeContextMenu && !rootMenu && !confirmRemoveRoot && !confirmDeleteCollection) return;
+      event.preventDefault();
+      setActiveContextMenu(null);
+      setRootMenu(null);
+      setConfirmRemoveRoot(null);
+      setConfirmDeleteCollection(null);
+    }
+
+    window.addEventListener("keydown", dismissOnEscape);
+    return () => window.removeEventListener("keydown", dismissOnEscape);
+  }, [activeContextMenu, rootMenu, confirmRemoveRoot, confirmDeleteCollection]);
 
   if (collapsed) {
     return null;
@@ -291,15 +309,29 @@ export function LibrarySidebar({
                   setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
                 }}
               >
-                <button
-                  type="button"
-                  className="sidebar-item-btn"
-                  onClick={() => onSelectScope({ kind: "collection", collectionId: col.id })}
-                >
-                  <span className="sidebar-icon">🏷️</span>
-                  <span className="sidebar-label">{col.name}</span>
-                  <span className="sidebar-count">{docCount}</span>
-                </button>
+                <div className="sidebar-item-row">
+                  <button
+                    type="button"
+                    className="sidebar-item-btn"
+                    onClick={() => onSelectScope({ kind: "collection", collectionId: col.id })}
+                  >
+                    <span className="sidebar-icon">🏷️</span>
+                    <span className="sidebar-label">{col.name}</span>
+                    <span className="sidebar-count">{docCount}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-more-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
+                    }}
+                    title={`Options for ${col.name}`}
+                    aria-label={`Options for ${col.name}`}
+                  >
+                    ⋯
+                  </button>
+                </div>
               </li>
             );
           })}
@@ -336,7 +368,13 @@ export function LibrarySidebar({
 
             return (
               <li key={root.id} className="root-tree-item">
-                <div className={`root-item-row ${isSelected ? "active" : ""}`}>
+                <div
+                  className={`root-item-row ${isSelected ? "active" : ""}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
+                  }}
+                >
                   {folderTree.length > 0 ? (
                     <button
                       type="button"
@@ -361,21 +399,15 @@ export function LibrarySidebar({
                   </button>
                   <button
                     type="button"
-                    className="sidebar-action-icon-btn"
-                    onClick={() => onScanRoot(root.id)}
-                    title="Rescan folder"
-                    aria-label={`Rescan ${root.label}`}
+                    className="sidebar-more-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
+                    }}
+                    title={`Folder options for ${root.label}`}
+                    aria-label={`Folder options for ${root.label}`}
                   >
-                    ↻
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-action-icon-btn remove-root-btn"
-                    onClick={() => onRemoveRoot(root.id)}
-                    title="Remove folder from library"
-                    aria-label={`Remove ${root.label}`}
-                  >
-                    ✕
+                    ⋯
                   </button>
                 </div>
                 {folderTree.length > 0 && isExpanded && renderFolderNodes(root.id, folderTree, 1)}
@@ -404,8 +436,13 @@ export function LibrarySidebar({
         >
           <div
             className="context-menu-popover"
-            style={{ top: `${activeContextMenu.y}px`, left: `${activeContextMenu.x}px` }}
+            style={{
+              top: `${Math.min(activeContextMenu.y, window.innerHeight - 120)}px`,
+              left: `${Math.min(activeContextMenu.x, window.innerWidth - 200)}px`,
+            }}
             onClick={(e) => e.stopPropagation()}
+            role="menu"
+            aria-label="Collection actions"
           >
             <button
               type="button"
@@ -424,14 +461,171 @@ export function LibrarySidebar({
             <button
               type="button"
               className="context-menu-item danger"
-              onClick={async () => {
-                const colId = activeContextMenu.id;
+              onClick={() => {
+                const targetCol = collections.find((c) => c.id === activeContextMenu.id);
                 setActiveContextMenu(null);
-                await onDeleteCollection(colId);
+                if (targetCol) {
+                  setConfirmDeleteCollection({ id: targetCol.id, name: targetCol.name });
+                }
               }}
             >
-              Delete
+              Delete…
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Folder Context / Options Menu */}
+      {rootMenu && (
+        <div
+          className="context-menu-backdrop"
+          onClick={() => setRootMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setRootMenu(null);
+          }}
+        >
+          <div
+            className="context-menu-popover"
+            style={{
+              top: `${Math.min(rootMenu.y, window.innerHeight - 120)}px`,
+              left: `${Math.min(rootMenu.x, window.innerWidth - 200)}px`,
+            }}
+            onClick={(e) => e.stopPropagation()}
+            role="menu"
+            aria-label="Folder actions"
+          >
+            <button
+              type="button"
+              className="context-menu-item"
+              role="menuitem"
+              onClick={() => {
+                const id = rootMenu.id;
+                setRootMenu(null);
+                onScanRoot(id);
+              }}
+            >
+              Rescan folder
+            </button>
+            <div className="context-menu-divider" role="separator" />
+            <button
+              type="button"
+              className="context-menu-item danger"
+              role="menuitem"
+              onClick={() => {
+                const target = { id: rootMenu.id, label: rootMenu.label };
+                setRootMenu(null);
+                setConfirmRemoveRoot(target);
+              }}
+            >
+              Remove from library…
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Remove Folder Explicit Confirmation Modal (OD-1, Section 6) */}
+      {confirmRemoveRoot && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setConfirmRemoveRoot(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="remove-root-modal-title"
+        >
+          <div className="modal-card remove-root-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 id="remove-root-modal-title" className="modal-title">
+                Remove Folder from Library
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setConfirmRemoveRoot(null)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="remove-root-lead">Remove “{confirmRemoveRoot.label}” from Clio?</p>
+              <p className="remove-root-desc">
+                Your files will remain on your computer untouched. Clio will only remove its catalog index for this folder.
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setConfirmRemoveRoot(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-button danger"
+                onClick={() => {
+                  const id = confirmRemoveRoot.id;
+                  setConfirmRemoveRoot(null);
+                  onRemoveRoot(id);
+                }}
+              >
+                Remove folder
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Collection Confirmation Modal */}
+      {confirmDeleteCollection && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setConfirmDeleteCollection(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-col-modal-title"
+        >
+          <div className="modal-card delete-col-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 id="delete-col-modal-title" className="modal-title">
+                Delete Collection
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setConfirmDeleteCollection(null)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="remove-root-lead">Delete collection “{confirmDeleteCollection.name}”?</p>
+              <p className="remove-root-desc">
+                Documents in this collection will stay in your library.
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setConfirmDeleteCollection(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-button danger"
+                onClick={async () => {
+                  const id = confirmDeleteCollection.id;
+                  setConfirmDeleteCollection(null);
+                  await onDeleteCollection(id);
+                }}
+              >
+                Delete collection
+              </button>
+            </div>
           </div>
         </div>
       )}

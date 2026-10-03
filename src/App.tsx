@@ -438,6 +438,7 @@ function App() {
           onUpdateScrollAnchor={setScrollAnchorId}
           onLocateDocument={handleLocateDocument}
           onOpenAppMenu={() => setIsAppMenuOpen(true)}
+          onOpenFile={() => void chooseReaderDocument()}
           onDismissMessage={() => setLibraryMessage("")}
           onDismissError={() => setLibraryError("")}
         />

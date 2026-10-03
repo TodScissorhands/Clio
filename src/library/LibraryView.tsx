@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect, useCallback, type ReactNode } from "react";
-import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
+import { getDocumentDisplayTitle, type Collection, type LibraryRoot, type StoredDocument } from "../storage/domain";
 import { getDocumentThumbnail } from "../storage/documentStorage";
 import type { LibraryScope } from "../navigation/navigation";
 import {
   deriveContinueDocuments,
   deriveRecentlyReadDocuments,
   filterDocumentsByScope,
+  getDocumentMonogram,
   sortDocuments,
   type SortOption,
 } from "./libraryFilter";
@@ -54,7 +55,9 @@ export interface LibraryViewProps {
   onOpenAppMenu?: () => void;
   onDismissMessage?: () => void;
   onDismissError?: () => void;
+  onOpenFile?: () => void;
 }
+
 
 function getDeterministicHue(str: string): number {
   let hash = 0;
@@ -69,11 +72,13 @@ function DocCoverThumbnail({
   documentId,
   format,
   title,
+  author,
   hasThumbnail,
 }: {
   documentId: string;
   format: string;
   title: string;
+  author?: string | null;
   hasThumbnail: boolean;
 }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
@@ -110,33 +115,31 @@ function DocCoverThumbnail({
     );
   }
 
-  // Deterministic typographic cover placeholder
   const hue = getDeterministicHue(title || documentId);
-  const initials = title
-    .replace(/[^\p{L}\s]/gu, "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
-    .join("");
 
   return (
     <div
       className={`doc-thumbnail-wrap placeholder typographic format-${format}`}
       style={{
-        backgroundColor: `hsl(${hue}, 20%, 93%)`,
-        borderColor: `hsl(${hue}, 25%, 82%)`,
+        ["--jacket-hue" as string]: `${hue}deg`,
       }}
       aria-hidden="true"
     >
       <div className="placeholder-top-bar">
+        <span className="placeholder-monogram">
+          {getDocumentMonogram(title, format)}
+        </span>
         <span className="placeholder-format-tag">{format.toUpperCase()}</span>
       </div>
-      <div className="placeholder-center-monogram" style={{ color: `hsl(${hue}, 35%, 35%)` }}>
-        {initials || format.slice(0, 2).toUpperCase()}
-      </div>
-      <div className="placeholder-bottom-label" title={title}>
-        {title.slice(0, 32)}
+      <div className="placeholder-center-wrap">
+        <div className="placeholder-cover-title" title={title}>
+          {title}
+        </div>
+        {author && (
+          <div className="placeholder-cover-author" title={author}>
+            {author}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -175,6 +178,7 @@ export function LibraryView({
   onOpenAppMenu,
   onDismissMessage,
   onDismissError,
+  onOpenFile,
 }: LibraryViewProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [lastSelectedDocId, setLastSelectedDocId] = useState<string | null>(null);
@@ -347,11 +351,13 @@ export function LibraryView({
   );
 
   function renderThumbnail(doc: StoredDocument): ReactNode {
+    const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
     return (
       <DocCoverThumbnail
         documentId={doc.record.id}
         format={doc.record.format}
-        title={doc.record.name}
+        title={getDocumentDisplayTitle(doc.record)}
+        author={authors[0] ?? null}
         hasThumbnail={Boolean(doc.record.metadata?.thumbnailPath)}
       />
     );
@@ -399,6 +405,7 @@ export function LibraryView({
       <LibraryToolbar
         activeScope={activeScope}
         roots={roots}
+        collections={collections}
         searchQuery={searchQuery}
         onSearchChange={onSearchChange}
         viewMode={viewMode}
@@ -470,16 +477,21 @@ export function LibraryView({
           {/* Brand new empty library state */}
           {roots.length === 0 ? (
             <div className="library-empty-fresh-state">
-              <span className="fresh-empty-icon">📁</span>
-              <h2>Add a folder</h2>
-              <p>Files stay where they are.</p>
-              <button type="button" className="primary-button" onClick={onAddRoot}>
-                Add a folder
-              </button>
+              <h2>Your library is empty</h2>
+              <p>Add a folder or open a document to begin.</p>
+              <div className="empty-state-actions">
+                <button type="button" className="primary-button" onClick={onAddRoot}>
+                  Add folder
+                </button>
+                {onOpenFile && (
+                  <button type="button" className="secondary-button" onClick={onOpenFile}>
+                    Open file
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <>
-              {/* 1. Continue Section (Top ~6 items with reading progress) */}
               {/* 1. Continue Section (Top ~6 items with reading progress, OD-5) */}
               <ContinueSection
                 documents={continueDocuments}
@@ -515,7 +527,20 @@ export function LibraryView({
                   )
                 ) : (
                   <div className="library-scope-empty-state">
-                    <p>No documents found in this view.</p>
+                    <p className="scope-empty-title">
+                      {searchQuery
+                        ? `No documents matching “${searchQuery}”`
+                        : activeScope.kind === "collection"
+                        ? "This collection is empty"
+                        : "No documents in this view"}
+                    </p>
+                    <p className="scope-empty-subtitle">
+                      {searchQuery
+                        ? "Try searching Entire Library or checking spelling."
+                        : activeScope.kind === "collection"
+                        ? "Right-click documents in your library to add them here."
+                        : "Documents in this folder will appear here."}
+                    </p>
                   </div>
                 )}
               </div>

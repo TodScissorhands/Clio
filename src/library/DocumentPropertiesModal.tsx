@@ -67,65 +67,65 @@ export function DocumentPropertiesModal({
         </header>
 
         <div className="properties-content">
-          <div className="props-summary-row">
+          {document.availability === "missing" && (
+            <div className="props-missing-banner" role="alert">
+              <span className="props-missing-icon">⚠</span>
+              <div className="props-missing-text">
+                <strong>Document unavailable at saved location</strong>
+                <p>The file may have been moved or renamed outside Clio.</p>
+              </div>
+            </div>
+          )}
+
+          <div className="props-header-card">
             <span className={`format-badge format-${document.record.format}`}>
               {document.record.format.toUpperCase()}
             </span>
-            <strong className="props-display-title">{displayTitle}</strong>
+            <div className="props-header-titles">
+              <h3 className="props-display-title">{displayTitle}</h3>
+              {meta?.authors && meta.authors.length > 0 && (
+                <span className="props-authors">{meta.authors.join(", ")}</span>
+              )}
+            </div>
           </div>
 
           <table className="props-table">
             <tbody>
               <tr>
-                <th>File Name</th>
-                <td>{document.record.name}</td>
+                <th>Format & Size</th>
+                <td>{document.record.format.toUpperCase()} · {formatBytes(document.record.sizeBytes)}</td>
               </tr>
               <tr>
-                <th>File Size</th>
-                <td>{formatBytes(document.record.sizeBytes)}</td>
-              </tr>
-              <tr>
-                <th>Library Folder</th>
-                <td>{rootLabel}</td>
-              </tr>
-              <tr>
-                <th>Relative Path</th>
+                <th>Location</th>
                 <td>
+                  <span className="props-root-label">{rootLabel}</span>
                   <code className="props-path-code">{relativePath}</code>
                 </td>
-              </tr>
-              <tr>
-                <th>Status</th>
-                <td>
-                  <span className={`status-pill ${document.availability}`}>
-                    {document.availability === "present" ? "Available" : "Missing from disk"}
-                  </span>
-                </td>
-              </tr>
-              <tr>
-                <th>Last Opened</th>
-                <td>{lastOpened}</td>
               </tr>
               <tr>
                 <th>Reading Progress</th>
                 <td>{progress ?? "Not started"}</td>
               </tr>
               <tr>
-                <th>Collections</th>
+                <th>Last Opened</th>
+                <td>{lastOpened}</td>
+              </tr>
+              <tr>
+                <th>Status</th>
                 <td>
-                  {docCollections.length > 0
-                    ? docCollections.map((c) => c.name).join(", ")
-                    : "None"}
+                  <span className={`status-pill ${document.availability}`}>
+                    {document.availability === "present" ? "Available in library" : "Missing from disk"}
+                  </span>
                 </td>
               </tr>
-
-              {/* Metadata rows if available */}
-              {meta?.authors && meta.authors.length > 0 && (
+              {docCollections.length > 0 && (
                 <tr>
-                  <th>Authors</th>
-                  <td>{meta.authors.join(", ")}</td>
+                  <th>Collections</th>
+                  <td>{docCollections.map((c) => c.name).join(", ")}</td>
                 </tr>
               )}
+
+              {/* Bibliographic metadata if available */}
               {meta?.publisher && (
                 <tr>
                   <th>Publisher</th>
@@ -134,7 +134,7 @@ export function DocumentPropertiesModal({
               )}
               {meta?.publishedDate && (
                 <tr>
-                  <th>Published Date</th>
+                  <th>Published</th>
                   <td>{meta.publishedDate}</td>
                 </tr>
               )}
@@ -150,16 +150,10 @@ export function DocumentPropertiesModal({
                   <td className="props-desc-cell">{meta.description}</td>
                 </tr>
               )}
-              {meta?.identifiers && meta.identifiers.length > 0 && (
+              {displayTitle !== document.record.name && (
                 <tr>
-                  <th>Identifiers</th>
-                  <td>{meta.identifiers.join(", ")}</td>
-                </tr>
-              )}
-              {meta?.provenance && (
-                <tr>
-                  <th>Provenance</th>
-                  <td>{meta.provenance === "embedded" ? "Embedded document metadata" : "Filename fallback"}</td>
+                  <th>File Name</th>
+                  <td><code>{document.record.name}</code></td>
                 </tr>
               )}
             </tbody>

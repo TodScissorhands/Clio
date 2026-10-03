@@ -1,4 +1,4 @@
-import { getDocumentDisplayTitle, type FormatId, type ReadingState, type StoredDocument } from "../storage/domain";
+import { getDocumentDisplayTitle, type Collection, type FormatId, type LibraryRoot, type ReadingState, type StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
 export type FormatFilterOption = "all" | "pdf" | "epub" | "other";
 
@@ -9,6 +9,72 @@ export type SortOption =
   | "size-desc"
   | "size-asc"
   | "format";
+
+export function getDocumentMonogram(title: string, format: string): string {
+  const initials = title
+    .replace(/[^\p{L}\s]/gu, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]?.toUpperCase() ?? "")
+    .join("");
+  return initials || format.slice(0, 2).toUpperCase();
+}
+
+export function getScopeLabel(
+  scope: LibraryScope,
+  roots: LibraryRoot[],
+  collections: Collection[] = []
+): string {
+  switch (scope.kind) {
+    case "all":
+      return "Entire Library";
+    case "root": {
+      const root = roots.find((r) => r.id === scope.rootId);
+      return root?.label ?? "Folder";
+    }
+    case "folder": {
+      const parts = scope.relativePath.split("/").filter(Boolean);
+      return parts[parts.length - 1] ?? "Folder";
+    }
+    case "collection": {
+      const col = collections.find((c) => c.id === scope.collectionId);
+      return col ? col.name : "Collection";
+    }
+    case "search":
+      return "Search";
+  }
+}
+
+export type SearchableScope = Exclude<LibraryScope, { kind: "search" }>;
+
+export interface SearchScopeOption {
+  scope: SearchableScope;
+  label: string;
+}
+
+export function getSearchScopeOptions(
+  currentContext: LibraryScope | null,
+  roots: LibraryRoot[],
+  collections: Collection[] = []
+): SearchScopeOption[] {
+  const options: SearchScopeOption[] = [{ scope: { kind: "all" }, label: "Entire Library" }];
+
+  if (
+    currentContext &&
+    (currentContext.kind === "root" ||
+      currentContext.kind === "folder" ||
+      currentContext.kind === "collection")
+  ) {
+    const contextLabel = getScopeLabel(currentContext, roots, collections);
+    options.unshift({
+      scope: currentContext,
+      label: `${currentContext.kind === "collection" ? "Current Collection" : "Current Folder"} (${contextLabel})`,
+    });
+  }
+
+  return options;
+}
 
 export function matchesSearch(document: StoredDocument, query: string): boolean {
   const needle = query.trim().toLowerCase();

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { LibraryRoot, StoredDocument } from "../storage/domain";
-import type { LibraryScope } from "../navigation/navigation";
+import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
+import { isSameScope, type LibraryScope } from "../navigation/navigation";
 import { getSelectionCapabilities } from "../commands/selectionCommands";
+import { getScopeLabel, getSearchScopeOptions } from "./libraryFilter";
 
 export interface LibraryToolbarProps {
   activeScope: LibraryScope;
   roots: LibraryRoot[];
+  collections?: Collection[];
   searchQuery: string;
   onSearchChange: (query: string) => void;
   viewMode: "grid" | "list";
@@ -28,27 +30,11 @@ export interface LibraryToolbarProps {
   onOpenAppMenu?: () => void;
 }
 
-function getScopeLabel(scope: LibraryScope, roots: LibraryRoot[]): string {
-  switch (scope.kind) {
-    case "all":
-      return "Entire Library";
-    case "root": {
-      const root = roots.find((r) => r.id === scope.rootId);
-      return root?.label ?? "Folder";
-    }
-    case "folder": {
-      const parts = scope.relativePath.split("/").filter(Boolean);
-      return parts[parts.length - 1] ?? "Folder";
-    }
-    case "collection":
-      return "Current Collection";
-    case "search":
-      return "Search";
-  }
-}
+
 export function LibraryToolbar({
   activeScope,
   roots,
+  collections = [],
   searchQuery,
   onSearchChange,
   viewMode,
@@ -70,11 +56,29 @@ export function LibraryToolbar({
 }: LibraryToolbarProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState(false);
+  const [isScopePickerOpen, setIsScopePickerOpen] = useState(false);
+  const lastContextScopeRef = useRef<LibraryScope | null>(null);
+
+  useEffect(() => {
+    if (activeScope.kind !== "all" && activeScope.kind !== "search") {
+      lastContextScopeRef.current = activeScope;
+    }
+  }, [activeScope]);
+
+  useEffect(() => {
+    if (!searchQuery) setIsScopePickerOpen(false);
+  }, [searchQuery]);
 
   // Global search shortcut: "/" or "Ctrl/Cmd+K" focuses search input; "Escape" clears selection or search
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        if (isScopePickerOpen) {
+          e.preventDefault();
+          setIsScopePickerOpen(false);
+          searchInputRef.current?.focus();
+          return;
+        }
         if (selectedDocuments.length > 0) {
           e.preventDefault();
           onClearSelection();
@@ -101,7 +105,7 @@ export function LibraryToolbar({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClearSelection, onSearchChange, selectedDocuments.length]);
+  }, [isScopePickerOpen, onClearSelection, onSearchChange, selectedDocuments.length]);
 
   const isSelectionMode = selectedDocuments.length > 0;
   const caps = getSelectionCapabilities(selectedDocuments);
@@ -322,23 +326,72 @@ export function LibraryToolbar({
           </span>
           <input
             ref={searchInputRef}
-            type="text"
             className="toolbar-search-input"
-            placeholder={activeScope.kind === "all" ? "Search library…" : `Search in ${getScopeLabel(activeScope, roots)}…`}
+            placeholder={activeScope.kind === "all" ? "Search library…" : `Search in ${getScopeLabel(activeScope, roots, collections)}…`}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             aria-label="Search library"
           />
-          {activeScope.kind !== "all" && searchQuery && (
-            <button
-              type="button"
-              className="search-scope-pill"
-              onClick={() => onSelectScope({ kind: "all" })}
-              title={`Searching in ${getScopeLabel(activeScope, roots)}. Click to search Entire Library.`}
-            >
-              <span>Scope: {getScopeLabel(activeScope, roots)}</span>
-              <span className="scope-all-action">✕ All</span>
-            </button>
+          {searchQuery && (
+            <div className="search-scope-picker-wrap">
+              <button
+                type="button"
+                className={`search-scope-pill ${isScopePickerOpen ? "active" : ""}`}
+                onClick={() => setIsScopePickerOpen((v) => !v)}
+                title="Change search scope"
+                aria-expanded={isScopePickerOpen}
+                aria-label={`Search scope: ${getScopeLabel(activeScope, roots, collections)}`}
+              >
+                <span className="scope-pill-label">Scope: {getScopeLabel(activeScope, roots, collections)}</span>
+                <span className="scope-pill-chevron" aria-hidden="true">{isScopePickerOpen ? "▴" : "▾"}</span>
+              </button>
+
+              {isScopePickerOpen && (
+                <>
+                  <div
+                    className="scope-picker-backdrop"
+                    onClick={() => setIsScopePickerOpen(false)}
+                    aria-hidden="true"
+                  />
+                  <div
+                    className="search-scope-menu"
+                    role="group"
+                    aria-label="Search scope options"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="scope-menu-header">Search Scope</div>
+                    {getSearchScopeOptions(lastContextScopeRef.current, roots, collections).map(
+                      ({ scope, label }) => {
+                        const selected = isSameScope(activeScope, scope);
+                        const key =
+                          scope.kind === "all"
+                            ? "all"
+                            : scope.kind === "root"
+                              ? `root:${scope.rootId}`
+                              : scope.kind === "folder"
+                                ? `folder:${scope.rootId}:${scope.relativePath}`
+                                : `collection:${scope.collectionId}`;
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            aria-pressed={selected}
+                            className={`scope-menu-item ${selected ? "selected" : ""}`}
+                            onClick={() => {
+                              onSelectScope(scope);
+                              setIsScopePickerOpen(false);
+                            }}
+                          >
+                            <span className="scope-menu-text">{label}</span>
+                            {selected && <span className="scope-check" aria-hidden="true">✓</span>}
+                          </button>
+                        );
+                      }
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           )}
           {!searchQuery && (
             <kbd className="search-shortcut-hint" aria-hidden="true" title="Press / to search">

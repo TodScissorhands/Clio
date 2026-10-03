@@ -1324,10 +1324,22 @@ foliate-view {
 }
 
 .reader-text-content-wrap {
-  max-width: 720px;
+  max-width: 68ch;
   margin: 0 auto;
-  line-height: 1.7;
-  font-family: var(--font-sans);
+  line-height: 1.78;
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  word-break: break-word;
+  letter-spacing: -0.003em;
+}
+
+.reader-text-plain-pre {
+  max-width: 76ch;
+  margin: 0 auto;
+  line-height: 1.65;
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -1511,4 +1523,28 @@ foliate-view {
   opacity: 1 !important;
   visibility: visible !important;
   pointer-events: all !important;
+}
+
+@media (pointer: coarse) {
+  .reader-topbar-btn,
+  .reader-zoom-btn,
+  .reader-find-btn,
+  .reader-find-nav-btn,
+  .reader-find-close,
+  .reader-annotate-action-btn,
+  .reader-display-popover button,
+  .reader-doc-menu button,
+  .reader-navigator button {
+    min-height: 40px;
+  }
+
+  .reader-zoom-btn,
+  .reader-find-close {
+    min-width: 40px;
+  }
+
+  .reader-find-input-wrap input,
+  .reader-annotate-note-input {
+    min-height: 40px;
+  }
 }

@@ -1329,7 +1329,6 @@ export function ReaderShell({
         </div>
       )}
 
-      {/* ── Annotation toolbar (contextual, shown on text selection) ────────── */}
       {/* ── Annotation toolbar (contextual, shown on text selection, OD-12) ──── */}
       {pendingTextSelection && (
         <div className="reader-annotate-bar" role="group" aria-label="Selection actions">
