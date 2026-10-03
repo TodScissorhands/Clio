@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { ConversionWorkspace } from "./tools/ConversionWorkspace";
 import { ReaderShell } from "./reader/ReaderShell";
 import type { ReaderDocument } from "./reader/types";
 import {
@@ -60,6 +61,12 @@ function App() {
   // Active Reader Document
   const [readerDocument, setReaderDocument] = useState<ReaderDocument | null>(null);
   const [readerOpenError, setReaderOpenError] = useState("");
+  /** Contextual conversion/extraction triggered from the reader. */
+  const [conversionTarget, setConversionTarget] = useState<{
+    doc: StoredDocument;
+    mode: "convert" | "extract";
+  } | null>(null);
+  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
 
   // Library State
   const [roots, setRoots] = useState<LibraryRoot[]>([]);
@@ -295,6 +302,7 @@ function App() {
     try {
       const nextDoc = await openLibraryReaderDocument(doc.record.id, storage);
       setReaderDocument(nextDoc);
+      setActiveDocumentId(doc.record.id);
       setRoute({ kind: "document", documentId: doc.record.id });
     } catch (err) {
       setLibraryError(err instanceof Error ? err.message : String(err));
@@ -332,6 +340,7 @@ function App() {
     try {
       const nextDocument = await openSelectedReaderDocument(path, storage);
       setReaderDocument(nextDocument);
+      setActiveDocumentId(nextDocument.record.id);
       setRoute({ kind: "document", documentId: nextDocument.record.id });
     } catch (error) {
       setReaderOpenError(error instanceof Error ? error.message : String(error));
@@ -385,9 +394,19 @@ function App() {
           )}
           <ReaderShell
             document={readerDocument}
+            storedDocument={activeDocumentId ? (documents.find((d) => d.record.id === activeDocumentId) ?? null) : null}
+            collections={collections}
             onBack={() => void handleBackFromReader()}
             onOpen={() => void chooseReaderDocument()}
             openDisabled={libraryPending || readerPending}
+            onRemoveFromLibrary={handleRemoveFromLibrary}
+            onRevealInFileManager={handleRevealInFileManager}
+            onConvert={(doc) => {
+              setConversionTarget({ doc, mode: "convert" });
+            }}
+            onExtractPages={(doc) => {
+              setConversionTarget({ doc, mode: "extract" });
+            }}
           />
         </div>
       )}
@@ -451,6 +470,22 @@ function App() {
             >
               Open external document…
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Contextual conversion/extraction overlay — opened from reader document menu */}
+      {conversionTarget && (
+        <div className="conversion-overlay-backdrop" role="dialog" aria-modal="true" aria-label="Convert document">
+          <div className="conversion-overlay-panel">
+            <ConversionWorkspace
+              initialDocument={conversionTarget.doc}
+              initialMode={conversionTarget.mode === "extract" ? "extract" : "convert"}
+              onClose={() => {
+                setConversionTarget(null);
+                void refreshLibrary();
+              }}
+            />
           </div>
         </div>
       )}

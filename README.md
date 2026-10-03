@@ -28,6 +28,12 @@ Clio (src/App.tsx)
 │   ├── Command Architecture & Context Menus (src/commands/documentCommands.tsx)
 │   └── Contextual Modals: Properties, Conversion, Collections
 └── Reader Surface (src/reader/ReaderShell.tsx)
+    ├── Transient compact top bar: ‹ Library · Title · Find · Navigator · Display · ⋯
+    ├── Navigator overlay: Contents / Bookmarks / Notes tabs
+    ├── Find bar: floating overlay, no document reflow
+    ├── Display popover: theme (light/sepia/dark), zoom (PDF), persisted preferences
+    ├── Document menu (⋯): capability-filtered commands from documentCommands
+    ├── Progress strip: thin bar + page or percentage label
     ├── PDF Engine (PDF.js)
     ├── EPUB Engine (foliate-js)
     └── Plain Text & Markdown Engine (src/reader/TextEngine.tsx)

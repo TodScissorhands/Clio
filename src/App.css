@@ -1766,7 +1766,8 @@ a {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .reader-back-button {
@@ -2755,4 +2756,38 @@ a {
 .modal-input:focus {
   border-color: var(--border-focus);
   box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+/* ── Contextual conversion overlay (reader → ConversionWorkspace) ──────────── */
+
+.conversion-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.conversion-overlay-panel {
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.35);
+  width: 100%;
+  max-width: 800px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+@media (max-width: 480px) {
+  .conversion-overlay-backdrop {
+    padding: 0;
+    align-items: flex-end;
+  }
+  .conversion-overlay-panel {
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    max-height: 90vh;
+  }
 }

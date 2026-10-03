@@ -27,11 +27,16 @@ Library → Document → Reading / Contextual Actions
 - `src/commands/documentCommands.ts`: Unified command architecture for document actions across context menus and action bars.
 - `src/library/`: Library components, filtering (`libraryFilter.ts`), thumbnail generation, properties modal, and collection modals.
 - `src/reader/`:
-  - `ReaderShell.tsx`: Unified reader chrome, toolbar, zoom, search, TOC, bookmarks, and annotations.
+  - `ReaderShell.tsx`: Document-first reader surface. The document viewport fills 100vh. Reader chrome is transient: a compact top bar (`reader-topbar`) overlays the document and auto-hides after inactivity; it is revealed by pointer proximity to the top edge, keyboard activation, or opening a panel. Controls: ‹ Library (D1 back), title, Find, Navigator, Display, ⋯ document menu.
+  - Navigator panel (`reader-navigator`): overlay drawer (right side) with three tabs — Contents (TOC), Bookmarks, Notes. Does not reflow the document.
+  - Find bar (`reader-find-bar`): floating overlay, no document layout shift. Keyboard: `Ctrl/Cmd+F` open, `Enter`/`Shift+Enter` next/prev, `Escape` close.
+  - Display popover (`reader-display-popover`): theme (light/sepia/dark), zoom (PDF only). Theme persisted to `localStorage` (`clio-reader-theme`).
+  - Document menu (`reader-doc-menu`): capability-filtered commands from `src/commands/documentCommands.ts`. Remove from library requires confirmation; does not delete the underlying file.
+  - Progress strip (`reader-progress-strip`): 2px accent bar + page/percent label, always visible at bottom.
   - `PdfEngine.tsx`: PDF.js-backed rendering and navigation.
   - `EpubEngine.tsx`: foliate-js-backed pagination, themes, and highlight overlays.
   - `TextEngine.tsx`: Plain text and Markdown reader with heading TOC extraction and TextScroll progression.
-  - `readingState.ts`: Debounced reading state coordinator.
+  - `readingState.ts`: Debounced reading state coordinator (1 s debounce, flushed on back/unload/document switch).
 - `src/tools/`:
   - `ConversionWorkspace.tsx`: Local conversion, PDF merge, and PDF page extraction tool workspace.
 - `src/storage/`:
