@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { getDocumentDisplayTitle, type StoredDocument } from "../storage/domain";
 import { MoreHorizontalIcon } from "./LibraryIcons";
-import { formatReadingProgress } from "./libraryFilter";
+import { Button } from "../components/ui/button";
 
 export interface ContinueSectionProps {
   documents: StoredDocument[];
@@ -22,113 +22,96 @@ export function ContinueSection({
   const hasContinue = documents.length > 0;
   const hasRecent = recentDocuments.length > 0;
 
-  if (!hasContinue && !hasRecent) {
-    return null;
-  }
+  if (!hasContinue && !hasRecent) return null;
 
   const effectiveTab = hasContinue ? activeTab : "recent";
-  const activeDocs = effectiveTab === "continue" ? documents : recentDocuments;
+  const activeDocuments = effectiveTab === "continue" ? documents : recentDocuments;
 
   return (
-    <section className="continue-section" aria-label="Reading shelves">
-      <div className="section-header continue-header-tabs" role="tablist" aria-label="Reading history tabs">
+    <section aria-label="Reading shelves" className="border-b border-border pb-5">
+      <div className="mb-3 flex items-center gap-1" role="tablist" aria-label="Reading history tabs">
         {hasContinue && (
-          <button
+          <Button
             type="button"
             role="tab"
             aria-selected={effectiveTab === "continue"}
-            className={`continue-tab-btn ${effectiveTab === "continue" ? "selected" : ""}`}
+            variant={effectiveTab === "continue" ? "secondary" : "ghost"}
+            size="sm"
             onClick={() => setActiveTab("continue")}
           >
             Continue Reading
-          </button>
+          </Button>
         )}
         {hasRecent && (
-          <button
+          <Button
             type="button"
             role="tab"
             aria-selected={effectiveTab === "recent"}
-            className={`continue-tab-btn ${effectiveTab === "recent" ? "selected" : ""}`}
+            variant={effectiveTab === "recent" ? "secondary" : "ghost"}
+            size="sm"
             onClick={() => setActiveTab("recent")}
           >
             Recently Read
-          </button>
+          </Button>
         )}
       </div>
-      <div className="continue-grid" role="list">
-        {activeDocs.map((doc) => {
+
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-x-5 gap-y-4 max-sm:grid-cols-[repeat(auto-fill,minmax(105px,1fr))] max-sm:gap-x-4" role="list">
+        {activeDocuments.map((doc) => {
           const displayTitle = getDocumentDisplayTitle(doc.record);
           const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
-          const authorStr = authors.length > 0 ? authors.join(", ") : null;
-          const progressLabel = formatReadingProgress(doc.readingState ?? undefined);
-          const formatStr = doc.record.format.toUpperCase();
-          const metaLine = progressLabel ? `${formatStr} · ${progressLabel}` : formatStr;
+          const author = authors.length > 0 ? authors.join(", ") : null;
           let progressPercent: number | null = null;
-          if (doc.readingState?.position) {
-            const pos = doc.readingState.position;
-            if (pos.kind === "text-scroll") {
-              progressPercent = Math.round(pos.progression * 100);
-            } else if (pos.kind === "epub-cfi" && typeof pos.progression === "number") {
-              progressPercent = Math.round(pos.progression * 100);
-            }
+          const position = doc.readingState?.position;
+          if (position?.kind === "text-scroll" || position?.kind === "epub-cfi") {
+            progressPercent = typeof position.progression === "number" ? Math.round(position.progression * 100) : null;
           }
 
           return (
             <article
               key={doc.record.id}
-              className="continue-card"
+              className="group min-w-0 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               role="listitem"
-              onClick={() => onOpenDocument(doc)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onOpenContextMenu(doc, e);
-              }}
               tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
+              onClick={() => onOpenDocument(doc)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenContextMenu(doc, event);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
                   onOpenDocument(doc);
                 }
               }}
               title={`Open ${displayTitle}`}
             >
-              <div className="continue-thumbnail-wrap">
+              <div className="relative aspect-[2/3] overflow-hidden bg-muted">
                 {renderThumbnail(doc)}
-                <button
+                {progressPercent !== null && progressPercent > 0 && (
+                  <div className="absolute inset-x-0 bottom-0 h-1 bg-background/60" aria-hidden="true" title={`${progressPercent}% completed`}>
+                    <div className="h-full bg-foreground" style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }} />
+                  </div>
+                )}
+                <Button
                   type="button"
-                  className="continue-ellipsis-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenContextMenu(doc, e);
+                  size="icon-sm"
+                  variant="secondary"
+                  className="absolute bottom-2 right-2 bg-background/90 opacity-100 shadow-sm transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenContextMenu(doc, event);
                   }}
                   title="Document options"
                   aria-label={`Options for ${displayTitle}`}
                 >
-                  <MoreHorizontalIcon />
-                </button>
+                  <MoreHorizontalIcon className="size-4" />
+                </Button>
               </div>
-
-              <div className="continue-meta">
-                <strong className="continue-title" title={displayTitle}>
-                  {displayTitle}
-                </strong>
-                {authorStr && (
-                  <span className="continue-author" title={authorStr}>
-                    {authorStr}
-                  </span>
-                )}
-                <div className="continue-progress-row">
-                  <span className="continue-progress-text">{metaLine}</span>
-                  {progressPercent !== null && (
-                    <div className="thin-progress-bar-bg" aria-hidden="true">
-                      <div
-                        className="thin-progress-bar-fill"
-                        style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                      />
-                    </div>
-                  )}
-                </div>
+              <div className="pt-2">
+                <strong className="block truncate text-[13px] font-medium leading-5" title={displayTitle}>{displayTitle}</strong>
+                {author && <span className="mt-0.5 block truncate text-xs text-muted-foreground" title={author}>{author}</span>}
               </div>
             </article>
           );

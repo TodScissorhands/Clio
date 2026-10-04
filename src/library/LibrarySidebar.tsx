@@ -2,6 +2,30 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
 import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupLabel,
+  SidebarGroupAction,
+  SidebarGroupContent,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
+  SidebarMenuAction,
+  SidebarMenuBadge,
+  SidebarMenuSub,
+  SidebarMenuSubItem,
+  SidebarMenuSubButton,
+  useSidebar,
+} from "../components/ui/sidebar";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "../components/ui/collapsible";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import {
   BookOpenIcon,
   BookmarkIcon,
   ChevronRightIcon,
@@ -9,6 +33,7 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
 } from "./LibraryIcons";
+
 export interface FolderNode {
   name: string;
   relativePath: string;
@@ -62,7 +87,6 @@ export interface LibrarySidebarProps {
   documents: StoredDocument[];
   collections: Collection[];
   activeScope: LibraryScope;
-  collapsed: boolean;
   onSelectScope: (scope: LibraryScope) => void;
   onAddRoot: () => void;
   onScanRoot: (rootId: string) => void;
@@ -77,7 +101,6 @@ export function LibrarySidebar({
   documents,
   collections,
   activeScope,
-  collapsed,
   onSelectScope,
   onAddRoot,
   onScanRoot,
@@ -100,6 +123,8 @@ export function LibrarySidebar({
   const [confirmRemoveRoot, setConfirmRemoveRoot] = useState<{ id: string; label: string } | null>(null);
   const [confirmDeleteCollection, setConfirmDeleteCollection] = useState<{ id: string; name: string } | null>(null);
 
+  const { isMobile, setOpenMobile } = useSidebar();
+
   useEffect(() => {
     function dismissOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -115,8 +140,11 @@ export function LibrarySidebar({
     return () => window.removeEventListener("keydown", dismissOnEscape);
   }, [activeContextMenu, rootMenu, confirmRemoveRoot, confirmDeleteCollection]);
 
-  if (collapsed) {
-    return null;
+  function handleScopeSelect(scope: LibraryScope) {
+    onSelectScope(scope);
+    if (isMobile) {
+      setOpenMobile(false);
+    }
   }
 
   function toggleFolder(key: string) {
@@ -143,297 +171,301 @@ export function LibrarySidebar({
     }
   }
 
-  function renderFolderNodes(rootId: string, nodes: FolderNode[], depth = 1): ReactNode {
-    return (
-      <ul className="folder-tree-list">
-        {nodes.map((node) => {
-          const isSelected =
-            activeScope.kind === "folder" &&
-            activeScope.rootId === rootId &&
-            activeScope.relativePath === node.relativePath;
-          const folderKey = `${rootId}:${node.relativePath}`;
-          const isExpanded = Boolean(expandedFolders[folderKey]);
-          const hasChildren = node.children.length > 0;
+  function renderFolderSubTree(rootId: string, nodes: FolderNode[]): ReactNode {
+    return nodes.map((node) => {
+      const isSelected =
+        activeScope.kind === "folder" &&
+        activeScope.rootId === rootId &&
+        activeScope.relativePath === node.relativePath;
+      const folderKey = `${rootId}:${node.relativePath}`;
+      const isExpanded = Boolean(expandedFolders[folderKey]);
+      const hasChildren = node.children.length > 0;
 
-          return (
-            <li key={node.relativePath} className="folder-tree-node">
-              <div className={`folder-item-row ${isSelected ? "active" : ""}`}>
-                {hasChildren ? (
-                  <button
+      return (
+        <SidebarMenuSubItem key={node.relativePath}>
+          <Collapsible
+            open={isExpanded}
+            onOpenChange={(open) => {
+              if (open !== isExpanded) toggleFolder(folderKey);
+            }}
+          >
+            <div className="flex min-w-0 items-center gap-0.5">
+              {hasChildren ? (
+                <CollapsibleTrigger asChild>
+                  <Button
                     type="button"
-                    className={`folder-chevron ${isExpanded ? "expanded" : ""}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleFolder(folderKey);
-                    }}
-                    aria-label={isExpanded ? "Collapse folder" : "Expand folder"}
+                    variant="ghost"
+                    size="icon-xs"
+                    className="size-5 shrink-0 p-0"
+                    aria-label={isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
                   >
-                    <ChevronRightIcon className={`folder-chevron-icon ${isExpanded ? "expanded" : ""}`} />
-                  </button>
-                ) : (
-                  <span className="folder-chevron-placeholder" />
-                )}
+                    <ChevronRightIcon className={`size-3.5 transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+                  </Button>
+                </CollapsibleTrigger>
+              ) : (
+                <span className="size-5 shrink-0" aria-hidden="true" />
+              )}
+              <SidebarMenuSubButton
+                asChild
+                isActive={isSelected}
+                title={node.relativePath}
+              >
                 <button
                   type="button"
-                  className="folder-name-btn"
-                  onClick={() =>
-                    onSelectScope({
-                      kind: "folder",
-                      rootId,
-                      relativePath: node.relativePath,
-                    })
-                  }
-                  title={node.relativePath}
+                  className="min-w-0"
+                  onClick={() => handleScopeSelect({
+                    kind: "folder",
+                    rootId,
+                    relativePath: node.relativePath,
+                  })}
                 >
-                  <FolderIcon className="folder-icon" />
-                  <span className="folder-name-text">{node.name}</span>
+                  <FolderIcon />
+                  <span>{node.name}</span>
                 </button>
-              </div>
-              {hasChildren && isExpanded && (
-                <div className="folder-sub-tree">
-                  {renderFolderNodes(rootId, node.children, depth + 1)}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    );
+              </SidebarMenuSubButton>
+            </div>
+            {hasChildren && (
+              <CollapsibleContent>
+                <SidebarMenuSub>{renderFolderSubTree(rootId, node.children)}</SidebarMenuSub>
+              </CollapsibleContent>
+            )}
+          </Collapsible>
+        </SidebarMenuSubItem>
+      );
+    });
   }
 
   return (
-    <aside className="library-sidebar" aria-label="Library navigation">
-      {/* Scope: All */}
-      <div className="sidebar-section scope-all-section">
-        <button
-          type="button"
-          className={`sidebar-scope-btn ${activeScope.kind === "all" ? "active" : ""}`}
-          onClick={() => onSelectScope({ kind: "all" })}
-        >
-          <BookOpenIcon className="sidebar-icon" />
-          <span className="sidebar-label">All Documents</span>
-          <span className="sidebar-count">{documents.length}</span>
-        </button>
-      </div>
+    <Sidebar collapsible="offcanvas" className="h-svh" aria-label="Library navigation">
+      <SidebarContent className="overflow-y-auto">
+        <SidebarGroup>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={activeScope.kind === "all"}
+                  onClick={() => handleScopeSelect({ kind: "all" })}
+                >
+                  <BookOpenIcon />
+                  <span>All Documents</span>
+                  <SidebarMenuBadge>{documents.length}</SidebarMenuBadge>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
 
-      {/* Collections Section */}
-      <div className="sidebar-section">
-        <div className="sidebar-section-header">
-          <span className="section-title">Collections</span>
-          <button
-            type="button"
-            className="sidebar-add-btn"
+        <SidebarGroup>
+          <SidebarGroupLabel>Collections</SidebarGroupLabel>
+          <SidebarGroupAction
             onClick={() => setIsCreatingCollection(true)}
             title="Create new collection"
             aria-label="Add collection"
           >
             <PlusIcon />
-          </button>
-        </div>
-
-        {isCreatingCollection && (
-          <form className="inline-add-form" onSubmit={handleCreateCollectionSubmit}>
-            <input
-              type="text"
-              className="inline-input"
-              value={newCollectionName}
-              onChange={(e) => setNewCollectionName(e.target.value)}
-              placeholder="Collection name…"
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  setIsCreatingCollection(false);
-                  setNewCollectionName("");
-                }
-              }}
-            />
-            <div className="inline-form-actions">
-              <button type="submit" className="inline-save-btn">
-                Add
-              </button>
-              <button
-                type="button"
-                className="inline-cancel-btn"
-                onClick={() => {
-                  setIsCreatingCollection(false);
-                  setNewCollectionName("");
-                }}
-              >
-                ✕
-              </button>
-            </div>
-          </form>
-        )}
-
-        <ul className="sidebar-list collections-list">
-          {collections.map((col) => {
-            const isSelected =
-              activeScope.kind === "collection" && activeScope.collectionId === col.id;
-            const docCount = documents.filter((d) => d.record.collections?.includes(col.id)).length;
-
-            if (renamingCollectionId === col.id) {
-              return (
-                <li key={col.id} className="sidebar-item">
-                  <form className="inline-add-form" onSubmit={(e) => handleRenameSubmit(e, col.id)}>
-                    <input
-                      type="text"
-                      className="inline-input"
-                      value={renamingValue}
-                      onChange={(e) => setRenamingValue(e.target.value)}
-                      autoFocus
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          setRenamingCollectionId(null);
-                          setRenamingValue("");
-                        }
-                      }}
-                    />
-                    <div className="inline-form-actions">
-                      <button type="submit" className="inline-save-btn">
-                        Save
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-cancel-btn"
-                        onClick={() => {
-                          setRenamingCollectionId(null);
-                          setRenamingValue("");
-                        }}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </form>
-                </li>
-              );
-            }
-
-            return (
-              <li
-                key={col.id}
-                className={`sidebar-item ${isSelected ? "active" : ""}`}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
-                }}
-              >
-                <div className="sidebar-item-row">
-                  <button
+          </SidebarGroupAction>
+          <SidebarGroupContent>
+            {isCreatingCollection && (
+              <form className="mb-2 space-y-2 px-2" onSubmit={handleCreateCollectionSubmit}>
+                <Input
+                  value={newCollectionName}
+                  onChange={(e) => setNewCollectionName(e.target.value)}
+                  placeholder="Collection name"
+                  aria-label="Collection name"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setIsCreatingCollection(false);
+                      setNewCollectionName("");
+                    }
+                  }}
+                />
+                <div className="flex items-center gap-2">
+                  <Button type="submit" size="sm">Add</Button>
+                  <Button
                     type="button"
-                    className="sidebar-item-btn"
-                    onClick={() => onSelectScope({ kind: "collection", collectionId: col.id })}
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setIsCreatingCollection(false);
+                      setNewCollectionName("");
+                    }}
                   >
-                    <BookmarkIcon className="sidebar-icon" />
-                    <span className="sidebar-label">{col.name}</span>
-                    <span className="sidebar-count">{docCount}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-more-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            )}
+
+            <SidebarMenu>
+              {collections.map((col) => {
+                const isSelected =
+                  activeScope.kind === "collection" && activeScope.collectionId === col.id;
+                const docCount = documents.filter((d) => d.record.collections?.includes(col.id)).length;
+
+                if (renamingCollectionId === col.id) {
+                  return (
+                    <SidebarMenuItem key={col.id}>
+                      <form className="space-y-2 p-2" onSubmit={(e) => handleRenameSubmit(e, col.id)}>
+                        <Input
+                          value={renamingValue}
+                          onChange={(e) => setRenamingValue(e.target.value)}
+                          aria-label={`Rename ${col.name}`}
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") {
+                              setRenamingCollectionId(null);
+                              setRenamingValue("");
+                            }
+                          }}
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button type="submit" size="sm">Save</Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setRenamingCollectionId(null);
+                              setRenamingValue("");
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </form>
+                    </SidebarMenuItem>
+                  );
+                }
+
+                return (
+                  <SidebarMenuItem
+                    key={col.id}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
                       setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
                     }}
-                    title={`Options for ${col.name}`}
-                    aria-label={`Options for ${col.name}`}
                   >
-                    <MoreHorizontalIcon />
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-          {collections.length === 0 && !isCreatingCollection && (
-            <li className="sidebar-empty-hint">No collections yet</li>
-          )}
-        </ul>
-      </div>
-
-      {/* Folders (Library Roots & Subfolders) */}
-      <div className="sidebar-section">
-        <div className="sidebar-section-header">
-          <span className="section-title">Folders</span>
-          <button
-            type="button"
-            className="sidebar-add-btn"
-            onClick={onAddRoot}
-            title="Add a folder to library"
-            aria-label="Add folder"
-          >
-            <PlusIcon />
-          </button>
-        </div>
-
-        <ul className="sidebar-list roots-list">
-          {roots.map((root) => {
-            const isSelected = activeScope.kind === "root" && activeScope.rootId === root.id;
-            const rootDocs = documents.filter(
-              (d) => d.source.kind === "library" && d.source.rootId === root.id
-            );
-            const folderTree = buildFolderTree(documents, root.id);
-            const rootKey = `root:${root.id}`;
-            const isExpanded = expandedFolders[rootKey] ?? true;
-
-            return (
-              <li key={root.id} className="root-tree-item">
-                <div
-                  className={`root-item-row ${isSelected ? "active" : ""}`}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
-                  }}
-                >
-                  {folderTree.length > 0 ? (
-                    <button
-                      className={`folder-chevron ${isExpanded ? "expanded" : ""}`}
-                      onClick={() => toggleFolder(rootKey)}
-                      aria-label={isExpanded ? "Collapse folders" : "Expand folders"}
+                    <SidebarMenuButton
+                      isActive={isSelected}
+                      onClick={() => handleScopeSelect({ kind: "collection", collectionId: col.id })}
                     >
-                      <ChevronRightIcon className={`folder-chevron-icon ${isExpanded ? "expanded" : ""}`} />
-                    </button>
-                  ) : (
-                    <span className="folder-chevron-placeholder" />
-                  )}
-                  <button
-                    type="button"
-                    className="sidebar-item-btn root-btn"
-                    onClick={() => onSelectScope({ kind: "root", rootId: root.id })}
-                    title={root.label}
-                  >
-                    <FolderIcon className="sidebar-icon" />
-                    <span className="sidebar-label">{root.label}</span>
-                    <span className="sidebar-count">{rootDocs.length}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-more-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                      <BookmarkIcon />
+                      <span>{col.name}</span>
+                      <SidebarMenuBadge className="right-7">{docCount}</SidebarMenuBadge>
+                    </SidebarMenuButton>
+                    <SidebarMenuAction
+                      showOnHover
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
+                      }}
+                      title={`Options for ${col.name}`}
+                      aria-label={`Options for ${col.name}`}
+                    >
+                      <MoreHorizontalIcon />
+                    </SidebarMenuAction>
+                  </SidebarMenuItem>
+                );
+              })}
+              {collections.length === 0 && !isCreatingCollection && (
+                <SidebarMenuItem>
+                  <span className="px-2 py-1 text-xs text-muted-foreground">No collections yet</span>
+                </SidebarMenuItem>
+              )}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Folders</SidebarGroupLabel>
+          <SidebarGroupAction onClick={onAddRoot} title="Add folder to library" aria-label="Add folder">
+            <PlusIcon />
+          </SidebarGroupAction>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {roots.map((root) => {
+                const isSelected = activeScope.kind === "root" && activeScope.rootId === root.id;
+                const rootDocs = documents.filter(
+                  (d) => d.source.kind === "library" && d.source.rootId === root.id
+                );
+                const folderTree = buildFolderTree(documents, root.id);
+                const rootKey = `root:${root.id}`;
+                const isExpanded = expandedFolders[rootKey] ?? true;
+                const hasChildren = folderTree.length > 0;
+
+                return (
+                  <SidebarMenuItem
+                    key={root.id}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
                       setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
                     }}
-                    title={`Folder options for ${root.label}`}
-                    aria-label={`Folder options for ${root.label}`}
                   >
-                    <MoreHorizontalIcon />
-                  </button>
-                </div>
-                {folderTree.length > 0 && isExpanded && (
-                  <div className="folder-sub-tree">
-                    {renderFolderNodes(root.id, folderTree, 1)}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-          {roots.length === 0 && (
-            <li className="sidebar-empty-hint">
-              <button type="button" className="link-button" onClick={onAddRoot}>
-                Add a folder
-              </button>
-            </li>
-          )}
-        </ul>
-      </div>
+                    <Collapsible
+                      open={isExpanded}
+                      onOpenChange={(open) => {
+                        if (open !== isExpanded) toggleFolder(rootKey);
+                      }}
+                    >
+                      <div className="flex min-w-0 items-center gap-0.5">
+                        {hasChildren ? (
+                          <CollapsibleTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              className="size-6 shrink-0 p-0"
+                              aria-label={isExpanded ? `Collapse ${root.label}` : `Expand ${root.label}`}
+                            >
+                              <ChevronRightIcon className={`size-3.5 transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+                            </Button>
+                          </CollapsibleTrigger>
+                        ) : (
+                          <span className="size-6 shrink-0" aria-hidden="true" />
+                        )}
+                        <SidebarMenuButton
+                          isActive={isSelected}
+                          onClick={() => handleScopeSelect({ kind: "root", rootId: root.id })}
+                          title={root.label}
+                        >
+                          <FolderIcon />
+                          <span>{root.label}</span>
+                          <SidebarMenuBadge className="right-7">{rootDocs.length}</SidebarMenuBadge>
+                        </SidebarMenuButton>
+                        <SidebarMenuAction
+                          showOnHover
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
+                          }}
+                          title={`Folder options for ${root.label}`}
+                          aria-label={`Folder options for ${root.label}`}
+                        >
+                          <MoreHorizontalIcon />
+                        </SidebarMenuAction>
+                      </div>
+                      {hasChildren && (
+                        <CollapsibleContent>
+                          <SidebarMenuSub>{renderFolderSubTree(root.id, folderTree)}</SidebarMenuSub>
+                        </CollapsibleContent>
+                      )}
+                    </Collapsible>
+                  </SidebarMenuItem>
+                );
+              })}
+              {roots.length === 0 && (
+                <SidebarMenuItem>
+                  <Button type="button" variant="ghost" size="sm" className="w-full justify-start" onClick={onAddRoot}>
+                    <PlusIcon />
+                    <span>Add a folder</span>
+                  </Button>
+                </SidebarMenuItem>
+              )}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
 
       {/* Collection Context Menu */}
       {activeContextMenu && (
@@ -453,40 +485,42 @@ export function LibrarySidebar({
             }}
             onClick={(e) => e.stopPropagation()}
             role="menu"
-            aria-label="Collection actions"
+            aria-label="Collection options"
           >
             <button
               type="button"
               className="context-menu-item"
+              role="menuitem"
               onClick={() => {
-                const targetCol = collections.find((c) => c.id === activeContextMenu.id);
-                if (targetCol) {
-                  setRenamingCollectionId(targetCol.id);
-                  setRenamingValue(targetCol.name);
+                const col = collections.find((c) => c.id === activeContextMenu.id);
+                if (col) {
+                  setRenamingCollectionId(col.id);
+                  setRenamingValue(col.name);
                 }
                 setActiveContextMenu(null);
               }}
             >
-              Rename
+              Rename collection…
             </button>
             <button
               type="button"
               className="context-menu-item danger"
+              role="menuitem"
               onClick={() => {
-                const targetCol = collections.find((c) => c.id === activeContextMenu.id);
-                setActiveContextMenu(null);
-                if (targetCol) {
-                  setConfirmDeleteCollection({ id: targetCol.id, name: targetCol.name });
+                const col = collections.find((c) => c.id === activeContextMenu.id);
+                if (col) {
+                  setConfirmDeleteCollection({ id: col.id, name: col.name });
                 }
+                setActiveContextMenu(null);
               }}
             >
-              Delete…
+              Delete collection
             </button>
           </div>
         </div>
       )}
 
-      {/* Folder Context / Options Menu */}
+      {/* Root Context Menu */}
       {rootMenu && (
         <div
           className="context-menu-backdrop"
@@ -499,43 +533,40 @@ export function LibrarySidebar({
           <div
             className="context-menu-popover"
             style={{
-              top: `${Math.min(rootMenu.y, window.innerHeight - 120)}px`,
+              top: `${Math.min(rootMenu.y, window.innerHeight - 140)}px`,
               left: `${Math.min(rootMenu.x, window.innerWidth - 200)}px`,
             }}
             onClick={(e) => e.stopPropagation()}
             role="menu"
-            aria-label="Folder actions"
+            aria-label="Folder options"
           >
             <button
               type="button"
               className="context-menu-item"
               role="menuitem"
               onClick={() => {
-                const id = rootMenu.id;
+                onScanRoot(rootMenu.id);
                 setRootMenu(null);
-                onScanRoot(id);
               }}
             >
-              Rescan folder
+              Scan folder for changes
             </button>
-            <div className="context-menu-divider" role="separator" />
             <button
               type="button"
               className="context-menu-item danger"
               role="menuitem"
               onClick={() => {
-                const target = { id: rootMenu.id, label: rootMenu.label };
+                setConfirmRemoveRoot({ id: rootMenu.id, label: rootMenu.label });
                 setRootMenu(null);
-                setConfirmRemoveRoot(target);
               }}
             >
-              Remove from library…
+              Remove folder from library…
             </button>
           </div>
         </div>
       )}
 
-      {/* Remove Folder Explicit Confirmation Modal (OD-1, Section 6) */}
+      {/* Confirmation Modal: Remove Root */}
       {confirmRemoveRoot && (
         <div
           className="modal-backdrop"
@@ -553,15 +584,19 @@ export function LibrarySidebar({
                 type="button"
                 className="modal-close-btn"
                 onClick={() => setConfirmRemoveRoot(null)}
-                aria-label="Close"
+                aria-label="Close dialog"
               >
                 ✕
               </button>
             </div>
             <div className="modal-body">
-              <p className="remove-root-lead">Remove “{confirmRemoveRoot.label}” from Clio?</p>
-              <p className="remove-root-desc">
-                Your files will remain on your computer untouched. Clio will only remove its catalog index for this folder.
+              <p className="modal-intro">
+                Are you sure you want to remove <strong>{confirmRemoveRoot.label}</strong> from your
+                library?
+              </p>
+              <p className="modal-subtext">
+                This only removes the folder from Clio’s catalog. Your files on disk will{" "}
+                <strong>not</strong> be deleted.
               </p>
             </div>
             <div className="modal-footer">
@@ -576,9 +611,8 @@ export function LibrarySidebar({
                 type="button"
                 className="primary-button danger"
                 onClick={() => {
-                  const id = confirmRemoveRoot.id;
+                  onRemoveRoot(confirmRemoveRoot.id);
                   setConfirmRemoveRoot(null);
-                  onRemoveRoot(id);
                 }}
               >
                 Remove folder
@@ -588,7 +622,7 @@ export function LibrarySidebar({
         </div>
       )}
 
-      {/* Delete Collection Confirmation Modal */}
+      {/* Confirmation Modal: Delete Collection */}
       {confirmDeleteCollection && (
         <div
           className="modal-backdrop"
@@ -606,15 +640,19 @@ export function LibrarySidebar({
                 type="button"
                 className="modal-close-btn"
                 onClick={() => setConfirmDeleteCollection(null)}
-                aria-label="Close"
+                aria-label="Close dialog"
               >
                 ✕
               </button>
             </div>
             <div className="modal-body">
-              <p className="remove-root-lead">Delete collection “{confirmDeleteCollection.name}”?</p>
-              <p className="remove-root-desc">
-                Documents in this collection will stay in your library.
+              <p className="modal-intro">
+                Are you sure you want to delete the collection{" "}
+                <strong>{confirmDeleteCollection.name}</strong>?
+              </p>
+              <p className="modal-subtext">
+                This only removes the collection grouping. Documents inside it will remain in your
+                library and on disk.
               </p>
             </div>
             <div className="modal-footer">
@@ -628,10 +666,9 @@ export function LibrarySidebar({
               <button
                 type="button"
                 className="primary-button danger"
-                onClick={async () => {
-                  const id = confirmDeleteCollection.id;
+                onClick={() => {
+                  void onDeleteCollection(confirmDeleteCollection.id);
                   setConfirmDeleteCollection(null);
-                  await onDeleteCollection(id);
                 }}
               >
                 Delete collection
@@ -640,6 +677,6 @@ export function LibrarySidebar({
           </div>
         </div>
       )}
-    </aside>
+    </Sidebar>
   );
 }

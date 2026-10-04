@@ -4,11 +4,11 @@ This roadmap is intentionally staged. It describes direction, not promises to im
 
 1. **Reader foundation — implemented**
    - Application shell, PDF.js PDF reader, foliate-js EPUB reader, local byte loading, navigation, search foundations, EPUB TOC, themes, responsive behavior, conversion workspace separation, and tokenized native reader opening.
-   - Native validation is classified B: the packaged release executable compiled and launched on WebKitGTK 2.52.6, but the packaged hostile EPUB could not be driven or inspected. Blob-origin Tauri ACL/native command reachability remains unproven; sanitization and CSP are defense-in-depth.
+   - The packaged hostile EPUB could not be driven or inspected. Blob-origin Tauri ACL/native command reachability remains unproven; sanitization and CSP are defense-in-depth.
 2. **Storage Core & Library UX — implemented**
    - Rust-owned SQLite metadata catalog (`library.sqlite3`), explicit desktop library roots and scans, opaque UUID `DocumentRecord` identity, separate `SourceRef` and runtime `StorageLocator` boundaries, tokenized reader opening, and durable reading state.
-   - Polished responsive Library interface: instant client-side search across title and relative path, format filtering (All, PDF, EPUB, Other), multi-attribute sorting (Recently opened, Name, Size, Format), reading progress chips (PDF page, EPUB progression), and clear available vs missing document states.
-   - Connected reading position restoration and debounced persistence across reader lifecycle.
+   - Responsive Library interface with client-side search across title and relative path, format filtering, sorting, reading progress, and available/missing document states. Collections support nested folders and assignment/removal workflows.
+   - Library visual refinement uses locally vendored shadcn/ui source components, Radix UI primitives, Tailwind CSS 4 utilities and Clio tokens; the shadcn CLI is not a runtime dependency.
 3. **Reader polish (Pass 1) — implemented**
    - Search match navigation (next/previous with wrap-around), match count badges, query cancellation tokens, and document isolation across PDF and EPUB.
    - PDF HiDPI canvas backing scaling with `devicePixelRatio`, render task cancellation, zoom toolbar controls (`-`, reset to 100%, `+`), and keyboard shortcuts (`Ctrl+F`, `Ctrl+=`, `Ctrl+-`, `Ctrl+0`).
@@ -51,4 +51,4 @@ This roadmap is intentionally staged. It describes direction, not promises to im
 11. **Packaging and long-term polish**
     - Dependency detection, installer/runtime diagnostics, offline/privacy guarantees, accessibility, and performance hardening.
 
-Storage Core intentionally excludes watchers, mobile providers, collections, annotation editing UI, highlight rendering, text selection, search, cover caching, cloud services, and conversion redesign. Its schema and command surface must be updated from the Rust implementation rather than treated as a promise of unimplemented APIs.
+Storage Core intentionally excludes filesystem watchers, mobile providers, cloud services, and conversion redesign. It stores collections, bookmarks, annotations, reading state, metadata, and source coordinates, but not document bytes or reader tokens. Its schema and command surface must be updated from the Rust implementation rather than treated as a promise of unimplemented APIs.

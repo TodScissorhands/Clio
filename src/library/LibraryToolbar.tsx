@@ -1,15 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
-import { isSameScope, type LibraryScope } from "../navigation/navigation";
+import type { LibraryScope } from "../navigation/navigation";
 import { getSelectionCapabilities } from "../commands/selectionCommands";
-import { getScopeLabel, getSearchScopeOptions } from "./libraryFilter";
+import { getScopeLabel, getSearchScopeOptions, type SortOption } from "./libraryFilter";
 import {
+  CheckIcon,
+  ChevronDownIcon,
   GridIcon,
   ListIcon,
   MoreHorizontalIcon,
-  PanelLeftIcon,
   SearchIcon,
 } from "./LibraryIcons";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Separator } from "../components/ui/separator";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import { SidebarTrigger } from "../components/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+
 export interface LibraryToolbarProps {
   activeScope: LibraryScope;
   roots: LibraryRoot[];
@@ -18,10 +35,9 @@ export interface LibraryToolbarProps {
   onSearchChange: (query: string) => void;
   viewMode: "grid" | "list";
   onViewModeChange: (mode: "grid" | "list") => void;
-  sidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
   onSelectScope: (scope: LibraryScope) => void;
-  // Selection
+  sortBy?: SortOption;
+  onSortChange?: (sort: SortOption) => void;
   selectedDocuments: StoredDocument[];
   onClearSelection: () => void;
   onOpenSelection: () => void;
@@ -29,13 +45,46 @@ export interface LibraryToolbarProps {
   onConvertSelection: () => void;
   onExtractPagesSelection: () => void;
   onMergeSelection: () => void;
-
   onPropertiesSelection: () => void;
   onLocateSelection?: () => void;
   onRemoveSelection: () => void;
   onOpenAppMenu?: () => void;
 }
 
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: "recent", label: "Recent" },
+  { value: "name-asc", label: "Title (A → Z)" },
+  { value: "name-desc", label: "Title (Z → A)" },
+  { value: "author", label: "Author" },
+  { value: "added", label: "Date Added" },
+  { value: "format", label: "Format" },
+];
+
+const SORT_LABEL: Record<SortOption, string> = {
+  recent: "Recent",
+  "name-asc": "A → Z",
+  "name-desc": "Z → A",
+  author: "Author",
+  added: "Added",
+  format: "Format",
+  "size-desc": "Size (Large)",
+  "size-asc": "Size (Small)",
+};
+
+function scopeKey(scope: LibraryScope) {
+  switch (scope.kind) {
+    case "all":
+      return "all";
+    case "root":
+      return `root:${scope.rootId}`;
+    case "folder":
+      return `folder:${scope.rootId}:${scope.relativePath}`;
+    case "collection":
+      return `collection:${scope.collectionId}`;
+    case "search":
+      return `search:${scope.query}`;
+  }
+}
 
 export function LibraryToolbar({
   activeScope,
@@ -45,9 +94,9 @@ export function LibraryToolbar({
   onSearchChange,
   viewMode,
   onViewModeChange,
-  sidebarCollapsed,
-  onToggleSidebar,
   onSelectScope,
+  sortBy = "recent",
+  onSortChange,
   selectedDocuments,
   onClearSelection,
   onOpenSelection,
@@ -75,35 +124,32 @@ export function LibraryToolbar({
     if (!searchQuery) setIsScopePickerOpen(false);
   }, [searchQuery]);
 
-  // Global search shortcut: "/" or "Ctrl/Cmd+K" focuses search input; "Escape" clears selection or search
   useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
         if (isScopePickerOpen) {
-          e.preventDefault();
+          event.preventDefault();
           setIsScopePickerOpen(false);
           searchInputRef.current?.focus();
           return;
         }
         if (selectedDocuments.length > 0) {
-          e.preventDefault();
+          event.preventDefault();
           onClearSelection();
           return;
         }
         if (searchInputRef.current === document.activeElement) {
-          e.preventDefault();
+          event.preventDefault();
           onSearchChange("");
           searchInputRef.current?.blur();
         }
         return;
       }
 
-      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      const isInput = targetTag === "input" || targetTag === "textarea" || targetTag === "select";
-      if (isInput) return;
-
-      if (e.key === "/" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")) {
-        e.preventDefault();
+      const targetTag = (event.target as HTMLElement)?.tagName?.toLowerCase();
+      if (["input", "textarea", "select"].includes(targetTag)) return;
+      if (event.key === "/" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k")) {
+        event.preventDefault();
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
       }
@@ -113,348 +159,168 @@ export function LibraryToolbar({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isScopePickerOpen, onClearSelection, onSearchChange, selectedDocuments.length]);
 
-  const isSelectionMode = selectedDocuments.length > 0;
-  const caps = getSelectionCapabilities(selectedDocuments);
-  if (isSelectionMode) {
+  const capabilities = getSelectionCapabilities(selectedDocuments);
+  if (selectedDocuments.length > 0) {
+    const actionButton = "shrink-0";
     return (
-      <header className="library-toolbar selection-action-bar" role="toolbar" aria-label="Selection actions">
-        <div className="selection-count-group">
-          <span className="selection-count-badge">
-            {selectedDocuments.length} {selectedDocuments.length === 1 ? "document" : "documents"} selected
-          </span>
-        </div>
-
-        <div className="selection-actions-group">
-          {caps.canOpen && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onOpenSelection(); }}
-              title="Open selected document"
-            >
-              Open
-            </button>
-          )}
-
-          <button
-            type="button"
-            className="action-bar-btn"
-            onClick={() => { setRemoveConfirm(false); onAddToCollection(); }}
-            title="Add selected documents to a collection"
-          >
-            Add to collection
-          </button>
-
-          {caps.canConvert && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onConvertSelection(); }}
-              title="Convert selected document"
-            >
-              Convert…
-            </button>
-          )}
-
-          {caps.canExtractPages && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onExtractPagesSelection(); }}
-              title="Extract pages from selected PDF"
-            >
-              Extract pages…
-            </button>
-          )}
-
-          {caps.canMergePdfs && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onMergeSelection(); }}
-              title="Merge selected PDFs into one document"
-            >
-              Merge PDFs…
-            </button>
-          )}
-
-          {caps.canViewProperties && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onPropertiesSelection(); }}
-              title="Document properties"
-            >
-              Properties
-            </button>
-          )}
-
-          {caps.canLocate && onLocateSelection && (
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => { setRemoveConfirm(false); onLocateSelection(); }}
-              title="Locate moved or renamed file"
-            >
-              Locate file…
-            </button>
-          )}
-
+      <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4" role="toolbar" aria-label="Selection actions">
+        <span className="shrink-0 text-sm font-medium tabular-nums">
+          {selectedDocuments.length} {selectedDocuments.length === 1 ? "document" : "documents"} selected
+        </span>
+        <Separator orientation="vertical" className="h-6" />
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1">
+          {capabilities.canOpen && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onOpenSelection(); }}>Open</Button>}
+          <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onAddToCollection(); }}>Add to collection</Button>
+          {capabilities.canConvert && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onConvertSelection(); }}>Convert…</Button>}
+          {capabilities.canExtractPages && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onExtractPagesSelection(); }}>Extract pages…</Button>}
+          {capabilities.canMergePdfs && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onMergeSelection(); }}>Merge PDFs…</Button>}
+          {capabilities.canViewProperties && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onPropertiesSelection(); }}>Properties</Button>}
+          {capabilities.canLocate && onLocateSelection && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onLocateSelection(); }}>Locate file…</Button>}
           {removeConfirm ? (
-            <span className="selection-remove-confirm">
-              <span className="confirm-label">Remove {selectedDocuments.length === 1 ? "this document" : `${selectedDocuments.length} documents`}?</span>
-              <button
-                type="button"
-                className="action-bar-btn danger"
-                onClick={() => { setRemoveConfirm(false); onRemoveSelection(); }}
-                title="Confirm removal from library catalog (file is NOT deleted)"
-              >
-                Remove
-              </button>
-              <button
-                type="button"
-                className="action-bar-btn"
-                onClick={() => setRemoveConfirm(false)}
-                title="Cancel"
-              >
-                Cancel
-              </button>
-            </span>
+            <div className="flex shrink-0 items-center gap-1">
+              <span className="px-2 text-xs text-muted-foreground">Remove selected from library?</span>
+              <Button size="sm" variant="destructive" onClick={() => { setRemoveConfirm(false); onRemoveSelection(); }}>Remove</Button>
+              <Button size="sm" variant="ghost" onClick={() => setRemoveConfirm(false)}>Cancel</Button>
+            </div>
           ) : (
-            <button
-              type="button"
-              className="action-bar-btn danger"
-              onClick={() => setRemoveConfirm(true)}
-              title="Remove selected documents from library catalog (does not delete files)"
-            >
-              Remove from library
-            </button>
+            <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setRemoveConfirm(true)}>Remove from library</Button>
           )}
-
-          <button
-            type="button"
-            className="action-bar-close-btn"
-            onClick={() => { setRemoveConfirm(false); onClearSelection(); }}
-            title="Clear selection (Esc)"
-            aria-label="Clear selection"
-          >
-            ✕
-          </button>
         </div>
+        <Button size="icon-sm" variant="ghost" onClick={() => { setRemoveConfirm(false); onClearSelection(); }} aria-label="Clear selection" title="Clear selection (Esc)">×</Button>
       </header>
     );
   }
 
-  // Normal Library Toolbar
-  function renderBreadcrumbOrTitle() {
-    if (activeScope.kind === "all") {
-      return <h1 className="scope-title">All</h1>;
-    }
+  function renderScopeTitle() {
+    if (activeScope.kind === "all") return <h1 className="truncate text-sm font-semibold">All Documents</h1>;
     if (activeScope.kind === "collection") {
-      return <h1 className="scope-title">Collection</h1>;
+      const collection = collections.find((item) => item.id === activeScope.collectionId);
+      return <h1 className="truncate text-sm font-semibold">{collection?.name ?? "Collection"}</h1>;
     }
-    if (activeScope.kind === "search") {
-      return <h1 className="scope-title">Search: “{activeScope.query}”</h1>;
-    }
+    if (activeScope.kind === "search") return <h1 className="truncate text-sm font-semibold">Search: “{activeScope.query}”</h1>;
     if (activeScope.kind === "root") {
-      const root = roots.find((r) => r.id === activeScope.rootId);
-      return <h1 className="scope-title">{root?.label ?? "Folder"}</h1>;
+      const root = roots.find((item) => item.id === activeScope.rootId);
+      return <h1 className="truncate text-sm font-semibold">{root?.label ?? "Folder"}</h1>;
     }
-    if (activeScope.kind === "folder") {
-      const root = roots.find((r) => r.id === activeScope.rootId);
-      const rootLabel = root?.label ?? "Folder";
-      const parts = activeScope.relativePath.split("/");
 
-      return (
-        <nav className="library-breadcrumb" aria-label="Breadcrumb location">
-          <button
-            type="button"
-            className="breadcrumb-segment-btn"
-            onClick={() => onSelectScope({ kind: "root", rootId: activeScope.rootId })}
-          >
-            {rootLabel}
-          </button>
-          {parts.map((part, index) => {
-            const isLast = index === parts.length - 1;
-            const subPath = parts.slice(0, index + 1).join("/");
-            return (
-              <span key={subPath} className="breadcrumb-wrapper">
-                <span className="breadcrumb-separator" aria-hidden="true">
-                  ›
-                </span>
-                {isLast ? (
-                  <span className="breadcrumb-current" aria-current="location">
-                    {part}
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className="breadcrumb-segment-btn"
-                    onClick={() =>
-                      onSelectScope({
-                        kind: "folder",
-                        rootId: activeScope.rootId,
-                        relativePath: subPath,
-                      })
-                    }
-                  >
-                    {part}
-                  </button>
-                )}
-              </span>
-            );
-          })}
-        </nav>
-      );
-    }
-    return <h1 className="scope-title">Library</h1>;
+    const root = roots.find((item) => item.id === activeScope.rootId);
+    const parts = activeScope.relativePath.split("/");
+    return (
+      <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-sm" aria-label="Breadcrumb location">
+        <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "root", rootId: activeScope.rootId })}>{root?.label ?? "Folder"}</button>
+        {parts.map((part, index) => {
+          const subPath = parts.slice(0, index + 1).join("/");
+          const isLast = index === parts.length - 1;
+          return (
+            <span key={subPath} className="flex min-w-0 items-center gap-1">
+              <ChevronDownIcon className="size-3 -rotate-90 shrink-0 text-muted-foreground" aria-hidden="true" />
+              {isLast ? <span className="truncate font-medium" aria-current="location">{part}</span> : (
+                <button type="button" className="truncate text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "folder", rootId: activeScope.rootId, relativePath: subPath })}>{part}</button>
+              )}
+            </span>
+          );
+        })}
+      </nav>
+    );
   }
 
+  const scopeOptions = getSearchScopeOptions(lastContextScopeRef.current, roots, collections);
+  const selectedScopeKey = scopeKey(activeScope);
+
   return (
-    <header className="library-toolbar" role="toolbar" aria-label="Library toolbar">
-      <div className="toolbar-left-group">
-        <button
-          type="button"
-          className={`sidebar-toggle-btn ${sidebarCollapsed ? "collapsed" : ""}`}
-          onClick={onToggleSidebar}
-          title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
-          aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
-        >
-          <PanelLeftIcon />
-        </button>
-        <div className="toolbar-scope-display">{renderBreadcrumbOrTitle()}</div>
+    <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 border-b border-border bg-background px-4 py-2" role="toolbar" aria-label="Library toolbar">
+      <div className="flex min-w-0 items-center gap-2">
+        <SidebarTrigger className="size-8 shrink-0" aria-label="Toggle sidebar" />
+        <div className="min-w-0">{renderScopeTitle()}</div>
       </div>
 
-      <div className="toolbar-right-group">
-        <div className="toolbar-search-wrap">
-          <span className="search-icon" aria-hidden="true">
-            <SearchIcon />
-          </span>
-          <input
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 max-sm:basis-full max-sm:justify-start">
+        <div className="flex h-9 min-w-[150px] max-w-md flex-1 items-center gap-1 rounded-md border border-input bg-background px-2 focus-within:ring-2 focus-within:ring-ring/50">
+          <SearchIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {searchQuery && (
+            <DropdownMenu open={isScopePickerOpen} onOpenChange={setIsScopePickerOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="secondary" className="h-7 max-w-36 shrink-0 gap-1 px-2 text-xs" aria-label={`Search scope: ${getScopeLabel(activeScope, roots, collections)}`}>
+                  <span className="truncate">{getScopeLabel(activeScope, roots, collections)}</span>
+                  <ChevronDownIcon className="size-3 shrink-0" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>Search scope</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioGroup
+                  value={selectedScopeKey}
+                  onValueChange={(value) => {
+                    const option = scopeOptions.find(({ scope }) => scopeKey(scope) === value);
+                    if (option) onSelectScope(option.scope);
+                  }}
+                >
+                  {scopeOptions.map(({ scope, label }) => (
+                    <DropdownMenuRadioItem key={scopeKey(scope)} value={scopeKey(scope)}>
+                      <span className="truncate">{label}</span>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          <Input
             ref={searchInputRef}
-            className="toolbar-search-input"
+            className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
             placeholder={activeScope.kind === "all" ? "Search library…" : `Search in ${getScopeLabel(activeScope, roots, collections)}…`}
             value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
+            onChange={(event) => onSearchChange(event.target.value)}
             aria-label="Search library"
           />
-          {searchQuery && (
-            <div className="search-scope-picker-wrap">
-              <button
-                type="button"
-                className={`search-scope-pill ${isScopePickerOpen ? "active" : ""}`}
-                onClick={() => setIsScopePickerOpen((v) => !v)}
-                title="Change search scope"
-                aria-expanded={isScopePickerOpen}
-                aria-label={`Search scope: ${getScopeLabel(activeScope, roots, collections)}`}
-              >
-                <span className="scope-pill-label">Scope: {getScopeLabel(activeScope, roots, collections)}</span>
-                <span className="scope-pill-chevron" aria-hidden="true">{isScopePickerOpen ? "▴" : "▾"}</span>
-              </button>
-
-              {isScopePickerOpen && (
-                <>
-                  <div
-                    className="scope-picker-backdrop"
-                    onClick={() => setIsScopePickerOpen(false)}
-                    aria-hidden="true"
-                  />
-                  <div
-                    className="search-scope-menu"
-                    role="group"
-                    aria-label="Search scope options"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="scope-menu-header">Search Scope</div>
-                    {getSearchScopeOptions(lastContextScopeRef.current, roots, collections).map(
-                      ({ scope, label }) => {
-                        const selected = isSameScope(activeScope, scope);
-                        const key =
-                          scope.kind === "all"
-                            ? "all"
-                            : scope.kind === "root"
-                              ? `root:${scope.rootId}`
-                              : scope.kind === "folder"
-                                ? `folder:${scope.rootId}:${scope.relativePath}`
-                                : `collection:${scope.collectionId}`;
-                        return (
-                          <button
-                            key={key}
-                            type="button"
-                            aria-pressed={selected}
-                            className={`scope-menu-item ${selected ? "selected" : ""}`}
-                            onClick={() => {
-                              onSelectScope(scope);
-                              setIsScopePickerOpen(false);
-                            }}
-                          >
-                            <span className="scope-menu-text">{label}</span>
-                            {selected && <span className="scope-check" aria-hidden="true">✓</span>}
-                          </button>
-                        );
-                      }
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-          {!searchQuery && (
-            <kbd className="search-shortcut-hint" aria-hidden="true" title="Press / to search">
-              /
-            </kbd>
-          )}
-          {searchQuery && (
-            <button
-              type="button"
-              className="search-clear-btn"
-              onClick={() => {
-                onSearchChange("");
-                searchInputRef.current?.focus();
-              }}
-              aria-label="Clear search query"
-              title="Clear search (Esc)"
-            >
-              ✕
-            </button>
-          )}
+          {!searchQuery && <kbd className="shrink-0 rounded border border-border px-1.5 text-[10px] text-muted-foreground">/</kbd>}
+          {searchQuery && <Button size="icon-xs" variant="ghost" className="shrink-0" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} aria-label="Clear search query" title="Clear search (Esc)">×</Button>}
         </div>
 
-        <div className="view-mode-toggle-group" role="radiogroup" aria-label="Presentation mode">
-          <button
-            type="button"
-            role="radio"
-            aria-checked={viewMode === "grid"}
-            className={`view-mode-btn ${viewMode === "grid" ? "selected" : ""}`}
-            onClick={() => onViewModeChange("grid")}
-            title="Grid view"
-            aria-label="Grid view"
-          >
-            <GridIcon />
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={viewMode === "list"}
-            className={`view-mode-btn ${viewMode === "list" ? "selected" : ""}`}
-            onClick={() => onViewModeChange("list")}
-            title="List view"
-            aria-label="List view"
-          >
-            <ListIcon />
-          </button>
+        {onSortChange && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="shrink-0 gap-2" aria-label={`Sort documents: ${SORT_LABEL[sortBy] ?? "Recent"}`}>
+                <span className="text-muted-foreground">Sort:</span> {SORT_LABEL[sortBy] ?? "Recent"}
+                <ChevronDownIcon className="size-3 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {SORT_OPTIONS.map(({ value, label }) => (
+                <DropdownMenuItem key={value} onClick={() => onSortChange(value)}>
+                  {label}
+                  {sortBy === value && <CheckIcon className="ml-auto size-4" />}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+
+        <Separator orientation="vertical" className="h-6 max-sm:hidden" />
+        <div className="flex shrink-0 items-center rounded-md border border-border p-0.5" role="radiogroup" aria-label="Presentation mode">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="icon-sm" variant={viewMode === "grid" ? "secondary" : "ghost"} onClick={() => onViewModeChange("grid")} role="radio" aria-checked={viewMode === "grid"} aria-label="Grid view">
+                <GridIcon className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Grid view</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="icon-sm" variant={viewMode === "list" ? "secondary" : "ghost"} onClick={() => onViewModeChange("list")} role="radio" aria-checked={viewMode === "list"} aria-label="List view">
+                <ListIcon className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>List view</TooltipContent>
+          </Tooltip>
         </div>
 
         {onOpenAppMenu && (
-          <button
-            type="button"
-            className="app-menu-btn"
-            onClick={onOpenAppMenu}
-            title="Clio menu"
-            aria-label="App menu"
-          >
-            <MoreHorizontalIcon />
-          </button>
+          <Button size="icon-sm" variant="ghost" className="shrink-0" onClick={onOpenAppMenu} title="Clio menu" aria-label="App menu">
+            <MoreHorizontalIcon className="size-4" />
+          </Button>
         )}
       </div>
     </header>

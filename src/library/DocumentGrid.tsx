@@ -1,6 +1,8 @@
 import type { StoredDocument } from "../storage/domain";
 import { getDocumentDisplayTitle } from "../storage/domain";
-import { CheckIcon, MoreHorizontalIcon } from "./LibraryIcons";
+import { Checkbox } from "../components/ui/checkbox";
+import { MoreHorizontalIcon } from "./LibraryIcons";
+import { Button } from "../components/ui/button";
 
 export interface DocumentGridProps {
   documents: StoredDocument[];
@@ -20,7 +22,7 @@ export function DocumentGrid({
   renderThumbnail,
 }: DocumentGridProps) {
   return (
-    <div className="document-grid" role="list" aria-label="Documents">
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-x-6 gap-y-7 max-sm:grid-cols-[repeat(auto-fill,minmax(140px,1fr))] max-sm:gap-x-4 max-sm:gap-y-6" role="list" aria-label="Documents">
       {documents.map((doc) => {
         const isSelected = selectedDocIds.has(doc.record.id);
         const displayTitle = getDocumentDisplayTitle(doc.record);
@@ -28,11 +30,11 @@ export function DocumentGrid({
         const authorStr = authors.length > 0 ? authors.join(", ") : null;
         let progressPercent: number | null = null;
         if (doc.readingState?.position) {
-          const pos = doc.readingState.position;
-          if (pos.kind === "text-scroll") {
-            progressPercent = Math.round(pos.progression * 100);
-          } else if (pos.kind === "epub-cfi" && typeof pos.progression === "number") {
-            progressPercent = Math.round(pos.progression * 100);
+          const position = doc.readingState.position;
+          if (position.kind === "text-scroll") {
+            progressPercent = Math.round(position.progression * 100);
+          } else if (position.kind === "epub-cfi" && typeof position.progression === "number") {
+            progressPercent = Math.round(position.progression * 100);
           }
         }
 
@@ -40,97 +42,82 @@ export function DocumentGrid({
           <article
             key={doc.record.id}
             id={`doc-card-${doc.record.id}`}
-            className={`doc-grid-card ${isSelected ? "selected" : ""}`}
+            className="group min-w-0 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            data-selected={isSelected || undefined}
             role="listitem"
             tabIndex={0}
-            onClick={(e) => {
-              if (e.metaKey || e.ctrlKey) {
-                e.preventDefault();
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey) {
+                event.preventDefault();
                 onToggleSelect(doc.record.id, false, true);
-              } else if (e.shiftKey) {
-                e.preventDefault();
+              } else if (event.shiftKey) {
+                event.preventDefault();
                 onToggleSelect(doc.record.id, true, false);
               } else {
                 onOpenDocument(doc);
               }
             }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
                 onOpenDocument(doc);
-              } else if (e.key === " ") {
-                e.preventDefault();
-                onToggleSelect(doc.record.id, e.shiftKey, e.metaKey || e.ctrlKey);
+              } else if (event.key === " ") {
+                event.preventDefault();
+                onToggleSelect(doc.record.id, event.shiftKey, event.metaKey || event.ctrlKey);
               }
             }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onOpenContextMenu(doc, e);
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenContextMenu(doc, event);
             }}
           >
-            {/* Thumbnail wrap */}
-            <div className="doc-grid-cover-wrap">
+            <div className="relative aspect-[2/3] overflow-hidden bg-muted">
               {renderThumbnail(doc)}
 
-              {/* Checkbox (revealed on hover/focus, or always visible when selected) */}
-              <button
-                type="button"
-                className={`grid-select-checkbox ${isSelected ? "checked" : ""}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleSelect(doc.record.id, e.shiftKey, true);
-                }}
-                title={isSelected ? "Deselect document" : "Select document"}
-                aria-label={isSelected ? "Deselect document" : "Select document"}
+              <div
+                className={`absolute left-2 top-2 z-10 transition-opacity ${isSelected ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"}`}
+                onClick={(event) => event.stopPropagation()}
               >
-                {isSelected && <CheckIcon />}
-              </button>
+                <Checkbox
+                  checked={isSelected}
+                  onClick={(event) => onToggleSelect(doc.record.id, event.shiftKey, true)}
+                  aria-label={isSelected ? `Deselect ${displayTitle}` : `Select ${displayTitle}`}
+                  title={isSelected ? "Deselect document" : "Select document"}
+                  className="border-foreground/60 bg-background/90 shadow-sm"
+                />
+              </div>
 
-              {/* Reading progress: discreet bar at bottom of cover only when relevant */}
+              <span className={`absolute right-2 top-2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[10px] font-medium text-foreground transition-opacity ${isSelected ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}>
+                {doc.record.format.toUpperCase()}
+              </span>
+
               {progressPercent !== null && progressPercent > 0 && (
-                <div
-                  className="book-cover-progress"
-                  aria-hidden="true"
-                  title={`${progressPercent}% completed`}
-                >
-                  <div
-                    className="book-cover-progress-bar"
-                    style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                  />
+                <div className="absolute inset-x-0 bottom-0 h-1 bg-background/60" aria-hidden="true" title={`${progressPercent}% completed`}>
+                  <div className="h-full bg-foreground" style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }} />
                 </div>
               )}
 
-              {/* Document Ellipsis menu button at bottom-right of cover */}
-              <button
+              <Button
                 type="button"
-                className="grid-ellipsis-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenContextMenu(doc, e);
+                size="icon-sm"
+                variant="secondary"
+                className={`absolute bottom-2 right-2 z-10 bg-background/90 shadow-sm transition-opacity ${isSelected ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenContextMenu(doc, event);
                 }}
                 title="Document actions"
-                aria-label={`Actions for ${doc.record.name}`}
+                aria-label={`Actions for ${displayTitle}`}
               >
-                <MoreHorizontalIcon />
-              </button>
+                <MoreHorizontalIcon className="size-4" />
+              </Button>
             </div>
 
-            {/* Document Info */}
-            <div className="doc-grid-info">
-              <strong className="doc-grid-title" title={displayTitle}>
-                {displayTitle}
-              </strong>
-              {authorStr && (
-                <span className="doc-grid-author" title={authorStr}>
-                  {authorStr}
-                </span>
-              )}
-              {doc.availability === "missing" && (
-                <div className="doc-grid-status-line">
-                  <span className="doc-missing-pill">Missing</span>
-                </div>
-              )}
+            <div className="pt-2">
+              <strong className="block truncate text-[13px] font-medium leading-5" title={displayTitle}>{displayTitle}</strong>
+              {authorStr && <span className="mt-0.5 block truncate text-xs text-muted-foreground" title={authorStr}>{authorStr}</span>}
+              {doc.availability === "missing" && <span className="mt-1 block text-xs text-muted-foreground">Missing</span>}
             </div>
           </article>
         );

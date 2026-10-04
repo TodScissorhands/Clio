@@ -38,8 +38,8 @@ Storage Core preserves this tokenized opening boundary while separating durable 
 
 EPUB resources are loaded from the selected ZIP archive through an allowlisted entry map. EPUB documents receive a restrictive CSP with scripts, network connections, frames, objects, and forms disabled; external links are blocked. Sanitization and CSP remain defense-in-depth because documents are untrusted input.
 
-Final packaged/native validation is classified B: the release executable compiled and launched on WebKitGTK 2.52.6, but the packaged hostile EPUB could not be driven or inspected. Blob-origin Tauri ACL/native command reachability therefore remains unproven; this document does not claim renderer isolation.
+Final packaged/native validation is incomplete: the release executable compiled and launched, but the packaged hostile EPUB could not be driven or inspected. Blob-origin Tauri ACL/native command reachability therefore remains unproven; the explicit CSP is defense-in-depth, not proof of renderer isolation.
 
 ## Deferred work
 
-SQLite catalog schema, explicit desktop roots/scans, minimal Library UI, and durable reading state are Storage Core scope. Bookmarks, annotations, advanced result/highlight UX, streamed/large-file loading, mobile providers, cloud sources, and conversion redesign require separate follow-up work.
+PDF page text-layer locator persistence and highlight rendering, filesystem watchers, mobile providers, cloud sources, and conversion redesign remain separate follow-up work. Bookmark/annotation storage, reader panels, annotation editing, and EPUB highlight rendering are implemented.

@@ -260,6 +260,10 @@ foliate-view {
   color: inherit;
 }
 
+.reader-shell.theme-dark foliate-view::part(filter) {
+  filter: invert(1) hue-rotate(180deg);
+}
+
 .pdf-engine {
   align-items: flex-start;
   justify-content: center;

@@ -79,20 +79,23 @@
   - **Remove From Collection Command**: Added `remove-from-collection` (group 3) in `src/commands/documentCommands.ts` gated by active collection scope, callback presence, and document membership; wired through `DocumentContextMenu` and `LibraryView` with automatic selection clearing.
   - **Text Scroll Started State Regression**: Verified opened text documents at `progression: 0` remain identified as started when `lastOpenedAt` is present.
   - **Regression & Unit Tests**: Added 14 unit tests in `src/library/libraryD7.test.ts` covering author/added sorting, tiebreaks, command gating/execution, and text-scroll started state.
-## Current work
+- **Library visual refinement**: Uses locally vendored shadcn/ui source components and Tailwind CSS 4 (`@tailwindcss/vite`) for the sidebar-11 folder tree, file-manager grid/list mechanics, and Play Books-inspired portrait covers. Clio theme tokens and App.css remain for non-Library surfaces; Library commands, navigation, selection, search, collections, and filesystem semantics are preserved. No `shadcn` CLI/runtime package is required.
 
-Milestone 11, D6 Reader Experience & Reading State, and D7 Library Sorting & Collection Workflows are complete. D7 enhances document discoverability through author and added sorting, grid sort toolbar, dedicated list columns, collection creation assignment, and contextual collection removal commands.
+## Current implementation
+
+Milestone 11, D6 Reader Experience & Reading State, D7 Library Sorting & Collection Workflows, and the Library visual refinement are complete. The visual pass refined the sidebar, bookshelf-style grid, and dense metadata table without changing Library behavior or the Reader.
+
 - `SourceRef` records source coordinates separately from `StorageLocator`, which is a runtime access capability.
-- SQLite stores metadata, source coordinates, reading state, bookmarks, and annotation records; it never stores document bytes or reader tokens.
+- SQLite stores catalog metadata, source coordinates, collections, reading state, bookmarks, and annotations; it never stores document bytes or reader tokens.
 - PDF.js is the PDF engine; foliate-js is the EPUB engine.
 - Readium is reference-only and not a dependency.
 - Reader shell owns common chrome; engines own parsing/rendering/pagination/resource loading.
-- EPUB content is untrusted and keeps restrictive resource/security boundaries.
+- EPUB content is untrusted and keeps restrictive resource/security boundaries; packaged hostile-EPUB isolation remains unproven.
 - Conversion remains a capability and must not define the core architecture.
 - Platform-specific storage behavior belongs behind native/platform boundaries.
 
 ## Explicitly deferred
-Milestone 8C PDF page extraction / rotation, PDF TextLayer (durable PDF locators & PDF highlight rendering), full annotation manager/tagging/export, collections, cover caching, watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
+PDF page extraction / rotation, durable PDF text locators and highlight rendering, a full annotation manager/tagging/export, filesystem watchers, mobile providers, cloud sync, and conversion redesign remain deferred. Collections, annotation editing, EPUB highlight rendering, and cover thumbnails are implemented. Storage Core schema and command surface must be updated from the Rust implementation, not treated as a promise of unimplemented APIs.
 
 ## Blocked / requires triage
 
@@ -101,8 +104,10 @@ The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains 
 ## Recently verified
 Milestone 8B (Safe PDF Merge): `bun test` 103/103 pass (7 files; tests covering merge capability, multi-source job model, deterministic input ordering, and minimum-2 validation); `bun run build` clean (tsc + Vite); `cargo test` 16/16 pass (including two-file and multi-file merge planning, input count rejection, non-PDF rejection, duplicate rejection, input/output collision rejection, and integration execution with actual `pdfunite` on deterministic PDFs); `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-D5 Library/Reader refinements: `bun test` 262/262 pass; `bun run build` passes; `cargo test --manifest-path src-tauri/Cargo.toml` 63/63 pass; `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` pass; `git diff --check` passes. Browser smoke passed at 1200×800 and 390×844. Native Tauri QA was not performed: no `tauri-driver`, WebDriver/WDIO setup, Xvfb/`xvfb-run`, Weston, `geckodriver`, or `chromedriver` was available. Installed Cage alone was insufficient to provide isolated native WebDriver QA. Browser/Vite smoke is not equivalent to native Tauri QA.
+D5 Library/Reader refinements: `bun test` 262/262 pass; `bun run build` passes; `cargo test --manifest-path src-tauri/Cargo.toml` 63/63 pass; `cargo fmt --check`, Clippy with `-D warnings`, and `git diff --check` pass. Browser smoke passed at 1200×800 and 390×844. Native Tauri E2E was not run; browser/Vite smoke is not equivalent to native Tauri QA.
 
 D6 Reader Experience & Reading State: Rust `ReadingPosition` JSON tags now match the frontend kebab-case union; PDF progress round-trips through the existing SQLite progression column, and only terminal-page progress marks PDFs finished. TXT/Markdown position is recorded on first open without treating non-scrollable files as complete; concurrent state writes are serialized, and Back waits for the flush before returning to the Library. Text/Markdown Display now exposes the implemented zoom range. Async document/search results are guarded against stale epochs. Verification: `bun test` 265/265; `bun run build`; Rust tests 63/63; `cargo fmt --check`; Clippy with `-D warnings`; `git diff --check`. Hidden-browser reader smoke used a temporary in-memory Tauri bridge at 1200×800 and 390×844 with coarse-pointer emulation; text zoom, Find, scroll persistence, return-to-library, reopen restoration, and narrow Navigator were exercised. Native Tauri QA was not performed; browser smoke is not native coverage.
 
 D7 Library Sorting & Collection Workflows: `bun test` 279/279 pass (14 files, including 14 tests in `src/library/libraryD7.test.ts`); `bun run build` clean (tsc + Vite); `cargo test --manifest-path src-tauri/Cargo.toml` 63/63 pass; `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `git diff --check` clean. Native E2E QA deferred to post-D7 release hardening.
+
+Library visual refinement: `bun test` 282/282 pass; `bun run build` passes; `cargo test --manifest-path src-tauri/Cargo.toml` 63/63 pass; `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`, and `git diff --check` pass. Browser smoke ran against Vite with an in-memory Tauri command bridge at 1200×800 and 390×844 in explicit light/dark and system themes; verified sidebar collapse/reopen, nested folders, grid/list, title sorting, search, collection/folder navigation, selection, context menu, and opening a TXT document. Native Tauri E2E was not run.

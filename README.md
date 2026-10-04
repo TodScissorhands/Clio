@@ -1,82 +1,50 @@
 # Clio
 
-Clio is a local-first, offline-capable desktop document library and reader built with Tauri 2, React 19, TypeScript, and Rust.
+Clio is a local-first, offline-capable desktop document library and reader built with Tauri 2, React 19, TypeScript, and Rust. Your filesystem remains authoritative: Clio catalogs and reads documents from user-selected locations without taking ownership of their files or requiring an account or hosted processing service.
 
-The filesystem remains authoritative; Clio indexes and organizes your documents without taking ownership of file bytes or uploading documents to cloud services.
+## Core capabilities
 
-## Interaction Model
+- Organize documents in a local library with folders, collections, search, sorting, and grid or list views.
+- Read PDF, EPUB, TXT, and Markdown documents with navigation, search, themes, and persisted reading position.
+- Inspect metadata and use local conversion and PDF tools where supported.
+- Keep catalog and reading data locally; document bytes stay in their original locations.
 
-Clio follows a document-first product architecture:
-
-```text
-Library → Document → Reading / Contextual Actions
-```
-
-- **Library is Home**: The permanent application landing surface. Features a single contextual toolbar with explicit search scope switching (OD-10), sidebar (Collections & Folders), Continue Reading and Recently Read shelves (OD-5), and full catalog in Grid or List presentation with adaptive metadata (OD-11) and unified single-click opening (OD-6).
-- **Documents as Objects**: Reading is the primary interaction. Clicking a document enters reading mode with persistent reading position restoration. Non-readable formats present a contextual choice between Open externally and Convert and read (OD-4).
-- **Contextual Actions**: Format conversion, PDF merging, page extraction, metadata inspection, and collection assignments are contextual actions available from document ellipsis menus, right-click, or the selection action bar. Missing files can be relinked via Locate file (OD-2). Excluded documents retain their reading state and annotations (OD-1).
-- **Global Application Menu**: Reachable minimal global menu (OD-7) providing appearance themes, external document opening, keyboard shortcuts reference, and application information.
 ## Architecture
 
 ```text
-Clio (src/App.tsx)
-├── Library View (src/library/LibraryView.tsx)
-│   ├── Contextual Toolbar & Selection Action Bar (src/library/LibraryToolbar.tsx)
-│   ├── Sidebar: Collections & Folders (src/library/LibrarySidebar.tsx)
-│   ├── Continue Section: Continue Reading & Recently Read shelves (src/library/ContinueSection.tsx)
-│   ├── Presentation: Grid & List with adaptive metadata (src/library/DocumentGrid.tsx, DocumentList.tsx)
-│   ├── Command Architecture & Context Menus (src/commands/documentCommands.ts, selectionCommands.ts)
-│   └── Contextual Modals: Properties, Conversion, Collections, Unsupported Format, Missing Document, Shortcuts, About
-└── Reader Surface (src/reader/ReaderShell.tsx)
-    ├── Transient compact top bar: ‹ Library · Title · Find · Navigator · Display · ⋯
-    ├── Navigator overlay: Contents / Bookmarks / Notes tabs
-    ├── Find bar: floating overlay, no document reflow
-    ├── Display popover: theme (light/sepia/dark), zoom (PDF), persisted preferences
-    ├── Annotation toolbar: contextual Highlight, Add note, and Copy actions (OD-12)
-    ├── Document menu (⋯): capability-filtered commands from documentCommands, external session support (OD-3)
-    ├── Progress strip: thin bar + page or percentage label
-    ├── PDF Engine (PDF.js)
-    ├── EPUB Engine (foliate-js)
-    └── Plain Text & Markdown Engine (src/reader/TextEngine.tsx)
-        │
-        ├── Tauri IPC (Rust backend: src-tauri/src/)
+React 19 / TypeScript UI (shadcn/ui source components, Tailwind CSS 4)
+        │ Tauri commands
         ▼
-SQLite Catalog & Native Platform Services (src-tauri/src/storage.rs)
-        ├── Documents, Metadata, Thumbnails, Collections
-        ├── Reading State, Bookmarks, Annotations
-        └── Local Poppler & Pandoc tool adapters (src-tauri/src/conversion.rs)
+Rust services ── SQLite metadata catalog
+        │
+        ├── PDF.js / foliate-js / text reader
+        └── local Pandoc / Poppler tools
 ```
 
-## Supported Formats
-
-- **Reading**: PDF, EPUB, TXT, and Markdown (`.md`).
-- **Cataloging & Metadata**: PDF, EPUB, DOCX, ODT, RTF, HTML, Markdown, and TXT.
-- **Contextual Tools**:
-  - Format conversion via Pandoc & Poppler.
-  - PDF Merge via Poppler (`pdfunite`).
-  - PDF Page Extraction via Poppler (`pdfseparate`).
+The filesystem is the source of document bytes. SQLite stores catalog metadata, library roots, collections, reading state, bookmarks, and annotations. See [Storage Architecture](docs/architecture/storage.md), [Reader Architecture](docs/architecture/reader-foundation.md), [Current Status](docs/status/current.md), and the [Roadmap](docs/roadmap.md) for implementation details and boundaries.
 
 ## Development
 
+Install dependencies and start the desktop app:
+
 ```bash
-# Install dependencies
 bun install
-
-# Run desktop development shell
 bun tauri dev
-
-# Run tests
-bun test
-cargo test --manifest-path src-tauri/Cargo.toml
-
-# Production build
-bun run build
-cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-## Security & Local-First Principles
+Run the frontend suite and production build:
 
-- Local SQLite storage (`library.sqlite3`) in application data directory.
-- Direct filesystem containment: user files remain in their original directories.
-- Strict Content Security Policy (CSP) and sandboxing for untrusted EPUB content.
-- Zero network dependencies, telemetry, or remote analytics.
+```bash
+bun test
+bun run build
+```
+
+Run the Rust tests and checks:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+```
+
+See [COMMANDS.md](COMMANDS.md) for additional development commands. Reader hardening findings and their validation limits are recorded in the [investigation](docs/research/reader-hardening-investigation.md).

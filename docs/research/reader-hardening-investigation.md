@@ -4,6 +4,8 @@ Date: 2026-10-01
 
 Scope: reproduce and triage the four primary reader findings without changing application source, dependencies, or lockfiles. Disposable EPUB fixtures, browser probes, and Bun serialization probes were removed after use. No commit or push was performed.
 
+The security findings below describe the pre-hardening source/dependency snapshot investigated on the date above; the implementation and validation status are recorded in sections 9 and 10.
+
 ## 1. Security
 
 ### Finding: EPUB CSP coverage is incomplete
@@ -20,8 +22,8 @@ Scope: reproduce and triage the four primary reader findings without changing ap
 - A standard browser Blob-iframe probe reproduced script execution and parent-window access when CSP was absent. The Clio probe loaded a head-bearing hostile chapter with the restrictive CSP and did not observe script execution. A headless chapter had no injected CSP; its particular test script was malformed by XML escaping, so direct script execution in that exact fixture was not claimed as reproduced.
 - External resource attempts were observed as failed requests in the browser probe. No successful external exfiltration was observed.
 - External anchor handling is implemented: `EpubEngine` cancels foliate's `external-link` event.
-- `src-tauri/tauri.conf.json` sets the window CSP to `null`.
-- Tauri injects `__TAURI_INTERNALS__` into the main frame, not automatically into child frames. The exact Blob-frame origin and Tauri ACL attribution under the shipped Linux WebKitGTK runtime were not reproduced.
+- At the investigated snapshot, `src-tauri/tauri.conf.json` had no window CSP configured.
+- Tauri injects `__TAURI_INTERNALS__` into the main frame, not automatically into child frames. The exact Blob-frame origin and Tauri ACL attribution were not reproduced in the packaged runtime.
 
 **Actual risk**
 
@@ -273,9 +275,8 @@ JSON number-array byte IPC remains in place; its large-file amplification is def
 
 Result: **B — partially verified with a documented residual limitation.**
 
-- `bun run tauri build` compiled the release Tauri executable successfully and produced the native release binary. Linux `.deb` and `.rpm` bundles were also produced; AppImage bundling failed only while downloading the external AppImage bootstrap artifact.
-- The release executable launched under the host's actual WebKitGTK 2.52.6 runtime and displayed the Clio shell. The configured CSP was present in `tauri info`.
-- The packaged window could not be driven or attached to through an available WebKit inspector/CDP endpoint in this environment. Therefore no hostile EPUB was opened in the packaged runtime, and script execution, external-request blocking, Blob-frame origin, or native-command reachability were not directly observed there.
-- The earlier browser/DOM probes remain non-native evidence only. They do not prove that an EPUB frame cannot reach `window.__TAURI_INTERNALS__` or invoke privileged Tauri commands under this WebKitGTK build.
+- The release executable compiled and launched, and the configured CSP was present in Tauri configuration.
+- The packaged window could not be driven or inspected through an available native inspection interface. No hostile EPUB was opened in that runtime, so script execution, external-request blocking, Blob-frame origin, and native-command reachability were not directly observed there.
+- The earlier browser/DOM probes remain non-native evidence only. They do not prove that an EPUB frame cannot reach `window.__TAURI_INTERNALS__` or invoke privileged Tauri commands in the packaged runtime.
 
 The current boundary is therefore: sanitized EPUB resources and explicit CSP provide defense-in-depth; reader byte access uses expiring canonicalized native tokens; the exact Blob-origin-to-Tauri ACL boundary remains unproven. An isolated renderer/resource proxy remains the required stronger boundary before treating arbitrary hostile EPUBs as fully isolated.

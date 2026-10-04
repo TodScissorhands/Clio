@@ -12,6 +12,7 @@ import {
 } from "./libraryFilter";
 import { LibraryToolbar } from "./LibraryToolbar";
 import { LibrarySidebar } from "./LibrarySidebar";
+import { SidebarInset, SidebarProvider } from "../components/ui/sidebar";
 import { ContinueSection } from "./ContinueSection";
 import { DocumentGrid } from "./DocumentGrid";
 import { DocumentList } from "./DocumentList";
@@ -60,36 +61,16 @@ export interface LibraryViewProps {
   onOpenFile?: () => void;
 }
 
-const SORT_BAR_OPTIONS: { value: SortOption; label: string }[] = [
-  { value: "recent", label: "Recent" },
-  { value: "name-asc", label: "A → Z" },
-  { value: "name-desc", label: "Z → A" },
-  { value: "author", label: "Author" },
-  { value: "added", label: "Added" },
-  { value: "format", label: "Format" },
-];
-
-
-function getDeterministicHue(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash) % 360;
-}
 
 function DocCoverThumbnail({
   documentId,
   format,
   title,
-  author,
   hasThumbnail,
 }: {
   documentId: string;
   format: string;
   title: string;
-  author?: string | null;
   hasThumbnail: boolean;
 }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
@@ -115,43 +96,23 @@ function DocCoverThumbnail({
 
   if (hasThumbnail && dataUrl && !failed) {
     return (
-      <div className="doc-thumbnail-wrap">
-        <img
-          src={dataUrl}
-          alt={`Cover for ${title}`}
-          className="doc-cover-image"
-          loading="lazy"
-        />
-      </div>
+      <img
+        src={dataUrl}
+        alt={`Cover for ${title}`}
+        className="h-full w-full object-cover"
+        loading="lazy"
+      />
     );
   }
 
-  const hue = getDeterministicHue(title || documentId);
-
   return (
     <div
-      className={`doc-thumbnail-wrap placeholder typographic format-${format}`}
-      style={{
-        ["--jacket-hue" as string]: `${hue}deg`,
-      }}
+      className="flex h-full w-full items-center justify-center bg-muted text-foreground"
       aria-hidden="true"
     >
-      <div className="placeholder-top-bar">
-        <span className="placeholder-monogram">
-          {getDocumentMonogram(title, format)}
-        </span>
-        <span className="placeholder-format-tag">{format.toUpperCase()}</span>
-      </div>
-      <div className="placeholder-center-wrap">
-        <div className="placeholder-cover-title" title={title}>
-          {title}
-        </div>
-        {author && (
-          <div className="placeholder-cover-author" title={author}>
-            {author}
-          </div>
-        )}
-      </div>
+      <span className="font-serif text-4xl font-semibold tracking-wide text-muted-foreground">
+        {getDocumentMonogram(title, format)}
+      </span>
     </div>
   );
 }
@@ -390,221 +351,181 @@ export function LibraryView({
   );
 
   function renderThumbnail(doc: StoredDocument): ReactNode {
-    const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
     return (
       <DocCoverThumbnail
         documentId={doc.record.id}
         format={doc.record.format}
         title={getDocumentDisplayTitle(doc.record)}
-        author={authors[0] ?? null}
         hasThumbnail={Boolean(doc.record.metadata?.thumbnailPath)}
       />
     );
   }
 
+  const showContinueShelf = activeScope.kind === "all" && !searchQuery.trim();
+
   return (
-    <div className="library-shell" aria-label="Library">
-      {/* Status Message Banner */}
-      {message && (
-        <div className="library-alert info" role="status">
-          <span className="library-alert-icon">ℹ</span>
-          <span className="library-alert-text">{message}</span>
-          {onDismissMessage && (
-            <button
-              type="button"
-              className="alert-dismiss-btn"
-              onClick={onDismissMessage}
-              aria-label="Dismiss message"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Actionable Error Alert Banner */}
-      {error && (
-        <div className="library-alert error" role="alert">
-          <span className="library-alert-icon">⚠</span>
-          <span className="library-alert-text">{error}</span>
-          {onDismissError && (
-            <button
-              type="button"
-              className="alert-dismiss-btn"
-              onClick={onDismissError}
-              aria-label="Dismiss error"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Single Contextual Toolbar Row */}
-      <LibraryToolbar
-        activeScope={activeScope}
+    <SidebarProvider
+      open={!sidebarCollapsed}
+      onOpenChange={(open) => setSidebarCollapsed(!open)}
+      className="h-svh min-h-0 overflow-hidden bg-background text-foreground"
+    >
+      <LibrarySidebar
         roots={roots}
+        documents={documents}
         collections={collections}
-        searchQuery={searchQuery}
-        onSearchChange={onSearchChange}
-        viewMode={viewMode}
-        onViewModeChange={onViewModeChange}
-        sidebarCollapsed={sidebarCollapsed}
-        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        activeScope={activeScope}
         onSelectScope={onSelectScope}
-        selectedDocuments={selectedDocuments}
-        onClearSelection={handleClearSelection}
-        onOpenSelection={() => {
-          if (selectedDocuments.length === 1 && selectedDocuments[0]) {
-            handleOpenDoc(selectedDocuments[0]);
-          }
-        }}
-        onAddToCollection={() => setIsAddToCollectionOpen(true)}
-        onConvertSelection={() => {
-          if (selectedDocuments.length === 1) {
-            setConversionModal({ mode: "convert", sourceDoc: selectedDocuments[0] });
-          }
-        }}
-        onExtractPagesSelection={() => {
-          if (selectedDocuments.length === 1) {
-            setConversionModal({ mode: "extract", sourceDoc: selectedDocuments[0] });
-          }
-        }}
-        onMergeSelection={() => {
-          if (selectedDocuments.length >= 2) {
-            setConversionModal({ mode: "merge", mergeDocs: selectedDocuments });
-          }
-        }}
-        onPropertiesSelection={() => {
-          if (selectedDocuments.length === 1 && selectedDocuments[0]) {
-            setPropertiesDoc(selectedDocuments[0]);
-          }
-        }}
-        onLocateSelection={() => {
-          if (selectedDocuments.length === 1 && selectedDocuments[0] && onLocateDocument) {
-            void onLocateDocument(selectedDocuments[0]);
-          }
-        }}
-        onRemoveSelection={() => {
-          const ids = selectedDocuments.map((d) => d.record.id);
-          if (ids.length > 0) {
-            void onRemoveFromLibrary(ids);
-            handleClearSelection();
-          }
-        }}
-        onOpenAppMenu={onOpenAppMenu}
+        onAddRoot={onAddRoot}
+        onScanRoot={onScanRoot}
+        onRemoveRoot={onRemoveRoot}
+        onCreateCollection={onCreateCollection}
+        onRenameCollection={onRenameCollection}
+        onDeleteCollection={onDeleteCollection}
       />
-
-      {/* Main Two-Column Layout */}
-      <div className="library-layout">
-        <LibrarySidebar
-          roots={roots}
-          documents={documents}
-          collections={collections}
-          activeScope={activeScope}
-          collapsed={sidebarCollapsed}
-          onSelectScope={onSelectScope}
-          onAddRoot={onAddRoot}
-          onScanRoot={onScanRoot}
-          onRemoveRoot={onRemoveRoot}
-          onCreateCollection={onCreateCollection}
-          onRenameCollection={onRenameCollection}
-          onDeleteCollection={onDeleteCollection}
-        />
-
-        <main className="library-main-content">
-          {/* Brand new empty library state */}
-          {roots.length === 0 ? (
-            <div className="library-empty-fresh-state">
-              <h2>Your library is empty</h2>
-              <p>Add a folder or open a document to begin.</p>
-              <div className="empty-state-actions">
-                <button type="button" className="primary-button" onClick={onAddRoot}>
-                  Add folder
-                </button>
-                {onOpenFile && (
-                  <button type="button" className="secondary-button" onClick={onOpenFile}>
-                    Open file
-                  </button>
-                )}
-              </div>
+      <SidebarInset className="h-full min-h-0 min-w-0 overflow-hidden">
+        <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+          {message && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-sm" role="status">
+              <span className="min-w-0 flex-1">{message}</span>
+              {onDismissMessage && (
+                <button type="button" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onDismissMessage} aria-label="Dismiss message">×</button>
+              )}
             </div>
-          ) : (
-            <>
-              {/* 1. Continue Section (Top ~6 items with reading progress, OD-5) */}
-              <ContinueSection
-                documents={continueDocuments}
-                recentDocuments={recentDocuments}
-                onOpenDocument={handleOpenDoc}
-                onOpenContextMenu={handleOpenContextMenu}
-                renderThumbnail={renderThumbnail}
-              />
-
-              {/* 2. Full Document Set for Current Scope */}
-              <div className="library-document-section">
-                {/* Sort bar — shown in grid mode; list mode uses column headers */}
-                {visibleDocuments.length > 0 && viewMode === "grid" && (
-                  <div className="library-sort-bar" role="toolbar" aria-label="Sort documents">
-                    <span className="sort-bar-label">Sort:</span>
-                    {SORT_BAR_OPTIONS.map(({ value, label }) => (
-                      <button
-                        key={value}
-                        type="button"
-                        className={`sort-bar-btn ${sortBy === value ? "active" : ""}`}
-                        onClick={() => onSortChange(value)}
-                        aria-pressed={sortBy === value}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {visibleDocuments.length > 0 ? (
-                  viewMode === "grid" ? (
-                    <DocumentGrid
-                      documents={visibleDocuments}
-                      selectedDocIds={selectedDocIds}
-                      onToggleSelect={handleToggleSelect}
-                      onOpenDocument={handleOpenDoc}
-                      onOpenContextMenu={handleOpenContextMenu}
-                      renderThumbnail={renderThumbnail}
-                    />
-                  ) : (
-                    <DocumentList
-                      documents={visibleDocuments}
-                      roots={roots}
-                      selectedDocIds={selectedDocIds}
-                      sortBy={sortBy}
-                      onSortChange={onSortChange}
-                      onToggleSelect={handleToggleSelect}
-                      onOpenDocument={handleOpenDoc}
-                      onOpenContextMenu={handleOpenContextMenu}
-                      onToggleSelectAll={handleToggleSelectAll}
-                    />
-                  )
-                ) : (
-                  <div className="library-scope-empty-state">
-                    <p className="scope-empty-title">
-                      {searchQuery
-                        ? `No documents matching “${searchQuery}”`
-                        : activeScope.kind === "collection"
-                        ? "This collection is empty"
-                        : "No documents in this view"}
-                    </p>
-                    <p className="scope-empty-subtitle">
-                      {searchQuery
-                        ? "Try searching Entire Library or checking spelling."
-                        : activeScope.kind === "collection"
-                        ? "Right-click documents in your library to add them here."
-                        : "Documents in this folder will appear here."}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </>
           )}
-        </main>
-      </div>
+          {error && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-sm text-foreground" role="alert">
+              <span className="min-w-0 flex-1">{error}</span>
+              {onDismissError && (
+                <button type="button" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onDismissError} aria-label="Dismiss error">×</button>
+              )}
+            </div>
+          )}
+
+          <LibraryToolbar
+            activeScope={activeScope}
+            roots={roots}
+            collections={collections}
+            searchQuery={searchQuery}
+            onSearchChange={onSearchChange}
+            viewMode={viewMode}
+            onViewModeChange={onViewModeChange}
+            sortBy={sortBy}
+            onSortChange={onSortChange}
+            onSelectScope={onSelectScope}
+            selectedDocuments={selectedDocuments}
+            onClearSelection={handleClearSelection}
+            onOpenSelection={() => {
+              if (selectedDocuments.length === 1 && selectedDocuments[0]) {
+                handleOpenDoc(selectedDocuments[0]);
+              }
+            }}
+            onAddToCollection={() => setIsAddToCollectionOpen(true)}
+            onConvertSelection={() => {
+              if (selectedDocuments.length === 1) {
+                setConversionModal({ mode: "convert", sourceDoc: selectedDocuments[0] });
+              }
+            }}
+            onExtractPagesSelection={() => {
+              if (selectedDocuments.length === 1) {
+                setConversionModal({ mode: "extract", sourceDoc: selectedDocuments[0] });
+              }
+            }}
+            onMergeSelection={() => {
+              if (selectedDocuments.length >= 2) {
+                setConversionModal({ mode: "merge", mergeDocs: selectedDocuments });
+              }
+            }}
+            onPropertiesSelection={() => {
+              if (selectedDocuments.length === 1 && selectedDocuments[0]) {
+                setPropertiesDoc(selectedDocuments[0]);
+              }
+            }}
+            onLocateSelection={() => {
+              if (selectedDocuments.length === 1 && selectedDocuments[0] && onLocateDocument) {
+                void onLocateDocument(selectedDocuments[0]);
+              }
+            }}
+            onRemoveSelection={() => {
+              const ids = selectedDocuments.map((d) => d.record.id);
+              if (ids.length > 0) {
+                void onRemoveFromLibrary(ids);
+                handleClearSelection();
+              }
+            }}
+            onOpenAppMenu={onOpenAppMenu}
+          />
+
+          <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5 max-sm:px-4 max-sm:py-4">
+            {roots.length === 0 ? (
+              <section className="mx-auto flex max-w-md flex-col items-center gap-3 py-20 text-center">
+                <h2 className="text-xl font-semibold tracking-tight">Your library is empty</h2>
+                <p className="text-sm text-muted-foreground">Add a folder or open a document to begin.</p>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onAddRoot}>Add folder</button>
+                  {onOpenFile && (
+                    <button type="button" className="inline-flex h-9 items-center justify-center rounded-md border border-input px-4 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onOpenFile}>Open file</button>
+                  )}
+                </div>
+              </section>
+            ) : (
+              <>
+                {showContinueShelf && (
+                  <ContinueSection
+                    documents={continueDocuments}
+                    recentDocuments={recentDocuments}
+                    onOpenDocument={handleOpenDoc}
+                    onOpenContextMenu={handleOpenContextMenu}
+                    renderThumbnail={renderThumbnail}
+                  />
+                )}
+                <section className="mt-6">
+                  {visibleDocuments.length > 0 ? (
+                    viewMode === "grid" ? (
+                      <DocumentGrid
+                        documents={visibleDocuments}
+                        selectedDocIds={selectedDocIds}
+                        onToggleSelect={handleToggleSelect}
+                        onOpenDocument={handleOpenDoc}
+                        onOpenContextMenu={handleOpenContextMenu}
+                        renderThumbnail={renderThumbnail}
+                      />
+                    ) : (
+                      <DocumentList
+                        documents={visibleDocuments}
+                        roots={roots}
+                        selectedDocIds={selectedDocIds}
+                        sortBy={sortBy}
+                        onSortChange={onSortChange}
+                        onToggleSelect={handleToggleSelect}
+                        onOpenDocument={handleOpenDoc}
+                        onOpenContextMenu={handleOpenContextMenu}
+                        onToggleSelectAll={handleToggleSelectAll}
+                      />
+                    )
+                  ) : (
+                    <div className="py-12 text-center">
+                      <p className="font-medium">
+                        {searchQuery
+                          ? `No documents matching “${searchQuery}”`
+                          : activeScope.kind === "collection"
+                            ? "This collection is empty"
+                            : "No documents in this view"}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {searchQuery
+                          ? "Try searching Entire Library or checking spelling."
+                          : activeScope.kind === "collection"
+                            ? "Right-click documents in your library to add them here."
+                            : "Documents in this folder will appear here."}
+                      </p>
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+          </main>
+        </div>
+      </SidebarInset>
 
       {/* Context Menu (Groups 1, 2, 3) */}
       {contextMenu && (
@@ -669,6 +590,6 @@ export function LibraryView({
           onClose={() => setIsAddToCollectionOpen(false)}
         />
       )}
-    </div>
+    </SidebarProvider>
   );
 }
