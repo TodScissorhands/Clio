@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConversionWorkspace } from "./tools/ConversionWorkspace";
@@ -8,6 +8,7 @@ import { UnsupportedFormatModal } from "./library/UnsupportedFormatModal";
 import { MissingDocumentModal } from "./library/MissingDocumentModal";
 import { KeyboardShortcutsModal } from "./library/KeyboardShortcutsModal";
 import { AboutClioModal } from "./library/AboutClioModal";
+import { QuickOpenDialog } from "./library/QuickOpenDialog";
 import {
   addExternalDocumentToLibrary,
   addDocumentToCollection,
@@ -25,6 +26,7 @@ import {
   removeLibraryRoot,
   relinkLibraryDocument,
   renameCollection,
+  scanLibraryFolder,
   scanLibraryRoot,
   TauriDocumentStorage,
   type LibraryScanResult,
@@ -42,12 +44,27 @@ import type {
   LibraryScope,
 } from "./navigation/navigation";
 import { DEFAULT_LIBRARY_SCOPE } from "./navigation/navigation";
+import {
+  createNavigationHistory,
+  isEditableTarget,
+  moveNavigationHistory,
+  pushNavigationHistory,
+  replaceCurrentNavigationEntry,
+} from "./navigation/navigation";
+import { findSpatialNeighbor } from "./navigation/libraryKeyboard";
 import type { SortOption } from "./library/libraryFilter";
 import "./App.css";
 
 const readerFileFilters = [
   { name: "Readable documents", extensions: ["pdf", "epub", "txt", "md", "markdown"] },
 ];
+
+interface LibraryNavigationTiming {
+  key: string;
+  startedAt: number;
+  dispatchAt: number;
+  resolutionMs: number;
+}
 const storage = new TauriDocumentStorage();
 
 type AppTheme = "system" | "light" | "dark";
@@ -58,12 +75,21 @@ function scanMessage(result: LibraryScanResult): string {
 }
 
 function App() {
-  // Navigation Route & History Stack
+  // Navigation Route and session history (Library locations only).
   const [route, setRoute] = useState<AppRoute>({
     kind: "library",
     scope: DEFAULT_LIBRARY_SCOPE,
   });
-  const [historyStack, setHistoryStack] = useState<LibraryRestorationState[]>([]);
+  const [navigationHistory, setNavigationHistory] = useState(() => createNavigationHistory({
+    scope: DEFAULT_LIBRARY_SCOPE,
+    viewMode: "grid",
+    searchQuery: "",
+    selectedDocIds: [],
+    scrollAnchorId: null,
+    sortBy: "recent",
+  }));
+  const searchQueryRef = useRef("");
+  const searchEditSessionRef = useRef(false);
 
   // Active Reader Document
   const [readerDocument, setReaderDocument] = useState<ReaderDocument | null>(null);
@@ -80,6 +106,9 @@ function App() {
   const [missingDoc, setMissingDoc] = useState<StoredDocument | null>(null);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [isQuickOpen, setIsQuickOpen] = useState(false);
+  const [openToolsRequest, setOpenToolsRequest] = useState(0);
+  const [focusSearchRequest, setFocusSearchRequest] = useState(0);
   // Library State
   const [roots, setRoots] = useState<LibraryRoot[]>([]);
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
@@ -90,6 +119,7 @@ function App() {
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<SortOption>("recent");
   const [scrollAnchorId, setScrollAnchorId] = useState<string | null>(null);
+  const libraryNavigationTimingRef = useRef<LibraryNavigationTiming | null>(null);
 
   // Status & Diagnostics
   const [libraryMessage, setLibraryMessage] = useState("");
@@ -98,14 +128,15 @@ function App() {
   const [readerPending, setReaderPending] = useState(false);
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
 
-  // Auto-dismiss transient status messages after 4 seconds (OD-8)
+  // Keep Library feedback transient without moving its content.
   useEffect(() => {
-    if (!libraryMessage) return;
+    if (!libraryMessage && !libraryError) return;
     const timer = setTimeout(() => {
       setLibraryMessage("");
-    }, 4000);
+      setLibraryError("");
+    }, libraryError ? 8000 : 4000);
     return () => clearTimeout(timer);
-  }, [libraryMessage]);
+  }, [libraryMessage, libraryError]);
 
   // App Theme & App Menu
   const [appTheme, setAppTheme] = useState<AppTheme>(() => {
@@ -142,16 +173,139 @@ function App() {
     }
   }, [appTheme]);
 
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
+
+  function captureLibraryState(overrides: Partial<LibraryRestorationState> = {}): LibraryRestorationState {
+    return {
+      scope: libraryScope,
+      viewMode,
+      searchQuery,
+      selectedDocIds: Array.from(selectedDocIds),
+      scrollAnchorId,
+      sortBy,
+      ...overrides,
+    };
+  }
+
+  function pushLibraryLocation(next: LibraryRestorationState) {
+    setNavigationHistory((history) => pushNavigationHistory(history, next));
+  }
+
+  function replaceLibraryLocation(next: LibraryRestorationState) {
+    setNavigationHistory((history) => replaceCurrentNavigationEntry(history, next));
+  }
+
+  function applyLibraryState(next: LibraryRestorationState) {
+    setLibraryScope(next.scope);
+    setViewMode(next.viewMode);
+    setSearchQuery(next.searchQuery);
+    searchQueryRef.current = next.searchQuery;
+    searchEditSessionRef.current = false;
+    setSelectedDocIds(new Set(next.selectedDocIds));
+    setSortBy(next.sortBy);
+    setScrollAnchorId(next.scrollAnchorId);
+    setRoute({ kind: "library", scope: next.scope });
+  }
+
+  function handleLibraryScopeSelect(scope: LibraryScope) {
+    const next = captureLibraryState({ scope });
+    pushLibraryLocation(next);
+    setLibraryScope(scope);
+    setRoute({ kind: "library", scope });
+  }
+
+  function handleSearchQueryChange(query: string) {
+    const previous = searchQueryRef.current;
+    searchQueryRef.current = query;
+    setSearchQuery(query);
+    const next = captureLibraryState({ searchQuery: query });
+    if (!previous && query) {
+      pushLibraryLocation(next);
+      searchEditSessionRef.current = true;
+    } else if (previous && query && searchEditSessionRef.current) {
+      replaceLibraryLocation(next);
+    } else if (previous && query) {
+      pushLibraryLocation(next);
+      searchEditSessionRef.current = true;
+    } else if (previous && !query) {
+      pushLibraryLocation(next);
+      searchEditSessionRef.current = false;
+    }
+  }
+
+  function handleViewModeChange(next: "grid" | "list") {
+    setViewMode(next);
+    replaceLibraryLocation(captureLibraryState({ viewMode: next }));
+  }
+
+  function handleSortChange(next: SortOption) {
+    setSortBy(next);
+    replaceLibraryLocation(captureLibraryState({ sortBy: next }));
+  }
+
+
+  function handleSelectionChange(ids: Set<string>) {
+    setSelectedDocIds(ids);
+    replaceLibraryLocation(captureLibraryState({ selectedDocIds: Array.from(ids) }));
+  }
+  function moveLibraryHistory(direction: -1 | 1, key = direction < 0 ? "Alt+Left" : "Alt+Right") {
+    const startedAt = performance.now();
+    const latest = replaceCurrentNavigationEntry(navigationHistory, captureLibraryState());
+    const moved = moveNavigationHistory(latest, direction);
+    const dispatchAt = performance.now();
+    if (!moved.state) return;
+    libraryNavigationTimingRef.current = {
+      key,
+      startedAt,
+      dispatchAt,
+      resolutionMs: dispatchAt - startedAt,
+    };
+    setNavigationHistory(moved.history);
+    applyLibraryState(moved.state);
+  }
+
+  useLayoutEffect(() => {
+    const timing = libraryNavigationTimingRef.current;
+    if (!timing) return;
+    libraryNavigationTimingRef.current = null;
+    const committedAt = performance.now();
+    requestAnimationFrame(() => {
+      const visibleAt = performance.now();
+      if (import.meta.env.DEV) {
+        console.debug("[library-navigation-timing]", {
+          key: timing.key,
+          resolutionMs: timing.resolutionMs,
+          stateDispatchMs: timing.dispatchAt - timing.startedAt,
+          reactCommitMs: committedAt - timing.dispatchAt,
+          nextFrameMs: visibleAt - committedAt,
+          keydownToNextFrameMs: visibleAt - timing.startedAt,
+        });
+      }
+    });
+  }, [libraryScope, route, searchQuery, sortBy, viewMode, selectedDocIds]);
+
   // Load Library Data
-  async function refreshLibrary(rootId?: string | null) {
+  async function refreshLibrary(rootIds?: string[]) {
     try {
       const [nextRoots, nextDocuments, nextCollections] = await Promise.all([
         listLibraryRoots(),
-        listLibraryDocuments(rootId ?? undefined, true),
+        rootIds?.length
+          ? Promise.all(rootIds.map((rootId) => listLibraryDocuments(rootId, true))).then((byRoot) => byRoot.flat())
+          : listLibraryDocuments(undefined, true),
         listCollections(),
       ]);
       setRoots(nextRoots);
-      setDocuments(nextDocuments);
+      if (rootIds?.length) {
+        const updatedRootIds = new Set(rootIds);
+        setDocuments((current) => [
+          ...current.filter((document) => document.source.kind !== "library" || !updatedRootIds.has(document.source.rootId)),
+          ...nextDocuments,
+        ]);
+      } else {
+        setDocuments(nextDocuments);
+      }
       setCollections(nextCollections);
     } catch (err) {
       setLibraryError(err instanceof Error ? err.message : String(err));
@@ -269,7 +423,7 @@ function App() {
     try {
       const root = await addLibraryRoot(path);
       setRoots((current) => [...current.filter((item) => item.id !== root.id), root]);
-      setLibraryScope({ kind: "root", rootId: root.id });
+      handleLibraryScopeSelect({ kind: "root", rootId: root.id });
       setPendingRootId(root.id);
       setLibraryMessage(`Scanning “${root.label}”…`);
       const result = await scanLibraryRoot(root.id);
@@ -283,15 +437,51 @@ function App() {
     }
   }
 
-  async function scanRoot(rootId: string) {
+  async function scanRoot(rootId: string, relativePath?: string) {
     setLibraryError("");
-    setLibraryMessage("Scanning directory…");
+    setLibraryMessage(relativePath ? "Scanning folder…" : "Scanning directory…");
     setLibraryPending(true);
     setPendingRootId(rootId);
     try {
-      const result = await scanLibraryRoot(rootId);
-      await refreshLibrary();
+      const result = relativePath
+        ? await scanLibraryFolder(rootId, relativePath)
+        : await scanLibraryRoot(rootId);
+      await refreshLibrary([rootId]);
       setLibraryMessage(scanMessage(result));
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingRootId(null);
+      setLibraryPending(false);
+    }
+  }
+
+  async function rescanCurrentScope() {
+    if (libraryPending) return;
+    const scopedRootId = libraryScope.kind === "root" || libraryScope.kind === "folder"
+      ? libraryScope.rootId
+      : null;
+    const relativePath = libraryScope.kind === "folder" ? libraryScope.relativePath : undefined;
+    const rootIds = scopedRootId ? [scopedRootId] : roots.map((root) => root.id);
+    if (rootIds.length === 0) {
+      setLibraryMessage("Add a folder to the Library before rescanning.");
+      return;
+    }
+    setLibraryError("");
+    setLibraryMessage("Rescanning current Library scope…");
+    setLibraryPending(true);
+    const results: LibraryScanResult[] = [];
+    try {
+      for (const rootId of rootIds) {
+        setPendingRootId(rootId);
+        results.push(
+          relativePath && rootId === scopedRootId
+            ? await scanLibraryFolder(rootId, relativePath)
+            : await scanLibraryRoot(rootId)
+        );
+      }
+      await refreshLibrary(scopedRootId ? [scopedRootId] : undefined);
+      setLibraryMessage(results.map(scanMessage).join(" "));
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -309,7 +499,7 @@ function App() {
         (libraryScope.kind === "root" && libraryScope.rootId === rootId) ||
         (libraryScope.kind === "folder" && libraryScope.rootId === rootId)
       ) {
-        setLibraryScope({ kind: "all" });
+        handleLibraryScopeSelect({ kind: "all" });
       }
       await refreshLibrary();
       setLibraryMessage("Library directory removed.");
@@ -331,16 +521,8 @@ function App() {
       return;
     }
 
-    // Save current library restoration state
-    const restorationState: LibraryRestorationState = {
-      scope: libraryScope,
-      viewMode,
-      searchQuery,
-      selectedDocIds: Array.from(selectedDocIds),
-      scrollAnchorId: doc.record.id,
-      sortBy,
-    };
-    setHistoryStack((prev) => [...prev, restorationState]);
+    const restorationState = captureLibraryState({ scrollAnchorId: doc.record.id });
+    replaceLibraryLocation(restorationState);
     setScrollAnchorId(doc.record.id);
 
     setLibraryPending(true);
@@ -358,25 +540,23 @@ function App() {
   }
 
   async function handleBackFromReader() {
-    const previousState = historyStack[historyStack.length - 1];
-    if (previousState) {
-      setLibraryScope(previousState.scope);
-      setViewMode(previousState.viewMode);
-      setSearchQuery(previousState.searchQuery);
-      setSelectedDocIds(new Set(previousState.selectedDocIds));
-      setSortBy(previousState.sortBy);
-      setScrollAnchorId(previousState.scrollAnchorId);
-      setHistoryStack((prev) => prev.slice(0, -1));
-      setRoute({ kind: "library", scope: previousState.scope });
-    } else {
-      setRoute({ kind: "library", scope: DEFAULT_LIBRARY_SCOPE });
-    }
+    const previousState = navigationHistory.entries[navigationHistory.index] ?? {
+      scope: DEFAULT_LIBRARY_SCOPE,
+      viewMode: "grid" as const,
+      searchQuery: "",
+      selectedDocIds: [],
+      scrollAnchorId: null,
+      sortBy: "recent" as const,
+    };
+    applyLibraryState(previousState);
     setReaderDocument(null);
     setActiveDocumentId(null);
     setExternalPath(null);
 
-    // Refresh library so any flushed reading state is immediately reflected in Continue
-    await refreshLibrary();
+    const rootId = previousState.scope.kind === "root" || previousState.scope.kind === "folder"
+      ? previousState.scope.rootId
+      : null;
+    await refreshLibrary(rootId ? [rootId] : undefined);
   }
 
   async function handleLocateDocument(doc: StoredDocument) {
@@ -427,6 +607,178 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    let awaitingSecondG = false;
+    let gTimer: number | undefined;
+
+    function onGlobalKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || route.kind !== "library" || isEditableTarget(event.target) ||
+          document.querySelector('[role="dialog"], [role="menu"]')) return;
+      if (isQuickOpen || isAppMenuOpen || isShortcutsOpen || missingDoc || unsupportedDoc) return;
+      const modifier = event.ctrlKey || event.metaKey;
+      if (event.altKey && event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveLibraryHistory(-1);
+        return;
+      }
+      if (event.altKey && event.key === "ArrowRight") {
+        event.preventDefault();
+        moveLibraryHistory(1);
+        return;
+      }
+      if (modifier && event.shiftKey && event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        handleViewModeChange(viewMode === "grid" ? "list" : "grid");
+        return;
+      }
+      if (modifier && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setIsQuickOpen(true);
+        return;
+      }
+      if (modifier && event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        void rescanCurrentScope();
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (selectedDocIds.size) {
+          event.preventDefault();
+          handleSelectionChange(new Set());
+        } else if (searchQuery) {
+          event.preventDefault();
+          handleSearchQueryChange("");
+          searchEditSessionRef.current = false;
+        }
+        return;
+      }
+
+      const items = Array.from(document.querySelectorAll<HTMLElement>("[data-library-navigable]"));
+      if (modifier && event.key.toLowerCase() === "a") {
+        if (!items.length) return;
+        event.preventDefault();
+        const visibleIds = items
+          .map((item) => item.dataset.libraryDocumentId)
+          .filter((id): id is string => Boolean(id));
+        const allSelected = visibleIds.every((id) => selectedDocIds.has(id));
+        const next = new Set(selectedDocIds);
+        for (const id of visibleIds) {
+          if (allSelected) next.delete(id);
+          else next.add(id);
+        }
+        handleSelectionChange(next);
+        return;
+      }
+
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const focusedItem = target?.closest<HTMLElement>("[data-library-navigable]") ?? null;
+      const focusedIndex = focusedItem ? items.indexOf(focusedItem) : -1;
+      const focusItem = (index: number) => {
+        const item = items[index];
+        if (!item) return;
+        item.focus();
+        item.scrollIntoView({ block: "nearest", inline: "nearest" });
+      };
+
+      if (
+        event.key === "G" ||
+        (event.shiftKey && event.key.toLowerCase() === "g" && !modifier && !event.altKey)
+      ) {
+        awaitingSecondG = false;
+        clearTimeout(gTimer);
+        if (items.length) {
+          event.preventDefault();
+          focusItem(items.length - 1);
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === "g" && !modifier && !event.altKey) {
+        if (awaitingSecondG) {
+          event.preventDefault();
+          awaitingSecondG = false;
+          clearTimeout(gTimer);
+          if (items.length) focusItem(0);
+        } else {
+          awaitingSecondG = true;
+          gTimer = window.setTimeout(() => {
+            awaitingSecondG = false;
+          }, 600);
+        }
+        return;
+      }
+      if (event.key.toLowerCase() !== "g") {
+        awaitingSecondG = false;
+        clearTimeout(gTimer);
+      }
+      if (event.key === "Enter" && target?.closest("button, [role=checkbox], a")) return;
+      if (event.key === "Enter") {
+        const id = focusedItem?.dataset.libraryDocumentId;
+        const doc = id ? documents.find((item) => item.record.id === id) : undefined;
+        if (doc) {
+          event.preventDefault();
+          void handleOpenDocument(doc);
+        }
+        return;
+      }
+      if (event.key === "Backspace") {
+        if (libraryScope.kind === "folder") {
+          event.preventDefault();
+          const parentPath = libraryScope.relativePath.split("/").slice(0, -1).join("/");
+          handleLibraryScopeSelect(parentPath
+            ? { kind: "folder", rootId: libraryScope.rootId, relativePath: parentPath }
+            : { kind: "root", rootId: libraryScope.rootId });
+        } else if (libraryScope.kind !== "all") {
+          event.preventDefault();
+          handleLibraryScopeSelect({ kind: "all" });
+        }
+        return;
+      }
+      if (!["h", "j", "k", "l"].includes(event.key) || !items.length) return;
+      const key = event.key;
+      if (viewMode === "list" && key === "h") {
+        if (libraryScope.kind === "folder") {
+          event.preventDefault();
+          const parentPath = libraryScope.relativePath.split("/").slice(0, -1).join("/");
+          handleLibraryScopeSelect(parentPath
+            ? { kind: "folder", rootId: libraryScope.rootId, relativePath: parentPath }
+            : { kind: "root", rootId: libraryScope.rootId });
+        } else if (libraryScope.kind !== "all") {
+          event.preventDefault();
+          handleLibraryScopeSelect({ kind: "all" });
+        }
+        return;
+      }
+      if (viewMode === "list" && key === "l") {
+        const id = focusedItem?.dataset.libraryDocumentId;
+        const doc = id ? documents.find((item) => item.record.id === id) : undefined;
+        if (doc) {
+          event.preventDefault();
+          void handleOpenDocument(doc);
+        }
+        return;
+      }
+      const direction = key === "h" ? "left" : key === "l" ? "right" : key === "k" ? "up" : "down";
+      const nextIndex = focusedIndex < 0
+        ? 0
+        : viewMode === "grid"
+          ? findSpatialNeighbor(items.map((item) => {
+              const rect = item.getBoundingClientRect();
+              return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+            }), focusedIndex, direction)
+          : Math.max(0, Math.min(items.length - 1, focusedIndex + (key === "j" ? 1 : key === "k" ? -1 : 0)));
+      if (nextIndex !== focusedIndex || focusedIndex < 0) {
+        event.preventDefault();
+        focusItem(nextIndex);
+      }
+    }
+
+    window.addEventListener("keydown", onGlobalKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onGlobalKeyDown);
+      clearTimeout(gTimer);
+    };
+  }, [route, isQuickOpen, isAppMenuOpen, isShortcutsOpen, missingDoc, unsupportedDoc, selectedDocIds, searchQuery, libraryScope, viewMode, navigationHistory, documents]);
   return (
     <div className="app-frame clio-app">
       {route.kind === "library" ? (
@@ -435,21 +787,21 @@ function App() {
           documents={documents}
           collections={collections}
           activeScope={libraryScope}
-          onSelectScope={setLibraryScope}
+          onSelectScope={handleLibraryScopeSelect}
           searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+          onSearchChange={handleSearchQueryChange}
           viewMode={viewMode}
-          onViewModeChange={setViewMode}
+          onViewModeChange={handleViewModeChange}
           selectedDocIds={selectedDocIds}
-          onSelectionChange={setSelectedDocIds}
+          onSelectionChange={handleSelectionChange}
           sortBy={sortBy}
-          onSortChange={setSortBy}
+          onSortChange={handleSortChange}
           pending={libraryPending}
           pendingRootId={pendingRootId}
           message={libraryMessage}
           error={libraryError}
           onAddRoot={() => void addRoot()}
-          onScanRoot={(rootId) => void scanRoot(rootId)}
+          onScanRoot={(rootId, relativePath) => void scanRoot(rootId, relativePath)}
           onRemoveRoot={(rootId) => void removeRoot(rootId)}
           onCreateCollection={handleCreateCollection}
           onCreateAndAddToCollection={handleCreateAndAddToCollection}
@@ -463,10 +815,13 @@ function App() {
           scrollAnchorId={scrollAnchorId}
           onUpdateScrollAnchor={setScrollAnchorId}
           onLocateDocument={handleLocateDocument}
+          onOpenExternally={handleOpenExternally}
           onOpenAppMenu={() => setIsAppMenuOpen(true)}
           onOpenFile={() => void chooseReaderDocument()}
           onDismissMessage={() => setLibraryMessage("")}
           onDismissError={() => setLibraryError("")}
+          focusSearchRequest={focusSearchRequest}
+          openToolsRequest={openToolsRequest}
         />
       ) : (
         <div className="document-reading-surface">
@@ -577,6 +932,16 @@ function App() {
             >
               Keyboard shortcuts
             </button>
+            <button
+              type="button"
+              className="context-menu-item"
+              onClick={() => {
+                setIsAppMenuOpen(false);
+                setOpenToolsRequest((request) => request + 1);
+              }}
+            >
+              Document tools…
+            </button>
 
             <button
               type="button"
@@ -633,6 +998,38 @@ function App() {
             await handleRemoveFromLibrary([id]);
           }}
           onClose={() => setMissingDoc(null)}
+        />
+      )}
+
+      {isQuickOpen && (
+        <QuickOpenDialog
+          documents={documents}
+          onClose={() => setIsQuickOpen(false)}
+          onOpenDocument={(doc) => {
+            setIsQuickOpen(false);
+            void handleOpenDocument(doc);
+          }}
+          onSearchLibrary={() => {
+            setIsQuickOpen(false);
+            setFocusSearchRequest((request) => request + 1);
+          }}
+          onToggleLayout={() => {
+            setIsQuickOpen(false);
+            handleViewModeChange(viewMode === "grid" ? "list" : "grid");
+          }}
+          onRescan={() => {
+            setIsQuickOpen(false);
+            void rescanCurrentScope();
+          }}
+          onGoToLibrary={() => setIsQuickOpen(false)}
+          onOpenTools={() => {
+            setIsQuickOpen(false);
+            setOpenToolsRequest((request) => request + 1);
+          }}
+          onOpenShortcuts={() => {
+            setIsQuickOpen(false);
+            setIsShortcutsOpen(true);
+          }}
         />
       )}
 

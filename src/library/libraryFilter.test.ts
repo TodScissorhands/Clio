@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import type { ReadingState, StoredDocument } from "../storage/domain";
 import {
   deriveContinueDocuments,
-  deriveRecentlyReadDocuments,
   filterDocuments,
   formatReadingProgress,
   formatRelativeTime,
@@ -399,7 +398,7 @@ describe("filterDocuments regression: selectedRootId scoping", () => {
   });
 });
 
-describe("OD-5: Continue Reading vs Recently Read", () => {
+describe("Continue Reading", () => {
   const docInProgressEpub: StoredDocument = {
     ...docEpub1,
     record: { ...docEpub1.record, id: "epub-in-progress" },
@@ -529,22 +528,4 @@ describe("OD-5: Continue Reading vs Recently Read", () => {
     expect(continueIds).not.toContain("txt-1"); // unstarted excluded
   });
 
-  it("deriveRecentlyReadDocuments retains finished documents in chronological order (OD-5)", () => {
-    const all = [docInProgressEpub, docFinishedEpub, docFinishedText, docInProgressPdf, docMissing, docTxt1];
-    const recentDocs = deriveRecentlyReadDocuments(all);
-
-    const recentIds = recentDocs.map((d) => d.record.id);
-    // All finished and unfinished started documents are in Recently Read
-    expect(recentIds).toContain("epub-in-progress");
-    expect(recentIds).toContain("pdf-in-progress");
-    expect(recentIds).toContain("epub-finished"); // OD-5: Finished documents leave Continue Reading but remain in Recently Read
-    expect(recentIds).toContain("txt-finished");
-    expect(recentIds).not.toContain("doc-missing");
-
-    // Chronological order: most recent first
-    expect(recentIds[0]).toBe("pdf-in-progress"); // 2026-02-04
-    expect(recentIds[1]).toBe("txt-finished"); // 2026-02-03
-    expect(recentIds[2]).toBe("epub-finished"); // 2026-02-02
-    expect(recentIds[3]).toBe("epub-in-progress"); // 2026-02-01
-  });
 });

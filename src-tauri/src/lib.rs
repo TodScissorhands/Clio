@@ -234,6 +234,7 @@ pub fn run() {
             storage::library_root_list,
             storage::library_root_remove,
             storage::library_root_scan,
+            storage::library_folder_scan,
             storage::library_document_list,
             storage::library_document_path,
             storage::library_document_remove,

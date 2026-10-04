@@ -27,6 +27,7 @@ import type {
 import type {
   Annotation,
   Bookmark,
+  ReaderDisplaySettings,
   ReaderDocument,
   ReaderEngineComponent,
   ReaderEngineHandle,
@@ -37,10 +38,14 @@ import type {
   ReadingPosition,
   TextSelection,
 } from "./types";
+import { DEFAULT_READER_DISPLAY_SETTINGS } from "./types";
 import "./ReaderShell.css";
 import {
   getReaderZoomLimits,
+  nextReaderFontSize,
+  parseReaderDisplaySettings,
   parseReaderTheme,
+  READER_FONT_SIZES,
   resolveEscapeAction,
   isCurrentReaderOperation,
   TOPBAR_HIDE_DELAY,
@@ -59,6 +64,22 @@ function loadReaderTheme(): ReaderTheme {
 function saveReaderTheme(theme: ReaderTheme): void {
   try {
     localStorage.setItem("clio-reader-theme", theme);
+  } catch {
+    // ignore
+  }
+}
+
+function loadReaderDisplaySettings(): ReaderDisplaySettings {
+  try {
+    return parseReaderDisplaySettings(localStorage.getItem("clio-reader-display"));
+  } catch {
+    return DEFAULT_READER_DISPLAY_SETTINGS;
+  }
+}
+
+function saveReaderDisplaySettings(settings: ReaderDisplaySettings): void {
+  try {
+    localStorage.setItem("clio-reader-display", JSON.stringify(settings));
   } catch {
     // ignore
   }
@@ -126,13 +147,29 @@ export function ReaderShell({
   const searchRequestRef = useRef(0);
   const engineRef = useRef<ReaderEngineHandle | null>(null);
 
-  // ── Reader display preferences (persisted) ───────────────────────────────────
   const [theme, setTheme] = useState<ReaderTheme>(loadReaderTheme);
 
   const applyTheme = useCallback((next: ReaderTheme) => {
     setTheme(next);
     saveReaderTheme(next);
   }, []);
+  const [displaySettings, setDisplaySettings] = useState<ReaderDisplaySettings>(loadReaderDisplaySettings);
+
+  const updateDisplaySetting = useCallback(<K extends keyof ReaderDisplaySettings,>(
+    key: K,
+    value: ReaderDisplaySettings[K],
+  ) => {
+    setDisplaySettings((current) => {
+      const next = { ...current, [key]: value };
+      saveReaderDisplaySettings(next);
+      return next;
+    });
+  }, []);
+
+  const changeReaderFontSize = useCallback((direction: -1 | 0 | 1) => {
+    const next = direction === 0 ? 100 : nextReaderFontSize(displaySettings.fontSize, direction);
+    updateDisplaySetting("fontSize", next);
+  }, [displaySettings.fontSize, updateDisplaySetting]);
 
   // ── Reading position & progress ──────────────────────────────────────────────
   const [progress, setProgress] = useState<ReaderProgress>({ current: 1 });
@@ -653,7 +690,9 @@ export function ReaderShell({
 
       const isInput =
         event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement;
+        event.target instanceof HTMLTextAreaElement ||
+        event.target instanceof HTMLSelectElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable);
 
       // Ctrl/Cmd+F → open Find (always, even in input if not already open)
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
@@ -745,21 +784,23 @@ export function ReaderShell({
       if (event.key === "ArrowLeft") void engineRef.current?.previous();
       if (event.key === "ArrowRight") void engineRef.current?.next();
 
-      // Zoom only when the active engine implements it.
-      if (zoomLimits) {
-        if ((event.ctrlKey || event.metaKey) && (event.key === "=" || event.key === "+")) {
+      if ((event.ctrlKey || event.metaKey) && (zoomLimits || document.record.format === "epub")) {
+        if (event.key === "+" || event.key === "=" || event.key === "NumpadAdd") {
           event.preventDefault();
-          void engineRef.current?.zoomIn();
+          if (document.record.format === "pdf") void engineRef.current?.zoomIn();
+          else changeReaderFontSize(1);
           return;
         }
-        if ((event.ctrlKey || event.metaKey) && (event.key === "-" || event.key === "_")) {
+        if (event.key === "-" || event.key === "_" || event.key === "NumpadSubtract") {
           event.preventDefault();
-          void engineRef.current?.zoomOut();
+          if (document.record.format === "pdf") void engineRef.current?.zoomOut();
+          else changeReaderFontSize(-1);
           return;
         }
-        if ((event.ctrlKey || event.metaKey) && event.key === "0") {
+        if (event.key === "0" || event.key === "Numpad0") {
           event.preventDefault();
-          void engineRef.current?.resetZoom?.();
+          if (document.record.format === "pdf") void engineRef.current?.resetZoom?.();
+          else changeReaderFontSize(0);
           return;
         }
       }
@@ -787,6 +828,7 @@ export function ReaderShell({
     nextMatch,
     prevMatch,
     runSearch,
+    changeReaderFontSize,
     zoomLimits,
   ]);
 
@@ -988,8 +1030,75 @@ export function ReaderShell({
                 </button>
               ))}
             </div>
+            {document.record.format !== "pdf" && (
+              <>
+                <div className="reader-popover-section-label">Typography</div>
+                <label className="reader-setting-row">
+                  <span>Font family</span>
+                  <select
+                    aria-label="Font family"
+                    value={displaySettings.fontFamily}
+                    onChange={(event) => updateDisplaySetting("fontFamily", event.target.value as ReaderDisplaySettings["fontFamily"])}
+                  >
+                    <option value="book">Document default</option>
+                    <option value="serif">Serif</option>
+                    <option value="sans">Sans serif</option>
+                    <option value="mono">Monospace</option>
+                  </select>
+                </label>
+                <label className="reader-setting-row">
+                  <span>Font size</span>
+                  <select
+                    aria-label="Font size"
+                    value={displaySettings.fontSize}
+                    onChange={(event) => updateDisplaySetting("fontSize", Number(event.target.value))}
+                  >
+                    {READER_FONT_SIZES.map((size) => <option key={size} value={size}>{size}%</option>)}
+                  </select>
+                </label>
+                <label className="reader-setting-row">
+                  <span>Line height</span>
+                  <select
+                    aria-label="Line height"
+                    value={displaySettings.lineHeight}
+                    onChange={(event) => updateDisplaySetting("lineHeight", event.target.value as ReaderDisplaySettings["lineHeight"])}
+                  >
+                    <option value="book">Document default</option>
+                    <option value="1.4">Compact</option>
+                    <option value="1.6">Normal</option>
+                    <option value="1.8">Relaxed</option>
+                    <option value="2">Wide</option>
+                  </select>
+                </label>
+                <label className="reader-setting-row">
+                  <span>Paragraph spacing</span>
+                  <select
+                    aria-label="Paragraph spacing"
+                    value={displaySettings.paragraphSpacing}
+                    onChange={(event) => updateDisplaySetting("paragraphSpacing", event.target.value as ReaderDisplaySettings["paragraphSpacing"])}
+                  >
+                    <option value="book">Document default</option>
+                    <option value="0.5">Compact</option>
+                    <option value="1">Normal</option>
+                    <option value="1.5">Relaxed</option>
+                  </select>
+                </label>
+                <label className="reader-setting-row">
+                  <span>Content width</span>
+                  <select
+                    aria-label="Content width"
+                    value={displaySettings.contentWidth}
+                    onChange={(event) => updateDisplaySetting("contentWidth", event.target.value as ReaderDisplaySettings["contentWidth"])}
+                  >
+                    <option value="narrow">Narrow</option>
+                    <option value="default">Default</option>
+                    <option value="wide">Wide</option>
+                  </select>
+                </label>
+              </>
+            )}
 
-            {zoomLimits && (
+            {document.record.format === "pdf" && zoomLimits && (
               <>
                 <div className="reader-popover-section-label">Zoom</div>
                 <div className="reader-zoom-row">
@@ -1505,6 +1614,8 @@ export function ReaderShell({
             engineRef={engineRef}
             document={document}
             theme={theme}
+            displaySettings={displaySettings}
+            onDisplayFontSizeChange={changeReaderFontSize}
             initialPosition={initialPosition}
             onProgress={onProgress}
             onPositionChange={onPositionChange}

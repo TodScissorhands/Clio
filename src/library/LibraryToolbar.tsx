@@ -25,7 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu";
 import { SidebarTrigger } from "../components/ui/sidebar";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import { isEditableTarget } from "../navigation/navigation";
 
 export interface LibraryToolbarProps {
   activeScope: LibraryScope;
@@ -33,6 +33,7 @@ export interface LibraryToolbarProps {
   collections?: Collection[];
   searchQuery: string;
   onSearchChange: (query: string) => void;
+  focusSearchRequest?: number;
   viewMode: "grid" | "list";
   onViewModeChange: (mode: "grid" | "list") => void;
   onSelectScope: (scope: LibraryScope) => void;
@@ -92,6 +93,7 @@ export function LibraryToolbar({
   collections = [],
   searchQuery,
   onSearchChange,
+  focusSearchRequest = 0,
   viewMode,
   onViewModeChange,
   onSelectScope,
@@ -110,6 +112,8 @@ export function LibraryToolbar({
   onOpenAppMenu,
 }: LibraryToolbarProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchControlRef = useRef<HTMLDivElement | null>(null);
+  const [isSearchOpen, setIsSearchOpen] = useState(Boolean(searchQuery));
   const [removeConfirm, setRemoveConfirm] = useState(false);
   const [isScopePickerOpen, setIsScopePickerOpen] = useState(false);
   const lastContextScopeRef = useRef<LibraryScope | null>(null);
@@ -121,8 +125,18 @@ export function LibraryToolbar({
   }, [activeScope]);
 
   useEffect(() => {
+    if (searchQuery) setIsSearchOpen(true);
     if (!searchQuery) setIsScopePickerOpen(false);
   }, [searchQuery]);
+
+  useEffect(() => {
+    if (!focusSearchRequest) return;
+    setIsSearchOpen(true);
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, [focusSearchRequest]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -133,42 +147,69 @@ export function LibraryToolbar({
           searchInputRef.current?.focus();
           return;
         }
+        if (document.querySelector('[role="dialog"], [role="menu"]')) return;
+        if (event.target === searchInputRef.current) {
+          event.preventDefault();
+          if (searchQuery) {
+            onSearchChange("");
+          } else {
+            searchInputRef.current?.blur();
+            setIsSearchOpen(false);
+          }
+          return;
+        }
+        if (isSearchOpen && !searchQuery) {
+          setIsSearchOpen(false);
+          return;
+        }
         if (selectedDocuments.length > 0) {
           event.preventDefault();
           onClearSelection();
-          return;
-        }
-        if (searchInputRef.current === document.activeElement) {
-          event.preventDefault();
-          onSearchChange("");
-          searchInputRef.current?.blur();
         }
         return;
       }
 
-      const targetTag = (event.target as HTMLElement)?.tagName?.toLowerCase();
-      if (["input", "textarea", "select"].includes(targetTag)) return;
-      if (event.key === "/" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k")) {
+      if (isEditableTarget(event.target) || document.querySelector('[role="dialog"], [role="menu"]')) return;
+      if (event.key === "/") {
         event.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
+        if (selectedDocuments.length > 0) onClearSelection();
+        setIsSearchOpen(true);
+        requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+      }
+    }
+
+    function handleOutsidePointer(event: PointerEvent) {
+      if (
+        isSearchOpen &&
+        !searchQuery &&
+        searchControlRef.current &&
+        !searchControlRef.current.contains(event.target as Node)
+      ) {
+        setIsSearchOpen(false);
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isScopePickerOpen, onClearSelection, onSearchChange, selectedDocuments.length]);
+    document.addEventListener("pointerdown", handleOutsidePointer);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handleOutsidePointer);
+    };
+  }, [isScopePickerOpen, isSearchOpen, onClearSelection, onSearchChange, searchQuery, selectedDocuments.length]);
 
   const capabilities = getSelectionCapabilities(selectedDocuments);
   if (selectedDocuments.length > 0) {
     const actionButton = "shrink-0";
     return (
-      <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4" role="toolbar" aria-label="Selection actions">
+      <header className="library-toolbar flex h-[46px] shrink-0 items-center gap-2 border-b border-border bg-background px-3" role="toolbar" aria-label="Selection actions">
         <span className="shrink-0 text-sm font-medium tabular-nums">
           {selectedDocuments.length} {selectedDocuments.length === 1 ? "document" : "documents"} selected
         </span>
         <Separator orientation="vertical" className="h-6" />
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
           {capabilities.canOpen && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onOpenSelection(); }}>Open</Button>}
           <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onAddToCollection(); }}>Add to collection</Button>
           {capabilities.canConvert && <Button size="sm" variant="outline" className={actionButton} onClick={() => { setRemoveConfirm(false); onConvertSelection(); }}>Convert…</Button>}
@@ -186,7 +227,7 @@ export function LibraryToolbar({
             <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setRemoveConfirm(true)}>Remove from library</Button>
           )}
         </div>
-        <Button size="icon-sm" variant="ghost" onClick={() => { setRemoveConfirm(false); onClearSelection(); }} aria-label="Clear selection" title="Clear selection (Esc)">×</Button>
+        <Button size="icon-sm" variant="ghost" onClick={() => { setRemoveConfirm(false); onClearSelection(); }} aria-label="Clear selection">×</Button>
       </header>
     );
   }
@@ -228,60 +269,84 @@ export function LibraryToolbar({
   const selectedScopeKey = scopeKey(activeScope);
 
   return (
-    <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 border-b border-border bg-background px-4 py-2" role="toolbar" aria-label="Library toolbar">
-      <div className="flex min-w-0 items-center gap-2">
-        <SidebarTrigger className="size-8 shrink-0" aria-label="Toggle sidebar" />
+    <header className="library-toolbar flex h-[46px] shrink-0 items-center gap-2 border-b border-border bg-background px-3" role="toolbar" aria-label="Library toolbar">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <SidebarTrigger className="size-9 shrink-0" aria-label="Toggle sidebar" />
         <div className="min-w-0">{renderScopeTitle()}</div>
       </div>
 
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 max-sm:basis-full max-sm:justify-start">
-        <div className="flex h-9 min-w-[150px] max-w-md flex-1 items-center gap-1 rounded-md border border-input bg-background px-2 focus-within:ring-2 focus-within:ring-ring/50">
-          <SearchIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          {searchQuery && (
-            <DropdownMenu open={isScopePickerOpen} onOpenChange={setIsScopePickerOpen}>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="secondary" className="h-7 max-w-36 shrink-0 gap-1 px-2 text-xs" aria-label={`Search scope: ${getScopeLabel(activeScope, roots, collections)}`}>
-                  <span className="truncate">{getScopeLabel(activeScope, roots, collections)}</span>
-                  <ChevronDownIcon className="size-3 shrink-0" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuLabel>Search scope</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuRadioGroup
-                  value={selectedScopeKey}
-                  onValueChange={(value) => {
-                    const option = scopeOptions.find(({ scope }) => scopeKey(scope) === value);
-                    if (option) onSelectScope(option.scope);
-                  }}
-                >
-                  {scopeOptions.map(({ scope, label }) => (
-                    <DropdownMenuRadioItem key={scopeKey(scope)} value={scopeKey(scope)}>
-                      <span className="truncate">{label}</span>
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+      <div className="flex shrink-0 items-center gap-1">
+        <div
+          ref={searchControlRef}
+          className={`library-search-control flex h-9 shrink-0 items-center rounded-md ${isSearchOpen ? "library-search-control-open gap-1 border border-border px-2" : "w-9 justify-center"}`}
+        >
+          {isSearchOpen ? (
+            <>
+              <SearchIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              {searchQuery && (
+                <DropdownMenu open={isScopePickerOpen} onOpenChange={setIsScopePickerOpen}>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm" variant="secondary" className="h-7 max-w-36 shrink-0 gap-1 px-2 text-xs" aria-label={`Search scope: ${getScopeLabel(activeScope, roots, collections)}`}>
+                      <span className="truncate">{getScopeLabel(activeScope, roots, collections)}</span>
+                      <ChevronDownIcon className="size-3 shrink-0" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-64">
+                    <DropdownMenuLabel>Search scope</DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuRadioGroup
+                      value={selectedScopeKey}
+                      onValueChange={(value) => {
+                        const option = scopeOptions.find(({ scope }) => scopeKey(scope) === value);
+                        if (option) onSelectScope(option.scope);
+                      }}
+                    >
+                      {scopeOptions.map(({ scope, label }) => (
+                        <DropdownMenuRadioItem key={scopeKey(scope)} value={scopeKey(scope)}>
+                          <span className="truncate">{label}</span>
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+              <Input
+                ref={searchInputRef}
+                className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 text-foreground shadow-none placeholder:text-muted-foreground focus-visible:ring-0"
+                placeholder={activeScope.kind === "all" ? "Search in Books..." : `Search in ${getScopeLabel(activeScope, roots, collections)}...`}
+                value={searchQuery}
+                onFocus={() => setIsSearchOpen(true)}
+                onChange={(event) => onSearchChange(event.target.value)}
+                aria-label="Search library"
+              />
+              {searchQuery && (
+                <Button size="icon-xs" variant="ghost" className="shrink-0" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} aria-label="Clear search query">×</Button>
+              )}
+            </>
+          ) : (
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              className="size-9 shrink-0"
+              onClick={() => {
+                setIsSearchOpen(true);
+                requestAnimationFrame(() => searchInputRef.current?.focus());
+              }}
+              aria-label="Search library"
+              aria-keyshortcuts="/"
+            >
+              <SearchIcon className="size-4" aria-hidden="true" />
+            </Button>
           )}
-          <Input
-            ref={searchInputRef}
-            className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
-            placeholder={activeScope.kind === "all" ? "Search library…" : `Search in ${getScopeLabel(activeScope, roots, collections)}…`}
-            value={searchQuery}
-            onChange={(event) => onSearchChange(event.target.value)}
-            aria-label="Search library"
-          />
-          {!searchQuery && <kbd className="shrink-0 rounded border border-border px-1.5 text-[10px] text-muted-foreground">/</kbd>}
-          {searchQuery && <Button size="icon-xs" variant="ghost" className="shrink-0" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} aria-label="Clear search query" title="Clear search (Esc)">×</Button>}
         </div>
 
         {onSortChange && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="shrink-0 gap-2" aria-label={`Sort documents: ${SORT_LABEL[sortBy] ?? "Recent"}`}>
-                <span className="text-muted-foreground">Sort:</span> {SORT_LABEL[sortBy] ?? "Recent"}
-                <ChevronDownIcon className="size-3 text-muted-foreground" />
+              <Button variant="ghost" size="sm" className="h-9 shrink-0 px-2 text-xs" aria-label={`Sort documents: ${SORT_LABEL[sortBy] ?? "Recent"}`}>
+                {SORT_LABEL[sortBy] ?? "Recent"}
+                <ChevronDownIcon className="size-3 text-muted-foreground" aria-hidden="true" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-44">
@@ -297,28 +362,21 @@ export function LibraryToolbar({
           </DropdownMenu>
         )}
 
-        <Separator orientation="vertical" className="h-6 max-sm:hidden" />
-        <div className="flex shrink-0 items-center rounded-md border border-border p-0.5" role="radiogroup" aria-label="Presentation mode">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button size="icon-sm" variant={viewMode === "grid" ? "secondary" : "ghost"} onClick={() => onViewModeChange("grid")} role="radio" aria-checked={viewMode === "grid"} aria-label="Grid view">
-                <GridIcon className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Grid view</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button size="icon-sm" variant={viewMode === "list" ? "secondary" : "ghost"} onClick={() => onViewModeChange("list")} role="radio" aria-checked={viewMode === "list"} aria-label="List view">
-                <ListIcon className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>List view</TooltipContent>
-          </Tooltip>
-        </div>
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          className="size-9 shrink-0"
+          aria-label={`Switch to ${viewMode === "grid" ? "list" : "grid"} view`}
+          aria-pressed={viewMode === "grid"}
+          aria-keyshortcuts="Control+Shift+G Meta+Shift+G"
+          onClick={() => onViewModeChange(viewMode === "grid" ? "list" : "grid")}
+        >
+          {viewMode === "grid" ? <GridIcon className="size-4" /> : <ListIcon className="size-4" />}
+        </Button>
 
         {onOpenAppMenu && (
-          <Button size="icon-sm" variant="ghost" className="shrink-0" onClick={onOpenAppMenu} title="Clio menu" aria-label="App menu">
+          <Button size="icon-sm" variant="ghost" className="size-9 shrink-0" onClick={onOpenAppMenu} aria-label="App menu">
             <MoreHorizontalIcon className="size-4" />
           </Button>
         )}

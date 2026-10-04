@@ -89,7 +89,7 @@ export interface LibrarySidebarProps {
   activeScope: LibraryScope;
   onSelectScope: (scope: LibraryScope) => void;
   onAddRoot: () => void;
-  onScanRoot: (rootId: string) => void;
+  onScanRoot: (rootId: string, relativePath?: string) => void;
   onRemoveRoot: (rootId: string) => void;
   onCreateCollection: (name: string) => Promise<void>;
   onRenameCollection: (id: string, name: string) => Promise<void>;
@@ -119,7 +119,7 @@ export function LibrarySidebar({
     x: number;
     y: number;
   } | null>(null);
-  const [rootMenu, setRootMenu] = useState<{ id: string; label: string; x: number; y: number } | null>(null);
+  const [rootMenu, setRootMenu] = useState<{ id: string; label: string; relativePath: string | null; x: number; y: number } | null>(null);
   const [confirmRemoveRoot, setConfirmRemoveRoot] = useState<{ id: string; label: string } | null>(null);
   const [confirmDeleteCollection, setConfirmDeleteCollection] = useState<{ id: string; name: string } | null>(null);
 
@@ -182,7 +182,13 @@ export function LibrarySidebar({
       const hasChildren = node.children.length > 0;
 
       return (
-        <SidebarMenuSubItem key={node.relativePath}>
+        <SidebarMenuSubItem
+          key={node.relativePath}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setRootMenu({ id: rootId, label: node.name, relativePath: node.relativePath, x: event.clientX, y: event.clientY });
+          }}
+        >
           <Collapsible
             open={isExpanded}
             onOpenChange={(open) => {
@@ -208,11 +214,13 @@ export function LibrarySidebar({
               <SidebarMenuSubButton
                 asChild
                 isActive={isSelected}
-                title={node.relativePath}
               >
                 <button
                   type="button"
                   className="min-w-0"
+                  data-library-scope
+                  data-library-scope-root={rootId}
+                  data-library-scope-path={node.relativePath}
                   onClick={() => handleScopeSelect({
                     kind: "folder",
                     rootId,
@@ -244,6 +252,7 @@ export function LibrarySidebar({
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={activeScope.kind === "all"}
+                  data-library-scope
                   onClick={() => handleScopeSelect({ kind: "all" })}
                 >
                   <BookOpenIcon />
@@ -259,7 +268,6 @@ export function LibrarySidebar({
           <SidebarGroupLabel>Collections</SidebarGroupLabel>
           <SidebarGroupAction
             onClick={() => setIsCreatingCollection(true)}
-            title="Create new collection"
             aria-label="Add collection"
           >
             <PlusIcon />
@@ -348,6 +356,7 @@ export function LibrarySidebar({
                   >
                     <SidebarMenuButton
                       isActive={isSelected}
+                      data-library-scope
                       onClick={() => handleScopeSelect({ kind: "collection", collectionId: col.id })}
                     >
                       <BookmarkIcon />
@@ -360,7 +369,6 @@ export function LibrarySidebar({
                         e.stopPropagation();
                         setActiveContextMenu({ id: col.id, x: e.clientX, y: e.clientY });
                       }}
-                      title={`Options for ${col.name}`}
                       aria-label={`Options for ${col.name}`}
                     >
                       <MoreHorizontalIcon />
@@ -379,7 +387,7 @@ export function LibrarySidebar({
 
         <SidebarGroup>
           <SidebarGroupLabel>Folders</SidebarGroupLabel>
-          <SidebarGroupAction onClick={onAddRoot} title="Add folder to library" aria-label="Add folder">
+          <SidebarGroupAction onClick={onAddRoot} aria-label="Add folder">
             <PlusIcon />
           </SidebarGroupAction>
           <SidebarGroupContent>
@@ -399,7 +407,7 @@ export function LibrarySidebar({
                     key={root.id}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
+                      setRootMenu({ id: root.id, label: root.label, relativePath: null, x: e.clientX, y: e.clientY });
                     }}
                   >
                     <Collapsible
@@ -426,8 +434,9 @@ export function LibrarySidebar({
                         )}
                         <SidebarMenuButton
                           isActive={isSelected}
+                          data-library-scope
+                          data-library-scope-root={root.id}
                           onClick={() => handleScopeSelect({ kind: "root", rootId: root.id })}
-                          title={root.label}
                         >
                           <FolderIcon />
                           <span>{root.label}</span>
@@ -437,9 +446,8 @@ export function LibrarySidebar({
                           showOnHover
                           onClick={(e) => {
                             e.stopPropagation();
-                            setRootMenu({ id: root.id, label: root.label, x: e.clientX, y: e.clientY });
+                            setRootMenu({ id: root.id, label: root.label, relativePath: null, x: e.clientX, y: e.clientY });
                           }}
-                          title={`Folder options for ${root.label}`}
                           aria-label={`Folder options for ${root.label}`}
                         >
                           <MoreHorizontalIcon />
@@ -545,25 +553,27 @@ export function LibrarySidebar({
               className="context-menu-item"
               role="menuitem"
               onClick={() => {
-                onScanRoot(rootMenu.id);
+                onScanRoot(rootMenu.id, rootMenu.relativePath ?? undefined);
                 setRootMenu(null);
               }}
             >
-              Scan folder for changes
+              Rescan folder
             </button>
-            <button
-              type="button"
-              className="context-menu-item danger"
-              role="menuitem"
-              onClick={() => {
-                setConfirmRemoveRoot({ id: rootMenu.id, label: rootMenu.label });
-                setRootMenu(null);
-              }}
-            >
-              Remove folder from library…
-            </button>
-          </div>
+            {rootMenu.relativePath === null && (
+              <button
+                type="button"
+                className="context-menu-item danger"
+                role="menuitem"
+                onClick={() => {
+                  setConfirmRemoveRoot({ id: rootMenu.id, label: rootMenu.label });
+                  setRootMenu(null);
+                }}
+              >
+                Remove folder from library…
+              </button>
+            )}
         </div>
+          </div>
       )}
 
       {/* Confirmation Modal: Remove Root */}

@@ -211,6 +211,11 @@ export async function scanLibraryRoot(rootId: string): Promise<LibraryScanResult
   return normalizeScanResult(result);
 }
 
+export async function scanLibraryFolder(rootId: string, relativePath: string): Promise<LibraryScanResult> {
+  const result = await invoke<NativeScanResult>("library_folder_scan", { rootId, relativePath });
+  return normalizeScanResult(result);
+}
+
 export async function listLibraryDocuments(rootId?: string, includeMissing = true): Promise<StoredDocument[]> {
   const documents = await invoke<NativeDocument[]>("library_document_list", {
     rootId: rootId ?? null,

@@ -21,6 +21,28 @@ export { isSameReadingPosition, validateAnnotationLocator } from "../storage/dom
 
 export type ReaderFormat = "pdf" | "epub" | "txt" | "md";
 export type ReaderTheme = "light" | "sepia" | "dark";
+export type ReaderFontFamily = "book" | "serif" | "sans" | "mono";
+export type ReaderLineHeight = "book" | "1.4" | "1.6" | "1.8" | "2";
+export type ReaderParagraphSpacing = "book" | "0.5" | "1" | "1.5";
+export type ReaderContentWidth = "narrow" | "default" | "wide";
+
+export type ReaderDisplaySettings = {
+  fontFamily: ReaderFontFamily;
+  fontSize: number;
+  lineHeight: ReaderLineHeight;
+  paragraphSpacing: ReaderParagraphSpacing;
+  contentWidth: ReaderContentWidth;
+};
+
+export const DEFAULT_READER_DISPLAY_SETTINGS: ReaderDisplaySettings = {
+  fontFamily: "book",
+  fontSize: 100,
+  lineHeight: "book",
+  paragraphSpacing: "book",
+  contentWidth: "default",
+};
+
+
 
 export type ReaderDocumentRecord = {
   id: string;
@@ -71,6 +93,8 @@ export type ReaderEngineHandle = {
 export type ReaderEngineProps = {
   document: ReaderDocument;
   theme: ReaderTheme;
+  displaySettings: ReaderDisplaySettings;
+  onDisplayFontSizeChange?(direction: -1 | 0 | 1): void;
   initialPosition?: ReadingPosition;
   hostRef?: RefObject<HTMLDivElement | null>;
   onProgress(progress: ReaderProgress): void;

@@ -16,6 +16,7 @@ export interface DocumentContextMenuProps {
   commandContext: CommandContext;
   onClose: () => void;
   onCreateCollectionPrompt?: () => void;
+  onOpenExternally?: (document: StoredDocument) => Promise<void>;
 }
 
 export function DocumentContextMenu({
@@ -27,6 +28,7 @@ export function DocumentContextMenu({
   commandContext,
   onClose,
   onCreateCollectionPrompt,
+  onOpenExternally,
 }: DocumentContextMenuProps) {
   const [collectionSubmenuOpen, setCollectionSubmenuOpen] = useState(false);
   const [removeConfirm, setRemoveConfirm] = useState(false);
@@ -88,6 +90,23 @@ export function DocumentContextMenu({
             {cmd.label}
           </button>
         ))}
+        {docs.length === 1 && docs[0]?.source.kind === "library" && docs[0].availability === "present" && onOpenExternally && (
+          <>
+            <button
+              type="button"
+              className="context-menu-item"
+              role="menuitem"
+              onClick={() => {
+                const document = docs[0];
+                onClose();
+                if (document) void onOpenExternally(document);
+              }}
+            >
+              Open externally
+            </button>
+            <div className="context-menu-divider" role="separator" />
+          </>
+        )}
 
         {hasAddToCollection && (
           <div

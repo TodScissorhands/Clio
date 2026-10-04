@@ -5,7 +5,7 @@
  * - OD-1: Remove from Library preserves document state and excludes from active views
  * - OD-2: Locate file command for missing documents; other commands disabled
  * - OD-4: Non-readable format detection and contextual choice
- * - OD-5: Continue Reading vs Recently Read separation
+ * - OD-5: Continue Reading from durable reading state
  * - OD-6: Selection grammar and right-click targeting
  * - OD-7: Global app menu reachability and options
  * - OD-10: Search scoping behavior

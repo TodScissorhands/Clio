@@ -4,7 +4,15 @@
  * Nothing in this module may import React, Tauri, or browser globals.
  */
 
-import type { ReaderTheme } from "./types";
+import {
+  DEFAULT_READER_DISPLAY_SETTINGS,
+  type ReaderContentWidth,
+  type ReaderDisplaySettings,
+  type ReaderFontFamily,
+  type ReaderLineHeight,
+  type ReaderParagraphSpacing,
+  type ReaderTheme,
+} from "./types";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -20,6 +28,61 @@ export const TOPBAR_HIDE_DELAY = 2500;
 export function parseReaderTheme(raw: string | null | undefined): ReaderTheme {
   if (raw === "light" || raw === "sepia" || raw === "dark") return raw;
   return "light";
+}
+
+export const READER_FONT_SIZES = [80, 90, 100, 110, 120, 130, 140] as const;
+
+export function parseReaderDisplaySettings(raw: string | null | undefined): ReaderDisplaySettings {
+  if (!raw) return DEFAULT_READER_DISPLAY_SETTINGS;
+  try {
+    const value = JSON.parse(raw) as Partial<ReaderDisplaySettings>;
+    return {
+      fontFamily: ["book", "serif", "sans", "mono"].includes(value.fontFamily ?? "")
+        ? value.fontFamily as ReaderFontFamily : "book",
+      fontSize: READER_FONT_SIZES.includes(value.fontSize as (typeof READER_FONT_SIZES)[number])
+        ? value.fontSize as number : 100,
+      lineHeight: ["book", "1.4", "1.6", "1.8", "2"].includes(value.lineHeight ?? "")
+        ? value.lineHeight as ReaderLineHeight : "book",
+      paragraphSpacing: ["book", "0.5", "1", "1.5"].includes(value.paragraphSpacing ?? "")
+        ? value.paragraphSpacing as ReaderParagraphSpacing : "book",
+      contentWidth: ["narrow", "default", "wide"].includes(value.contentWidth ?? "")
+        ? value.contentWidth as ReaderContentWidth : "default",
+    };
+  } catch {
+    return DEFAULT_READER_DISPLAY_SETTINGS;
+  }
+}
+
+export function nextReaderFontSize(current: number, direction: -1 | 1) {
+  const currentIndex = READER_FONT_SIZES.indexOf(current as (typeof READER_FONT_SIZES)[number]);
+  const baseIndex = currentIndex < 0 ? READER_FONT_SIZES.indexOf(100) : currentIndex;
+  return READER_FONT_SIZES[Math.max(0, Math.min(READER_FONT_SIZES.length - 1, baseIndex + direction))]!;
+}
+
+export function readerContentWidth(width: ReaderContentWidth) {
+  return { narrow: "560px", default: "720px", wide: "840px" }[width];
+}
+export function scaleReaderFontSize(basePixels: number, percentage: number) {
+  return basePixels * percentage / 100;
+}
+
+export function readerTypographyCss(settings: ReaderDisplaySettings) {
+  const families: Record<ReaderFontFamily, string | null> = {
+    book: null,
+    serif: "Georgia, Cambria, 'Times New Roman', serif",
+    sans: "Arial, Helvetica, sans-serif",
+    mono: "ui-monospace, 'SFMono-Regular', Consolas, monospace",
+  };
+  const declarations = [
+    families[settings.fontFamily]
+      ? `body, body * { font-family: ${families[settings.fontFamily]} !important; }`
+      : "",
+    settings.lineHeight === "book" ? "" : `body, body * { line-height: ${settings.lineHeight} !important; }`,
+    settings.paragraphSpacing === "book"
+      ? ""
+      : `p { margin-block-end: ${settings.paragraphSpacing}em !important; }`,
+  ].filter(Boolean);
+  return declarations.join("\n");
 }
 
 export type ReaderZoomLimits = {

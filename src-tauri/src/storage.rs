@@ -410,6 +410,22 @@ impl LibraryDb {
     }
 
     pub fn scan_root(&self, root_id: &str) -> Result<LibraryScanResultDto, String> {
+        self.scan_root_at(root_id, None)
+    }
+
+    pub fn scan_folder(
+        &self,
+        root_id: &str,
+        relative_path: &str,
+    ) -> Result<LibraryScanResultDto, String> {
+        self.scan_root_at(root_id, Some(relative_path))
+    }
+
+    fn scan_root_at(
+        &self,
+        root_id: &str,
+        relative_path: Option<&str>,
+    ) -> Result<LibraryScanResultDto, String> {
         let _scan_guard = self
             .scan_lock
             .lock()
@@ -437,10 +453,40 @@ impl LibraryDb {
                 }],
             });
         }
+        let canonical_root = fs::canonicalize(&root_path)
+            .map_err(|error| format!("Could not access library directory: {error}"))?;
+        let scope_path = if let Some(relative_path) = relative_path {
+            let relative = Path::new(relative_path);
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err("The folder path must be relative to the library root.".to_string());
+            }
+            Some(relative.to_string_lossy().replace('\\', "/"))
+        } else {
+            None
+        };
+        let scan_path = if let Some(scope_path) = &scope_path {
+            let candidate = canonical_root.join(scope_path);
+            match fs::canonicalize(&candidate) {
+                Ok(path) if path.starts_with(&canonical_root) && path.is_dir() => path,
+                Ok(_) => {
+                    return Err("The selected folder is outside this library root.".to_string())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err("The selected folder no longer exists.".to_string());
+                }
+                Err(error) => return Err(format!("Could not access selected folder: {error}")),
+            }
+        } else {
+            canonical_root.clone()
+        };
 
         let mut files = Vec::new();
         let mut errors = Vec::new();
-        collect_files(&root_path, &root_path, &mut files, &mut errors);
+        collect_files(&canonical_root, &scan_path, &mut files, &mut errors);
         files.sort_by(|left, right| left.1.cmp(&right.1));
         errors.sort_by(|left, right| {
             left.path
@@ -583,26 +629,50 @@ impl LibraryDb {
                 )
                 .map_err(db_error)?;
         }
-        transaction
-            .execute(
-                "UPDATE documents SET availability = 'missing'
-                 WHERE root_id = ?1 AND (last_seen_scan IS NULL OR last_seen_scan <> ?2)",
-                params![root_id, scan_marker],
-            )
-            .map_err(db_error)?;
-        let missing: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL",
-                [root_id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        transaction
-            .execute(
-                "UPDATE library_roots SET last_scanned_at = ?1, updated_at = ?1 WHERE id = ?2",
-                params![now, root_id],
-            )
-            .map_err(db_error)?;
+        if let Some(scope_path) = &scope_path {
+            transaction
+                .execute(
+                    "UPDATE documents SET availability = 'missing'
+                     WHERE root_id = ?1
+                       AND (relative_path = ?2 OR substr(relative_path, 1, length(?2) + 1) = ?2 || '/')
+                       AND (last_seen_scan IS NULL OR last_seen_scan <> ?3)",
+                    params![root_id, scope_path, scan_marker],
+                )
+                .map_err(db_error)?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE documents SET availability = 'missing'
+                     WHERE root_id = ?1 AND (last_seen_scan IS NULL OR last_seen_scan <> ?2)",
+                    params![root_id, scan_marker],
+                )
+                .map_err(db_error)?;
+            transaction
+                .execute(
+                    "UPDATE library_roots SET last_scanned_at = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![now, root_id],
+                )
+                .map_err(db_error)?;
+        }
+        let missing: i64 = if let Some(scope_path) = &scope_path {
+            transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM documents
+                     WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL
+                       AND (relative_path = ?2 OR substr(relative_path, 1, length(?2) + 1) = ?2 || '/')",
+                    params![root_id, scope_path],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?
+        } else {
+            transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL",
+                    [root_id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?
+        };
         transaction.commit().map_err(db_error)?;
         errors.sort_by(|left, right| {
             left.path
@@ -1984,6 +2054,15 @@ pub fn library_root_scan(
 }
 
 #[tauri::command]
+pub fn library_folder_scan(
+    db: State<'_, LibraryDb>,
+    root_id: String,
+    relative_path: String,
+) -> Result<LibraryScanResultDto, String> {
+    db.scan_folder(&root_id, &relative_path)
+}
+
+#[tauri::command]
 pub fn library_document_list(
     db: State<'_, LibraryDb>,
     root_id: Option<String>,
@@ -2780,6 +2859,50 @@ mod tests {
             .expect("find missing");
         assert_eq!(missing_doc.availability, "missing");
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_scanner_folder_scope_preserves_other_root_documents() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("clio-test-folder-scan-{}", Uuid::new_v4()));
+        let nested = temp_dir.join("plays");
+        fs::create_dir_all(&nested).expect("create nested folder");
+        fs::write(temp_dir.join("readme.txt"), b"root document").expect("write root document");
+        fs::write(nested.join("play.md"), b"# Play").expect("write nested document");
+
+        let db = LibraryDb::open_in_memory().expect("open db");
+        let root = db
+            .add_root(&temp_dir.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("initial scan");
+        let documents = db
+            .list_documents(Some(&root.id), true)
+            .expect("list documents");
+        let root_doc_id = documents
+            .iter()
+            .find(|document| document.relative_path == "readme.txt")
+            .expect("root document")
+            .id
+            .clone();
+
+        fs::remove_file(nested.join("play.md")).expect("remove nested document");
+        let scoped = db
+            .scan_folder(&root.id, "plays")
+            .expect("scan nested folder");
+        assert_eq!(scoped.scanned, 0);
+        assert_eq!(scoped.missing, 1);
+        assert!(db.scan_folder(&root.id, "../").is_err());
+        assert!(db.scan_folder(&root.id, "missing").is_err());
+
+        let updated = db
+            .list_documents(Some(&root.id), true)
+            .expect("list after scoped scan");
+        let root_doc = updated
+            .iter()
+            .find(|document| document.id == root_doc_id)
+            .expect("root document remains cataloged");
+        assert_eq!(root_doc.availability, "present");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

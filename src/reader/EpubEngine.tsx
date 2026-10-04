@@ -4,12 +4,14 @@ import { Overlayer } from "foliate-js/overlayer.js";
 import "foliate-js/view.js";
 import { BlobReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 import type {
+  ReaderDisplaySettings,
   ReaderEngineHandle,
   ReaderEngineProps,
   ReaderSearchResult,
   ReaderTocItem,
   TextSelection,
 } from "./types";
+import { readerContentWidth, readerTypographyCss, scaleReaderFontSize } from "./readerLogic";
 
 type FoliateBook = {
   sections?: Array<{ createDocument(): Promise<Document | null> }>;
@@ -30,7 +32,9 @@ type FoliateViewElement = HTMLElement & {
   addAnnotation?(annotation: { value: string }, remove?: boolean): Promise<{ index: number; label: string } | undefined>;
   deleteAnnotation?(annotation: { value: string }): Promise<unknown>;
   book?: FoliateBook;
-  renderer?: HTMLElement;
+  renderer?: HTMLElement & {
+    getContents?: () => Array<{ doc: Document }>;
+  };
 };
 
 type EngineProps = ReaderEngineProps & {
@@ -194,11 +198,43 @@ function safeDeleteAnnotation(view: FoliateViewElement | null | undefined, value
     void Promise.resolve(view?.deleteAnnotation?.({ value })).catch(() => undefined);
   } catch {}
 }
+const epubFontSizeBases = new WeakMap<Element, number>();
+const epubFontScales = new WeakMap<Document, number>();
+
+function applyReaderSettings(view: FoliateViewElement, settings: ReaderDisplaySettings) {
+  view.renderer?.setAttribute("max-inline-size", readerContentWidth(settings.contentWidth));
+  for (const { doc } of view.renderer?.getContents?.() ?? []) {
+    const scale = settings.fontSize / 100;
+    const previousScale = epubFontScales.get(doc) ?? 1;
+    const elements = doc.body ? [doc.body, ...Array.from(doc.body.querySelectorAll("*"))] : [];
+    for (const element of elements) {
+      let basePixels = epubFontSizeBases.get(element);
+      if (basePixels === undefined) {
+        const computedPixels = Number.parseFloat(doc.defaultView?.getComputedStyle(element).fontSize ?? "");
+        basePixels = Number.isFinite(computedPixels) ? computedPixels / previousScale : 16 / previousScale;
+        epubFontSizeBases.set(element, basePixels);
+      }
+      (element as HTMLElement | SVGElement).style.setProperty("font-size", `${scaleReaderFontSize(basePixels, settings.fontSize)}px`, "important");
+    }
+    epubFontScales.set(doc, scale);
+
+    let style = doc.getElementById("clio-reader-presentation") as HTMLStyleElement | null;
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = "clio-reader-presentation";
+      doc.head?.append(style);
+    }
+    style.textContent = readerTypographyCss(settings);
+  }
+}
+
 
 export function EpubEngine({
   document,
   engineRef,
   theme,
+  displaySettings,
+  onDisplayFontSizeChange,
   initialPosition,
   onProgress,
   onPositionChange,
@@ -216,6 +252,12 @@ export function EpubEngine({
   const currentMatchIdxRef = useRef<number>(-1);
   const searchTokenRef = useRef<number>(0);
   const renderedCfisRef = useRef<Set<string>>(new Set());
+  const displaySettingsRef = useRef(displaySettings);
+  const onDisplayFontSizeChangeRef = useRef(onDisplayFontSizeChange);
+
+  useEffect(() => {
+    onDisplayFontSizeChangeRef.current = onDisplayFontSizeChange;
+  }, [onDisplayFontSizeChange]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -261,6 +303,7 @@ export function EpubEngine({
     let localReader: { close(): Promise<void> | void } | null = null;
     let closed = false;
     const active = () => operation === operationRef.current && viewRef.current === view;
+    const sectionKeyListeners = new Map<Document, (event: KeyboardEvent) => void>();
     const closeLocal = () => {
       renderedCfisRef.current.clear();
       if (!closed) {
@@ -317,6 +360,27 @@ export function EpubEngine({
       if (!detail || typeof detail !== "object") return;
       const { doc, index } = detail as { doc: Document; index: number };
       if (!doc || typeof index !== "number") return;
+      applyReaderSettings(view, displaySettingsRef.current);
+
+      if (!sectionKeyListeners.has(doc)) {
+        const handleFontShortcut = (keyEvent: KeyboardEvent) => {
+          if (!(keyEvent.ctrlKey || keyEvent.metaKey)) return;
+          const target = keyEvent.target as HTMLElement | null;
+          if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) return;
+          const direction = keyEvent.key === "+" || keyEvent.key === "=" || keyEvent.key === "NumpadAdd"
+            ? 1
+            : keyEvent.key === "-" || keyEvent.key === "_" || keyEvent.key === "NumpadSubtract"
+              ? -1
+              : keyEvent.key === "0" || keyEvent.key === "Numpad0"
+                ? 0
+                : null;
+          if (direction === null) return;
+          keyEvent.preventDefault();
+          onDisplayFontSizeChangeRef.current?.(direction);
+        };
+        sectionKeyListeners.set(doc, handleFontShortcut);
+        doc.addEventListener("keydown", handleFontShortcut);
+      }
 
       const handleSelectionChange = () => {
         if (!active()) return;
@@ -363,6 +427,7 @@ export function EpubEngine({
       view.renderer?.setAttribute("flow", "paginated");
       view.renderer?.setAttribute("gap", "6vw");
       view.renderer?.setAttribute("margin", "48px");
+      view.renderer?.setAttribute("max-inline-size", readerContentWidth(displaySettingsRef.current.contentWidth));
       if (view.renderer) {
         view.renderer.style.width = "100%";
         view.renderer.style.height = "100%";
@@ -392,6 +457,10 @@ export function EpubEngine({
       view.removeEventListener("draw-annotation", handleDrawAnnotation);
       view.removeEventListener("create-overlay", handleCreateOverlay);
       view.removeEventListener("load", handleLoad);
+      for (const [sectionDoc, listener] of sectionKeyListeners) {
+        sectionDoc.removeEventListener("keydown", listener);
+      }
+      sectionKeyListeners.clear();
       view.removeEventListener("relocate", handleRelocate);
       if (viewRef.current === view) {
         viewRef.current = null;
@@ -408,6 +477,12 @@ export function EpubEngine({
   useEffect(() => {
     viewRef.current?.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    displaySettingsRef.current = displaySettings;
+    const view = viewRef.current;
+    if (view) applyReaderSettings(view, displaySettings);
+  }, [displaySettings]);
 
   useEffect(() => {
     const view = viewRef.current;

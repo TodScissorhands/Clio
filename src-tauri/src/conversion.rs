@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 use uuid::Uuid;
 
@@ -408,9 +409,17 @@ fn validate_output_destination(input: &Path, output: &Path) -> Result<(), String
 }
 
 fn run_command(command: &mut Command, tool: &str) -> Result<(), String> {
+    let started_at = Instant::now();
+    #[cfg(debug_assertions)]
+    eprintln!("[clio-perf] conversion subprocess_started tool={tool}");
     let output = command
         .output()
         .map_err(|error| format!("Could not run {tool}. Make sure it is installed: {error}"))?;
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[clio-perf] conversion subprocess tool={tool} elapsed_ms={}",
+        started_at.elapsed().as_millis()
+    );
     if output.status.success() {
         return Ok(());
     }
@@ -844,6 +853,7 @@ pub fn plan_extract_pages_job(
 /// This means a tampered or stale job cannot force an unsupported operation,
 /// reach an unexpected output path, or bypass the overwrite policy.
 pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
+    let validation_started = Instant::now();
     let validation_result = validate_and_prepare_job(job);
     let (canonical_inputs, output_buf) = match validation_result {
         Ok(prepared) => prepared,
@@ -854,10 +864,22 @@ pub fn execute_job(job: &mut ConversionJob) -> Result<(), String> {
             return Err(err);
         }
     };
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[clio-perf] conversion validation elapsed_ms={}",
+        validation_started.elapsed().as_millis()
+    );
 
     job.status = JobStatus::Running;
-
+    let operation_started = Instant::now();
     let result = execute_operation(job, &canonical_inputs, &output_buf);
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[clio-perf] conversion operation_and_output elapsed_ms={} success={} output_available={}",
+        operation_started.elapsed().as_millis(),
+        result.is_ok(),
+        result.is_ok()
+    );
 
     job.completed_at = Some(timestamp());
     match result {
@@ -1224,9 +1246,14 @@ pub fn conversion_plan_extract_pages_job(
 /// `execute_job` before any file operations occur. The frontend cannot
 /// bypass the planner's security checks by submitting a crafted job.
 #[tauri::command]
-pub fn conversion_execute_job(mut job: ConversionJob) -> Result<ConversionJob, String> {
-    execute_job(&mut job)?;
-    Ok(job)
+pub async fn conversion_execute_job(job: ConversionJob) -> Result<ConversionJob, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut job = job;
+        execute_job(&mut job)?;
+        Ok(job)
+    })
+    .await
+    .map_err(|error| format!("Conversion task failed: {error}"))?
 }
 
 #[tauri::command]

@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { StoredDocument } from "../storage/domain";
 import {
   executeConversionJob,
-  formatDetail,
   formatLabel,
   getPdfPageCount,
   listConversionCapabilities,
@@ -69,6 +68,25 @@ export function ConversionWorkspace({
   // When the backend rejects because output exists, we stash the job here so
   // the user can confirm overwrite without picking the path again.
   const [pendingOverwrite, setPendingOverwrite] = useState<PendingOverwrite | null>(null);
+  const conversionTimingRef = useRef<{ startedAt: number; lastAt: number } | null>(null);
+  const traceConversionStage = useCallback((stage: string) => {
+    const timing = conversionTimingRef.current;
+    if (!import.meta.env.DEV || !timing) return;
+    const now = performance.now();
+    console.debug(
+      `[clio-perf] conversion stage=${stage} elapsed_ms=${Math.round(now - timing.lastAt)} total_ms=${Math.round(now - timing.startedAt)}`
+    );
+    timing.lastAt = now;
+  }, []);
+
+  useEffect(() => {
+    if (status !== "done" || !conversionTimingRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      traceConversionStage("ui_completed");
+      conversionTimingRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [status, traceConversionStage]);
 
   useEffect(() => {
     if (!initialDocument) return;
@@ -267,9 +285,13 @@ export function ConversionWorkspace({
     setStatus("converting");
     setPendingOverwrite(null);
     try {
+      traceConversionStage("native_execute_started");
       const completedJob = await executeConversionJob(job);
+      traceConversionStage("native_execute_returned");
       onSuccess(completedJob);
     } catch (error) {
+      traceConversionStage("native_execute_failed");
+      conversionTimingRef.current = null;
       const msg = String(error);
       setStatus("error");
       setMessage(msg);
@@ -307,14 +329,24 @@ export function ConversionWorkspace({
   async function convert() {
     if (!document) return chooseDocument();
     if (capabilities.length === 0) return;
+    const now = performance.now();
+    conversionTimingRef.current = { startedAt: now, lastAt: now };
+    traceConversionStage("convert_clicked");
+    traceConversionStage("save_dialog_requested");
     const output = await save({
       defaultPath: `${suggestedName}.${target}`,
       filters: [{ name: formatLabel(target), extensions: [target] }],
     });
-    if (!output) return;
+    traceConversionStage("save_dialog_result");
+    if (!output) {
+      conversionTimingRef.current = null;
+      return;
+    }
     setMessage("Planning conversion…");
     try {
+      traceConversionStage("planning_started");
       const jobToRun = await planConversionJob(document.path, target, output, false);
+      traceConversionStage("planning_returned");
       setMessage(`Converting with ${jobToRun.engine}…`);
       await runJob(jobToRun, `Overwrite and convert to ${target.toUpperCase()}`, (completed) => {
         setPlannedJob(completed);
@@ -323,6 +355,8 @@ export function ConversionWorkspace({
         setMessage(`Converted successfully with ${completed.engine}.`);
       });
     } catch (error) {
+      traceConversionStage("conversion_failed");
+      conversionTimingRef.current = null;
       setStatus("error");
       setMessage(String(error));
     }
@@ -377,11 +411,10 @@ export function ConversionWorkspace({
   }
 
   return (
-    <section className="tools-view">
+    <section className={`tools-view${onClose ? " tools-modal-view" : ""}`}>
       <div className="tools-header">
         <div className="tools-title-group">
           <h1>Document Tools</h1>
-          <p>Local-only format conversion, PDF merging, and page extraction.</p>
         </div>
         <div className="tools-header-actions-group">
           <div className="workspace-mode-toggle" role="tablist" aria-label="Tool mode">
@@ -440,7 +473,7 @@ export function ConversionWorkspace({
               onClick={onClose}
               aria-label="Close dialog"
             >
-              ✕
+              ×
             </button>
           )}
         </div>
@@ -450,16 +483,13 @@ export function ConversionWorkspace({
           <>
             <div className="source-card">
               <div className="card-heading">
-                <span>Input Document</span>
+                <span>INPUT</span>
               </div>
               {document ? (
                 <div className="selected-file">
                   <div className="file-icon">{document.extension.slice(0, 3).toUpperCase() || "DOC"}</div>
                   <div className="file-info">
                     <strong>{document.name}</strong>
-                    <span>
-                      {document.extension.toUpperCase() || "Unknown"} · {formatBytes(document.size)}
-                    </span>
                   </div>
                   <button className="quiet-button" onClick={chooseDocument}>
                     Replace
@@ -491,9 +521,6 @@ export function ConversionWorkspace({
                         onClick={() => void handleTargetSelect(cap.targetFormat)}
                       >
                         <strong>{formatLabel(cap.targetFormat)}</strong>
-                        <span>
-                          {formatDetail(cap.targetFormat)} · {cap.label}
-                        </span>
                       </button>
                     ))
                   ) : (
@@ -760,9 +787,6 @@ export function ConversionWorkspace({
           {plannedJob && <span> · {plannedJob.engine}</span>}
         </p>
       )}
-      <p className="tools-note">
-        Powered by native tools · Poppler text extraction · Pandoc document conversion
-      </p>
     </section>
   );
 }

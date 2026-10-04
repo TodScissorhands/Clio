@@ -37,30 +37,20 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
           <div className="shortcuts-section">
             <h4 className="shortcuts-section-title">Library</h4>
             <div className="shortcuts-grid">
-              <div className="shortcut-row">
-                <kbd>Enter</kbd>
-                <span>Open selected document</span>
-              </div>
-              <div className="shortcut-row">
-                <kbd>Space</kbd>
-                <span>Toggle selection</span>
-              </div>
-              <div className="shortcut-row">
-                <kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd>
-                <span>Focus search</span>
-              </div>
-              <div className="shortcut-row">
-                <kbd>Escape</kbd>
-                <span>Clear selection or search</span>
-              </div>
-              <div className="shortcut-row">
-                <kbd>Ctrl/Cmd</kbd>+<kbd>Click</kbd>
-                <span>Multi-select documents</span>
-              </div>
-              <div className="shortcut-row">
-                <kbd>Shift</kbd>+<kbd>Click</kbd>
-                <span>Range select documents</span>
-              </div>
+              <div className="shortcut-row"><kbd>h</kbd> / <kbd>j</kbd> / <kbd>k</kbd> / <kbd>l</kbd><span>Move focus spatially; in List, j/k move and h/l go back/open</span></div>
+              <div className="shortcut-row"><kbd>gg</kbd> / <kbd>G</kbd><span>Focus first / last document</span></div>
+              <div className="shortcut-row"><kbd>Enter</kbd><span>Open focused document</span></div>
+              <div className="shortcut-row"><kbd>Space</kbd><span>Toggle focused document selection</span></div>
+              <div className="shortcut-row"><kbd>Ctrl/Cmd</kbd>+<kbd>A</kbd><span>Select all visible documents</span></div>
+              <div className="shortcut-row"><kbd>Backspace</kbd><span>Move to parent Library folder</span></div>
+              <div className="shortcut-row"><kbd>/</kbd><span>Focus Library search</span></div>
+              <div className="shortcut-row"><kbd>Ctrl/Cmd</kbd>+<kbd>K</kbd><span>Open Quick Open and commands</span></div>
+              <div className="shortcut-row"><kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd><span>Toggle Grid/List</span></div>
+              <div className="shortcut-row"><kbd>Ctrl/Cmd</kbd>+<kbd>R</kbd><span>Rescan current Library scope</span></div>
+              <div className="shortcut-row"><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>Alt</kbd>+<kbd>→</kbd><span>Back / forward through Library locations</span></div>
+              <div className="shortcut-row"><kbd>Escape</kbd><span>Close transient UI or clear selection/search</span></div>
+              <div className="shortcut-row"><kbd>Ctrl/Cmd</kbd>+<kbd>Click</kbd><span>Multi-select documents</span></div>
+              <div className="shortcut-row"><kbd>Shift</kbd>+<kbd>Click</kbd><span>Range select documents</span></div>
             </div>
           </div>
 

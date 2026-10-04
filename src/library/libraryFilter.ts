@@ -240,27 +240,6 @@ export function deriveContinueDocuments(
   return inProgress.slice(0, maxCount);
 }
 
-/**
- * Recently Read: recently interacted-with/read documents in chronological order. (OD-5)
- * Finished documents remain in Recently Read even after leaving Continue Reading.
- */
-export function deriveRecentlyReadDocuments(
-  documents: StoredDocument[],
-  maxCount = 6
-): StoredDocument[] {
-  const recent = documents.filter((d) => {
-    if (d.availability === "missing") return false;
-    return Boolean(d.readingState?.lastOpenedAt);
-  });
-
-  recent.sort((a, b) => {
-    const timeA = a.readingState?.lastOpenedAt ?? "";
-    const timeB = b.readingState?.lastOpenedAt ?? "";
-    return timeB.localeCompare(timeA);
-  });
-
-  return recent.slice(0, maxCount);
-}
 
 export function sortDocuments(
   documents: StoredDocument[],

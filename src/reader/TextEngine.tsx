@@ -14,7 +14,7 @@ import type {
   ReaderSearchResult,
   ReaderTocItem,
 } from "./types";
-import { getReaderZoomLimits, getTextReadingProgression } from "./readerLogic";
+import { getTextReadingProgression } from "./readerLogic";
 
 type MarkdownBlock =
   | { kind: "heading"; level: number; text: string; id: string }
@@ -256,24 +256,32 @@ function renderFormattingOnly(text: string, keyPrefix: string): ReactNode {
 export function TextEngine({
   document,
   theme,
+  displaySettings,
   initialPosition,
   engineRef,
   onProgress,
   onPositionChange,
-  onZoomChange,
   onToc,
   onState,
 }: ReaderEngineProps & { engineRef: RefObject<ReaderEngineHandle | null> }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [rawText, setRawText] = useState<string>("");
-  const [zoomPercent, setZoomPercent] = useState<number>(100);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [activeMatchIndex, setActiveMatchIndex] = useState<number>(0);
   const [totalMatches, setTotalMatches] = useState<number>(0);
 
   const isMarkdown = document.record.format === "md";
-
-  const zoomLimits = getReaderZoomLimits(document.record.format)!;
+  const fontFamily = {
+    book: undefined,
+    serif: "Georgia, Cambria, 'Times New Roman', serif",
+    sans: "Arial, Helvetica, sans-serif",
+    mono: "ui-monospace, 'SFMono-Regular', Consolas, monospace",
+  }[displaySettings.fontFamily];
+  const maxWidth = {
+    narrow: "56ch",
+    default: isMarkdown ? "68ch" : "76ch",
+    wide: "84ch",
+  }[displaySettings.contentWidth];
 
   // Parse markdown or keep raw text
   const { blocks, toc } = useMemo(() => {
@@ -288,8 +296,6 @@ export function TextEngine({
     let cancelled = false;
     onState("loading", "Loading text document…");
     setRawText("");
-    setZoomPercent(100);
-    onZoomChange?.(100);
     document.bytes
       .text()
       .then((text) => {
@@ -306,8 +312,7 @@ export function TextEngine({
     return () => {
       cancelled = true;
     };
-  }, [document.bytes, onState, onZoomChange]);
-
+  }, [document.bytes, onState]);
   // Pass TOC to shell
   useEffect(() => {
     onToc(toc);
@@ -423,24 +428,9 @@ export function TextEngine({
         const vp = viewportRef.current;
         if (vp) vp.scrollBy({ top: -vp.clientHeight * 0.8, behavior: "smooth" });
       },
-      zoomIn() {
-        setZoomPercent((prev) => {
-          const next = Math.min(zoomLimits.max, prev + zoomLimits.step);
-          onZoomChange?.(next);
-          return next;
-        });
-      },
-      zoomOut() {
-        setZoomPercent((prev) => {
-          const next = Math.max(zoomLimits.min, prev - zoomLimits.step);
-          onZoomChange?.(next);
-          return next;
-        });
-      },
-      resetZoom() {
-        setZoomPercent(100);
-        onZoomChange?.(100);
-      },
+      zoomIn() {},
+      zoomOut() {},
+      resetZoom() {},
       search(query: string) {
         return performSearch(query);
       },
@@ -493,8 +483,6 @@ export function TextEngine({
       totalMatches,
       activeMatchIndex,
       scrollToMatch,
-      onZoomChange,
-      zoomLimits,
     ]
   );
 
@@ -512,7 +500,12 @@ export function TextEngine({
     >
       <div
         className="reader-text-content-wrap"
-        style={{ fontSize: `${(zoomPercent / 100) * 16}px` }}
+        style={{
+          fontSize: displaySettings.fontSize === 100 ? undefined : `${1.05 * displaySettings.fontSize / 100}rem`,
+          fontFamily,
+          maxWidth: displaySettings.contentWidth === "default" ? undefined : maxWidth,
+          lineHeight: displaySettings.lineHeight === "book" ? undefined : displaySettings.lineHeight,
+        }}
       >
         {isMarkdown ? (
           blocks.map((block, idx) => {
@@ -570,7 +563,11 @@ export function TextEngine({
                 return <hr key={idx} className="reader-text-hr" />;
               case "paragraph":
                 return (
-                  <p key={idx} className="reader-text-paragraph">
+                  <p
+                    key={idx}
+                    className="reader-text-paragraph"
+                    style={{ marginBottom: displaySettings.paragraphSpacing === "book" ? undefined : `${displaySettings.paragraphSpacing}em` }}
+                  >
                     {renderFormattedInline(
                       block.text,
                       searchQuery,
@@ -582,7 +579,15 @@ export function TextEngine({
             }
           })
         ) : (
-          <pre className="reader-text-plain-pre">
+          <pre
+            className="reader-text-plain-pre"
+            style={{
+              fontSize: displaySettings.fontSize === 100 ? undefined : `${0.92 * displaySettings.fontSize / 100}rem`,
+              fontFamily,
+              maxWidth: displaySettings.contentWidth === "default" ? undefined : maxWidth,
+              lineHeight: displaySettings.lineHeight === "book" ? undefined : displaySettings.lineHeight,
+            }}
+          >
             {renderFormattedInline(
               rawText,
               searchQuery,

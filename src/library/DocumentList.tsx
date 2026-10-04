@@ -106,9 +106,11 @@ export function DocumentList({
               <TableRow
                 key={doc.record.id}
                 id={`doc-row-${doc.record.id}`}
+                data-library-document-id={doc.record.id}
+                data-library-navigable
                 data-state={isSelected ? "selected" : undefined}
                 tabIndex={0}
-                className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                className="library-document-item cursor-pointer outline-none"
                 onClick={(event) => {
                   if (event.metaKey || event.ctrlKey) {
                     event.preventDefault();
@@ -121,6 +123,7 @@ export function DocumentList({
                   }
                 }}
                 onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
                   if (event.key === "Enter") {
                     event.preventDefault();
                     onOpenDocument(doc);
@@ -136,25 +139,32 @@ export function DocumentList({
                 }}
               >
                 <TableCell className="w-10 px-3" onClick={(event) => event.stopPropagation()}>
-                  <Checkbox checked={isSelected} onCheckedChange={() => onToggleSelect(doc.record.id, false, true)} aria-label={`Select ${title}`} />
+                  <Checkbox
+                    checked={isSelected}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onToggleSelect(doc.record.id, event.shiftKey, true);
+                    }}
+                    aria-label={isSelected ? `Deselect ${title}` : `Select ${title}`}
+                  />
                 </TableCell>
                 <TableCell className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="truncate font-medium" title={title}>{title}</span>
+                    <span className="truncate font-medium">{title}</span>
                     {doc.availability === "missing" && <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">Missing</span>}
                   </div>
                 </TableCell>
-                <TableCell className="hidden max-w-48 truncate text-muted-foreground sm:table-cell" title={author}>{author}</TableCell>
+                <TableCell className="hidden max-w-48 truncate text-muted-foreground sm:table-cell">{author}</TableCell>
                 <TableCell><span className="font-mono text-xs text-muted-foreground">{doc.record.format.toUpperCase()}</span></TableCell>
-                <TableCell className="hidden max-w-32 truncate text-muted-foreground lg:table-cell" title={doc.source.kind === "library" ? doc.source.relativePath : "Direct"}>
+                <TableCell className="hidden max-w-32 truncate text-muted-foreground lg:table-cell">
                   <span className="flex items-center gap-1.5"><FolderIcon className="size-3.5 shrink-0" />{folder}</span>
                 </TableCell>
                 <TableCell className="hidden font-mono text-xs text-muted-foreground 2xl:table-cell">{lastOpened}</TableCell>
                 <TableCell className="hidden font-mono text-xs text-muted-foreground 2xl:table-cell">{added}</TableCell>
                 <TableCell className="hidden font-mono text-xs text-muted-foreground 2xl:table-cell">{progress ?? "—"}</TableCell>
                 <TableCell className="w-10 px-2" onClick={(event) => event.stopPropagation()}>
-                  <Button variant="ghost" size="icon-sm" onClick={(event) => { event.stopPropagation(); onOpenContextMenu(doc, event); }} title="Actions" aria-label={`Actions for ${title}`}>
+                  <Button variant="ghost" size="icon-sm" onClick={(event) => { event.stopPropagation(); onOpenContextMenu(doc, event); }} aria-label={`Actions for ${title}`}>
                     <MoreHorizontalIcon className="size-4" />
                   </Button>
                 </TableCell>

@@ -1,10 +1,9 @@
-import { useState, useMemo, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { getDocumentDisplayTitle, type Collection, type LibraryRoot, type StoredDocument } from "../storage/domain";
 import { getDocumentThumbnail } from "../storage/documentStorage";
 import type { LibraryScope } from "../navigation/navigation";
 import {
   deriveContinueDocuments,
-  deriveRecentlyReadDocuments,
   filterDocumentsByScope,
   getDocumentMonogram,
   sortDocuments,
@@ -41,7 +40,7 @@ export interface LibraryViewProps {
   message: string;
   error: string;
   onAddRoot: () => void;
-  onScanRoot: (rootId: string) => void;
+  onScanRoot: (rootId: string, relativePath?: string) => void;
   onRemoveRoot: (rootId: string) => void;
   onCreateCollection: (name: string) => Promise<void>;
   onCreateAndAddToCollection: (name: string, documentIds: string[]) => Promise<void>;
@@ -59,6 +58,9 @@ export interface LibraryViewProps {
   onDismissMessage?: () => void;
   onDismissError?: () => void;
   onOpenFile?: () => void;
+  onOpenExternally?: (document: StoredDocument) => Promise<void>;
+  focusSearchRequest?: number;
+  openToolsRequest?: number;
 }
 
 
@@ -153,9 +155,20 @@ export function LibraryView({
   onDismissMessage,
   onDismissError,
   onOpenFile,
+  onOpenExternally,
+  focusSearchRequest,
+  openToolsRequest,
 }: LibraryViewProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [lastSelectedDocId, setLastSelectedDocId] = useState<string | null>(null);
+  const handledToolsRequest = useRef(0);
+
+  useEffect(() => {
+    if (!openToolsRequest || openToolsRequest === handledToolsRequest.current) return;
+    handledToolsRequest.current = openToolsRequest;
+    setConversionModal({ mode: "convert" });
+  }, [openToolsRequest]);
+
 
   // Modals state
   const [propertiesDoc, setPropertiesDoc] = useState<StoredDocument | null>(null);
@@ -184,10 +197,6 @@ export function LibraryView({
     return deriveContinueDocuments(documents, 6);
   }, [documents]);
 
-  // Recently read documents: max 6 (OD-5)
-  const recentDocuments = useMemo(() => {
-    return deriveRecentlyReadDocuments(documents, 6);
-  }, [documents]);
 
   // Selected documents objects
   const selectedDocuments = useMemo(() => {
@@ -382,31 +391,15 @@ export function LibraryView({
         onRenameCollection={onRenameCollection}
         onDeleteCollection={onDeleteCollection}
       />
-      <SidebarInset className="h-full min-h-0 min-w-0 overflow-hidden">
+      <SidebarInset className="relative h-full min-h-0 min-w-0 overflow-hidden">
         <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-          {message && (
-            <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-sm" role="status">
-              <span className="min-w-0 flex-1">{message}</span>
-              {onDismissMessage && (
-                <button type="button" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onDismissMessage} aria-label="Dismiss message">×</button>
-              )}
-            </div>
-          )}
-          {error && (
-            <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-sm text-foreground" role="alert">
-              <span className="min-w-0 flex-1">{error}</span>
-              {onDismissError && (
-                <button type="button" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onDismissError} aria-label="Dismiss error">×</button>
-              )}
-            </div>
-          )}
-
           <LibraryToolbar
             activeScope={activeScope}
             roots={roots}
             collections={collections}
             searchQuery={searchQuery}
             onSearchChange={onSearchChange}
+            focusSearchRequest={focusSearchRequest}
             viewMode={viewMode}
             onViewModeChange={onViewModeChange}
             sortBy={sortBy}
@@ -455,6 +448,7 @@ export function LibraryView({
             onOpenAppMenu={onOpenAppMenu}
           />
 
+
           <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5 max-sm:px-4 max-sm:py-4">
             {roots.length === 0 ? (
               <section className="mx-auto flex max-w-md flex-col items-center gap-3 py-20 text-center">
@@ -472,7 +466,6 @@ export function LibraryView({
                 {showContinueShelf && (
                   <ContinueSection
                     documents={continueDocuments}
-                    recentDocuments={recentDocuments}
                     onOpenDocument={handleOpenDoc}
                     onOpenContextMenu={handleOpenContextMenu}
                     renderThumbnail={renderThumbnail}
@@ -525,6 +518,24 @@ export function LibraryView({
             )}
           </main>
         </div>
+
+      {(message || error) && (
+        <div className="library-status-overlay pointer-events-none absolute bottom-4 left-4 z-40" aria-live="polite">
+          <div className={`library-status-toast pointer-events-auto ${error ? "is-error" : ""}`} role={error ? "alert" : "status"}>
+            <span className="min-w-0 flex-1">{error || message}</span>
+            {(error ? onDismissError : onDismissMessage) && (
+              <button
+                type="button"
+                className="library-status-dismiss"
+                onClick={error ? onDismissError : onDismissMessage}
+                aria-label="Dismiss notification"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       </SidebarInset>
 
       {/* Context Menu (Groups 1, 2, 3) */}
@@ -537,7 +548,7 @@ export function LibraryView({
           collections={collections}
           commandContext={commandContext}
           onClose={() => setContextMenu(null)}
-          onCreateCollectionPrompt={() => setIsAddToCollectionOpen(true)}
+          onOpenExternally={onOpenExternally}
         />
       )}
 

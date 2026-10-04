@@ -42,7 +42,9 @@ export function DocumentGrid({
           <article
             key={doc.record.id}
             id={`doc-card-${doc.record.id}`}
-            className="group min-w-0 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            data-library-document-id={doc.record.id}
+            data-library-navigable
+            className="library-document-item group min-w-0 cursor-pointer rounded-sm outline-none"
             data-selected={isSelected || undefined}
             role="listitem"
             tabIndex={0}
@@ -58,6 +60,7 @@ export function DocumentGrid({
               }
             }}
             onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
               if (event.key === "Enter") {
                 event.preventDefault();
                 onOpenDocument(doc);
@@ -76,15 +79,14 @@ export function DocumentGrid({
               {renderThumbnail(doc)}
 
               <div
-                className={`absolute left-2 top-2 z-10 transition-opacity ${isSelected ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"}`}
+                className={`absolute left-2 top-2 z-10 ${isSelected ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"}`}
                 onClick={(event) => event.stopPropagation()}
               >
                 <Checkbox
                   checked={isSelected}
                   onClick={(event) => onToggleSelect(doc.record.id, event.shiftKey, true)}
                   aria-label={isSelected ? `Deselect ${displayTitle}` : `Select ${displayTitle}`}
-                  title={isSelected ? "Deselect document" : "Select document"}
-                  className="border-foreground/60 bg-background/90 shadow-sm"
+                  className="size-[21px] rounded-[4px] border-2 border-neutral-800 bg-white text-neutral-950 shadow-sm data-[state=checked]:border-neutral-900 data-[state=checked]:bg-neutral-900 data-[state=checked]:text-white dark:border-neutral-300 dark:bg-neutral-900 dark:data-[state=checked]:border-neutral-100 dark:data-[state=checked]:bg-neutral-100 dark:data-[state=checked]:text-neutral-950"
                 />
               </div>
 
@@ -93,7 +95,7 @@ export function DocumentGrid({
               </span>
 
               {progressPercent !== null && progressPercent > 0 && (
-                <div className="absolute inset-x-0 bottom-0 h-1 bg-background/60" aria-hidden="true" title={`${progressPercent}% completed`}>
+                <div className="absolute inset-x-0 bottom-0 h-1 bg-background/60" aria-hidden="true">
                   <div className="h-full bg-foreground" style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }} />
                 </div>
               )}
@@ -107,7 +109,6 @@ export function DocumentGrid({
                   event.stopPropagation();
                   onOpenContextMenu(doc, event);
                 }}
-                title="Document actions"
                 aria-label={`Actions for ${displayTitle}`}
               >
                 <MoreHorizontalIcon className="size-4" />
@@ -115,8 +116,8 @@ export function DocumentGrid({
             </div>
 
             <div className="pt-2">
-              <strong className="block truncate text-[13px] font-medium leading-5" title={displayTitle}>{displayTitle}</strong>
-              {authorStr && <span className="mt-0.5 block truncate text-xs text-muted-foreground" title={authorStr}>{authorStr}</span>}
+              <strong className="block truncate text-[13px] font-medium leading-5">{displayTitle}</strong>
+              {authorStr && <span className="mt-0.5 block truncate text-xs text-muted-foreground">{authorStr}</span>}
               {doc.availability === "missing" && <span className="mt-1 block text-xs text-muted-foreground">Missing</span>}
             </div>
           </article>

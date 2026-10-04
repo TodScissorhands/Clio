@@ -63,16 +63,16 @@
 }
 
 .reader-shell.theme-dark {
-  --reader-bg-viewport: #151613;
-  --reader-border-viewport: #2c2f26;
-  --reader-panel-bg: #1c1e19;
-  --reader-panel-border: #35382e;
-  --reader-panel-hover: #272a22;
-  --reader-panel-text: #dedcd5;
-  --reader-panel-muted: #8c8f82;
-  --reader-panel-dim: #65685d;
-  --reader-input-bg: #242721;
-  --reader-input-border: #3a3e33;
+  --reader-bg-viewport: #191919;
+  --reader-border-viewport: #383838;
+  --reader-panel-bg: #222222;
+  --reader-panel-border: #3b3b3b;
+  --reader-panel-hover: #2b2b2b;
+  --reader-panel-text: #f0f0f0;
+  --reader-panel-muted: #b0b0b0;
+  --reader-panel-dim: #858585;
+  --reader-input-bg: #282828;
+  --reader-input-border: #444444;
   --reader-highlight-color: #c89e3a;
   color: var(--reader-panel-text);
 }
@@ -227,7 +227,7 @@
 }
 
 .reader-shell.theme-dark .reader-viewport {
-  background: #151613;
+  background: #191919;
 }
 
 /* Engine geometry */
@@ -246,7 +246,7 @@
 }
 
 .epub-engine[data-theme="dark"] {
-  color: #dedcd5;
+  color: #e7e7e7;
 }
 
 .epub-engine[data-theme="sepia"] {
@@ -277,7 +277,7 @@ foliate-view {
 }
 
 .reader-shell.theme-dark .pdf-engine {
-  background: #1a1c19;
+  background: #1b1b1b;
 }
 
 /* ── Empty state ─────────────────────────────────────────────────────────────── */
@@ -423,7 +423,9 @@ foliate-view {
   top: 48px;
   right: 12px;
   z-index: 50;
-  min-width: 180px;
+  min-width: 280px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
   padding: 10px;
   border: 1px solid var(--reader-panel-border);
   border-radius: var(--radius-md);
@@ -472,6 +474,36 @@ foliate-view {
   color: var(--accent-text);
   background: var(--accent-subtle);
   font-weight: 600;
+}
+
+.reader-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--reader-panel-muted);
+  font-size: var(--text-xs);
+}
+
+.reader-setting-row select {
+  min-width: 132px;
+  max-width: 150px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--reader-panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--reader-input-bg);
+  color: var(--reader-panel-text);
+  font-size: var(--text-xs);
+}
+
+.reader-shell.theme-dark .reader-setting-row select {
+  color-scheme: dark;
+}
+
+.reader-setting-row select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }
 
 .reader-zoom-row {
@@ -1323,8 +1355,8 @@ foliate-view {
 }
 
 .reader-shell.theme-dark .reader-text-viewport {
-  background: #151613;
-  color: #dedcd5;
+  background: #191919;
+  color: #e7e7e7;
 }
 
 .reader-text-content-wrap {
@@ -1446,9 +1478,9 @@ foliate-view {
 }
 
 .reader-shell.theme-dark .reader-text-preview {
-  background: rgba(30, 32, 27, 0.92);
-  color: #dedcd5;
-  border-color: #383c31;
+  background: rgba(32, 32, 32, 0.94);
+  color: #e7e7e7;
+  border-color: #3b3b3b;
 }
 
 /* ── Responsive ─────────────────────────────────────────────────────────────── */
