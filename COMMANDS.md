@@ -33,21 +33,51 @@ bun run dev
 
 ## Checks
 
+Run complete repository verification with the canonical check:
+
 ```bash
-bun run build
-cargo check --manifest-path src-tauri/Cargo.toml
+bun run check
 ```
 
-`bun run build` type-checks TypeScript and creates the Vite output in `dist/`. `cargo check` validates the Rust/Tauri backend.
+This runs the frontend and Rust checks through the dedicated scripts:
+
+```bash
+bun run check:frontend
+bun run check:rust
+```
+
+### Frontend checks
+
+Run the individual frontend commands:
+
+```bash
+bun run test
+bun run build
+```
+
+`bun run build` performs the TypeScript static check and creates the Vite output. The project does not configure a separate JavaScript lint tool. `bun run check:frontend` runs both commands.
+
+### Rust checks
+
+Run the individual Rust commands:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+```
+
+`bun run check:rust` runs the Rust tests, formatting check, and Clippy check.
 
 ## Formatting and linting
 
 ```bash
 cargo fmt --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
-These commands format Rust and run additional Rust lints. Review their changes and diagnostics before committing.
+The formatting command updates Rust files; Clippy runs the configured Rust lints. Review their changes and diagnostics before committing.
 
 ## Release build
 

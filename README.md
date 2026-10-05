@@ -32,14 +32,31 @@ bun install
 bun tauri dev
 ```
 
-Run the frontend suite and production build:
+Run the complete repository verification (the canonical check):
 
 ```bash
-bun test
+bun run check
+```
+
+This runs the frontend tests and build, then the Rust tests, formatting check, and Clippy check.
+
+Run the frontend checks separately:
+
+```bash
+bun run test
+bun run check:frontend
 bun run build
 ```
 
-Run the Rust tests and checks:
+`bun run build` performs the TypeScript static check before creating the Vite production output. No separate JavaScript lint tool is configured.
+
+Run the Rust checks separately:
+
+```bash
+bun run check:rust
+```
+
+The individual Rust commands used by that script are:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
