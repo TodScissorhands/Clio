@@ -8,6 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+mod catalog_reconciliation;
 pub mod commands;
 mod filesystem_observation;
 mod migrations;
@@ -277,67 +278,25 @@ impl LibraryDb {
                 Some(value) => value,
                 None => continue,
             };
-            let existing: Option<(String, Option<String>)> = transaction
-                .query_row(
-                    "SELECT id, excluded_at FROM documents WHERE root_id = ?1 AND relative_path = ?2",
-                    params![root_id, relative_path],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(db_error)?;
-            let doc_id = if let Some((document_id, excluded_at)) = existing {
-                if excluded_at.is_some() {
-                    // OD-1: Excluded document stays excluded across future scans
-                    transaction
-                        .execute(
-                            "UPDATE documents SET last_seen_scan = ?1, availability = 'present' WHERE id = ?2",
-                            params![scan_marker, document_id],
-                        )
-                        .map_err(db_error)?;
-                    continue;
-                }
-                transaction
-                    .execute(
-                        "UPDATE documents
-                         SET name = ?1, format_id = ?2, size_bytes = ?3, updated_at = ?4,
-                             last_seen_scan = ?5, availability = 'present'
-                         WHERE id = ?6",
-                        params![
-                            name,
-                            format_id.as_str(),
-                            metadata.len() as i64,
-                            now,
-                            scan_marker,
-                            document_id
-                        ],
-                    )
-                    .map_err(db_error)?;
-                updated += 1;
-                document_id
-            } else {
-                let document_id = Uuid::new_v4().to_string();
-                transaction
-                    .execute(
-                        "INSERT INTO documents
-                             (id, root_id, relative_path, name, format_id, size_bytes,
-                              first_seen_at, updated_at, last_seen_scan, availability)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'present')",
-                        params![
-                            document_id,
-                            root_id,
-                            relative_path,
-                            name,
-                            format_id.as_str(),
-                            metadata.len() as i64,
-                            now,
-                            now,
-                            scan_marker
-                        ],
-                    )
-                    .map_err(db_error)?;
-                inserted += 1;
-                document_id
+            let reconciled = catalog_reconciliation::reconcile_document(
+                &transaction,
+                root_id,
+                relative_path,
+                &name,
+                format_id.as_str(),
+                metadata.len() as i64,
+                &now,
+                &scan_marker,
+            )?;
+            let Some(reconciled) = reconciled else {
+                continue;
             };
+            if reconciled.inserted {
+                inserted += 1;
+            } else {
+                updated += 1;
+            }
+            let doc_id = reconciled.document_id;
 
             // Extract metadata & thumbnail for present document
             let (doc_meta, _thumb) = extract_metadata_and_thumbnail(
@@ -387,50 +346,13 @@ impl LibraryDb {
                 )
                 .map_err(db_error)?;
         }
-        if let Some(scope_path) = &scope_path {
-            transaction
-                .execute(
-                    "UPDATE documents SET availability = 'missing'
-                     WHERE root_id = ?1
-                       AND (relative_path = ?2 OR substr(relative_path, 1, length(?2) + 1) = ?2 || '/')
-                       AND (last_seen_scan IS NULL OR last_seen_scan <> ?3)",
-                    params![root_id, scope_path, scan_marker],
-                )
-                .map_err(db_error)?;
-        } else {
-            transaction
-                .execute(
-                    "UPDATE documents SET availability = 'missing'
-                     WHERE root_id = ?1 AND (last_seen_scan IS NULL OR last_seen_scan <> ?2)",
-                    params![root_id, scan_marker],
-                )
-                .map_err(db_error)?;
-            transaction
-                .execute(
-                    "UPDATE library_roots SET last_scanned_at = ?1, updated_at = ?1 WHERE id = ?2",
-                    params![now, root_id],
-                )
-                .map_err(db_error)?;
-        }
-        let missing: i64 = if let Some(scope_path) = &scope_path {
-            transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM documents
-                     WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL
-                       AND (relative_path = ?2 OR substr(relative_path, 1, length(?2) + 1) = ?2 || '/')",
-                    params![root_id, scope_path],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?
-        } else {
-            transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM documents WHERE root_id = ?1 AND availability = 'missing' AND excluded_at IS NULL",
-                    [root_id],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?
-        };
+        let missing = catalog_reconciliation::reconcile_missing_documents(
+            &transaction,
+            root_id,
+            scope_path.as_deref(),
+            &scan_marker,
+            &now,
+        )?;
         transaction.commit().map_err(db_error)?;
         errors.sort_by(|left, right| {
             left.path
