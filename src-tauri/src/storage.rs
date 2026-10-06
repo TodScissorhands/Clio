@@ -62,7 +62,8 @@ impl LibraryDb {
     ) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(db_error)?;
         let thumb_dir = thumbnail_dir.as_ref().to_path_buf();
-        let _ = fs::create_dir_all(&thumb_dir);
+        fs::create_dir_all(&thumb_dir)
+            .map_err(|e| format!("Could not create thumbnail directory: {e}"))?;
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
             scan_lock: Arc::new(Mutex::new(())),
@@ -75,7 +76,8 @@ impl LibraryDb {
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self, String> {
         let thumb_dir = std::env::temp_dir().join(format!("clio-thumbs-{}", Uuid::new_v4()));
-        let _ = fs::create_dir_all(&thumb_dir);
+        fs::create_dir_all(&thumb_dir)
+            .map_err(|e| format!("Could not create thumbnail directory: {e}"))?;
         let connection = Connection::open_in_memory().map_err(db_error)?;
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -525,7 +527,7 @@ impl LibraryDb {
                 "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
                         d.root_id, d.relative_path, d.availability, r.locator_value
                  FROM documents d JOIN library_roots r ON r.id = d.root_id
-                 WHERE d.id = ?1",
+                 WHERE d.id = ?1 AND d.excluded_at IS NULL",
                 [document_id],
                 open_document_from_row,
             )
@@ -644,10 +646,24 @@ impl LibraryDb {
         let Some(rel_path) = path else {
             return Ok(None);
         };
-        let full_path = self.thumbnail_dir.join(&rel_path);
-        if !full_path.exists() {
-            return Ok(None);
+        let relative = Path::new(&rel_path);
+        if rel_path.trim().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("Thumbnail path escaped its thumbnail directory.".to_string());
         }
+        let thumbnail_root = fs::canonicalize(&self.thumbnail_dir)
+            .map_err(|e| format!("Could not access thumbnail directory: {e}"))?;
+        let candidate = thumbnail_root.join(relative);
+        let full_path = match fs::canonicalize(&candidate) {
+            Ok(path) if path.starts_with(&thumbnail_root) => path,
+            Ok(_) => return Err("Thumbnail path escaped its thumbnail directory.".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("Could not access thumbnail: {error}")),
+        };
         let bytes = fs::read(&full_path).map_err(|e| format!("Could not read thumbnail: {e}"))?;
         let mime = if rel_path.ends_with(".png") {
             "image/png"
@@ -1152,7 +1168,7 @@ fn timestamp() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
-fn civil_date(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_date(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;

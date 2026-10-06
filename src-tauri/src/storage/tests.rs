@@ -1127,6 +1127,35 @@ fn test_thumbnail_data_url_generation() {
     assert!(data_url.starts_with("data:image/png;base64,"));
     assert!(data_url.len() > 25);
 
+    let outside_path = temp_dir.join("outside.png");
+    fs::write(&outside_path, b"outside").expect("write outside thumbnail");
+    let mut malicious_meta = DocumentMetadata::fallback();
+    malicious_meta.thumbnail_path = Some("../outside.png".to_string());
+    db.update_metadata(doc_id, malicious_meta)
+        .expect("save malicious thumbnail metadata");
+    assert!(db.get_thumbnail_data_url(doc_id).is_err());
+
+    let mut absolute_meta = DocumentMetadata::fallback();
+    absolute_meta.thumbnail_path = Some(outside_path.to_string_lossy().into_owned());
+    db.update_metadata(doc_id, absolute_meta)
+        .expect("save absolute thumbnail metadata");
+    assert!(db.get_thumbnail_data_url(doc_id).is_err());
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_thumbnail_directory_creation_errors_are_propagated() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-thumb-dir-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let blocker = temp_dir.join("not-a-directory");
+    fs::write(&blocker, b"blocker").expect("write blocker");
+
+    let result = LibraryDb::open_with_thumbnail_dir(
+        temp_dir.join("library.sqlite3"),
+        blocker.join("thumbnails"),
+    );
+    assert!(result.is_err());
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -1442,6 +1471,32 @@ fn test_document_path_resolution_and_validation() {
 
     // Non-existent document
     assert!(db.document_path("invalid-doc-id").is_err());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_excluded_document_cannot_be_resolved_by_id() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("clio-excluded-resolution-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).expect("create dir");
+    let file_path = temp_dir.join("excluded.pdf");
+    fs::write(&file_path, b"%PDF sample").expect("write file");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let root = db
+        .add_root(&temp_dir.to_string_lossy(), None)
+        .expect("add root");
+    db.scan_root(&root.id).expect("scan");
+    let document_id = db.list_documents(Some(&root.id), false).unwrap()[0]
+        .id
+        .clone();
+
+    db.remove_document(&document_id).expect("exclude document");
+    assert!(db.document_path(&document_id).is_err());
+    assert!(db
+        .open_library_document(&document_id, |_| Ok("must-not-mint".to_string()))
+        .is_err());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

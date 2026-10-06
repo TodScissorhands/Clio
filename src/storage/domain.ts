@@ -148,11 +148,16 @@ export function validateAnnotationLocator(locator: AnnotationLocator): string | 
   // Runtime guard: tolerate bad inputs from JSON.parse or untrusted sources.
   if (locator == null || typeof locator !== "object") return "Annotation locator must be an object.";
   if (locator.kind === "epub-cfi-range") {
-    if (typeof locator.cfi !== "string" || !locator.cfi.trim()) return "EPUB annotation locator requires a non-empty CFI.";
-    if (!locator.cfi.trim().startsWith("epubcfi(")) return "EPUB annotation locator CFI must start with epubcfi(.";
-    // A range CFI must contain a comma separating start and end offsets.
-    const inner = locator.cfi.trim().slice("epubcfi(".length, -1);
-    if (!inner.includes(",")) return "EPUB annotation locator CFI must be a range CFI (epubcfi with start,end).";
+    const cfi = typeof locator.cfi === "string" ? locator.cfi.trim() : "";
+    if (!cfi) return "EPUB annotation locator requires a non-empty CFI.";
+    if (!cfi.startsWith("epubcfi(") || !cfi.endsWith(")")) {
+      return "EPUB annotation locator CFI must be wrapped in epubcfi(...).";
+    }
+    const inner = cfi.slice("epubcfi(".length, -1);
+    const [start, end] = inner.split(",", 2);
+    if (!start?.trim() || !end?.trim()) {
+      return "EPUB annotation locator CFI must be a range CFI (epubcfi with start,end).";
+    }
     return null;
   }
   if (locator.kind === "pdf-page-text") {

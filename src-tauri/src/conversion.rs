@@ -331,22 +331,8 @@ fn timestamp() -> String {
     let hours = day_secs / 3600;
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
-    let (year, month, day) = civil_date(days);
+    let (year, month, day) = crate::storage::civil_date(days);
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-fn civil_date(days: i64) -> (i64, i64, i64) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1024 + doe / 1461 - doe / 14245) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as i64;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as i64;
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
 }
 
 /// Validate that `output` is a safe destination for a job whose inputs include
@@ -1361,6 +1347,26 @@ mod tests {
         assert_eq!(normalize_format(".htm"), "html");
         assert_eq!(normalize_format("  .Docx  "), "docx");
         assert_eq!(normalize_format("jpeg"), "jpg");
+    }
+
+    #[test]
+    fn test_shared_civil_date_known_and_leap_boundaries() {
+        let cases = [
+            (-25_567, (1900, 1, 1)),
+            (-25_509, (1900, 2, 28)),
+            (-25_508, (1900, 3, 1)),
+            (-1, (1969, 12, 31)),
+            (0, (1970, 1, 1)),
+            (10_957, (2000, 1, 1)),
+            (11_015, (2000, 2, 28)),
+            (11_016, (2000, 2, 29)),
+            (11_017, (2000, 3, 1)),
+            (47_482, (2100, 1, 1)),
+        ];
+
+        for (days, expected) in cases {
+            assert_eq!(crate::storage::civil_date(days), expected);
+        }
     }
 
     #[test]

@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
+
+const MAX_ARCHIVE_XML_BYTES: usize = 1024 * 1024;
+const MAX_ARCHIVE_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -349,15 +353,10 @@ pub fn resolve_relative_zip_path(opf_path: &str, href: &str) -> Option<String> {
 pub fn extract_epub_metadata(path: &Path) -> (DocumentMetadata, Option<String>) {
     let mut metadata = DocumentMetadata::fallback();
 
-    // 1. Read META-INF/container.xml via unzip -p
-    let container_output = match Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg("META-INF/container.xml")
-        .output()
-    {
-        Ok(out) if out.status.success() => out.stdout,
-        _ => return (metadata, None),
+    let Some(container_output) =
+        read_unzip_member_bounded(path, "META-INF/container.xml", MAX_ARCHIVE_XML_BYTES)
+    else {
+        return (metadata, None);
     };
     let container_xml = String::from_utf8_lossy(&container_output);
 
@@ -374,15 +373,9 @@ pub fn extract_epub_metadata(path: &Path) -> (DocumentMetadata, Option<String>) 
         return (metadata, None);
     };
 
-    // 2. Read package OPF via unzip -p
-    let opf_output = match Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg(&opf_rel_path)
-        .output()
-    {
-        Ok(out) if out.status.success() => out.stdout,
-        _ => return (metadata, None),
+    let Some(opf_output) = read_unzip_member_bounded(path, &opf_rel_path, MAX_ARCHIVE_XML_BYTES)
+    else {
+        return (metadata, None);
     };
     let opf_xml = String::from_utf8_lossy(&opf_output);
 
@@ -455,17 +448,9 @@ pub fn extract_epub_cover_image(
     let thumb_filename = format!("{document_id}.{ext}");
     let thumb_dest = thumbnail_dir.join(&thumb_filename);
 
-    let output = Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg(cover_zip_path)
-        .output()
-        .ok()?;
+    let output = read_unzip_member_bounded(path, cover_zip_path, MAX_ARCHIVE_THUMBNAIL_BYTES)?;
 
-    if output.status.success()
-        && !output.stdout.is_empty()
-        && fs::write(&thumb_dest, &output.stdout).is_ok()
-    {
+    if !output.is_empty() && fs::write(&thumb_dest, &output).is_ok() {
         return Some(thumb_filename);
     }
     None
@@ -588,14 +573,11 @@ pub fn extract_docx_metadata(
     let mut meta = DocumentMetadata::fallback();
     let mut thumb = None;
 
-    if let Ok(core_output) = Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg("docProps/core.xml")
-        .output()
+    if let Some(core_output) =
+        read_unzip_member_bounded(path, "docProps/core.xml", MAX_ARCHIVE_XML_BYTES)
     {
-        if core_output.status.success() && !core_output.stdout.is_empty() {
-            let xml = String::from_utf8_lossy(&core_output.stdout);
+        if !core_output.is_empty() {
+            let xml = String::from_utf8_lossy(&core_output);
             let mut found = false;
             if let Some(t) = extract_xml_tag(&xml, "dc:title") {
                 meta.title = Some(t);
@@ -645,16 +627,9 @@ pub fn extract_docx_metadata(
         };
         let thumb_filename = format!("{document_id}.{ext}");
         let thumb_dest = thumbnail_dir.join(&thumb_filename);
-        if let Ok(out) = Command::new("unzip")
-            .args(["-p"])
-            .arg(path)
-            .arg(thumb_name)
-            .output()
+        if let Some(out) = read_unzip_member_bounded(path, thumb_name, MAX_ARCHIVE_THUMBNAIL_BYTES)
         {
-            if out.status.success()
-                && !out.stdout.is_empty()
-                && fs::write(&thumb_dest, &out.stdout).is_ok()
-            {
+            if !out.is_empty() && fs::write(&thumb_dest, &out).is_ok() {
                 thumb = Some(thumb_filename);
                 break;
             }
@@ -673,14 +648,9 @@ pub fn extract_odt_metadata(
     let mut meta = DocumentMetadata::fallback();
     let mut thumb = None;
 
-    if let Ok(meta_output) = Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg("meta.xml")
-        .output()
-    {
-        if meta_output.status.success() && !meta_output.stdout.is_empty() {
-            let xml = String::from_utf8_lossy(&meta_output.stdout);
+    if let Some(meta_output) = read_unzip_member_bounded(path, "meta.xml", MAX_ARCHIVE_XML_BYTES) {
+        if !meta_output.is_empty() {
+            let xml = String::from_utf8_lossy(&meta_output);
             let mut found = false;
             if let Some(t) = extract_xml_tag(&xml, "dc:title") {
                 meta.title = Some(t);
@@ -718,16 +688,12 @@ pub fn extract_odt_metadata(
 
     let thumb_filename = format!("{document_id}.png");
     let thumb_dest = thumbnail_dir.join(&thumb_filename);
-    if let Ok(out) = Command::new("unzip")
-        .args(["-p"])
-        .arg(path)
-        .arg("Thumbnails/thumbnail.png")
-        .output()
-    {
-        if out.status.success()
-            && !out.stdout.is_empty()
-            && fs::write(&thumb_dest, &out.stdout).is_ok()
-        {
+    if let Some(out) = read_unzip_member_bounded(
+        path,
+        "Thumbnails/thumbnail.png",
+        MAX_ARCHIVE_THUMBNAIL_BYTES,
+    ) {
+        if !out.is_empty() && fs::write(&thumb_dest, &out).is_ok() {
             thumb = Some(thumb_filename);
         }
     }
@@ -961,11 +927,33 @@ fn extract_html_meta_attr(content: &str, meta_name: &str) -> Option<String> {
 }
 
 fn read_bounded_prefix(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
     let mut file = fs::File::open(path)?;
     let mut buf = Vec::with_capacity(max_bytes.min(1024));
     file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+fn read_unzip_member_bounded(path: &Path, member: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut child = Command::new("unzip")
+        .args(["-p"])
+        .arg(path)
+        .arg(member)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(8192));
+    let read_result = stdout.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
+
+    if read_result.is_err() || bytes.len() > max_bytes {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+
+    child.wait().ok().filter(|status| status.success())?;
+    Some(bytes)
 }
 
 pub fn extract_metadata_and_thumbnail(
@@ -1114,6 +1102,40 @@ mod tests {
             resolve_relative_zip_path("content.opf", "../escape.jpg"),
             None
         );
+    }
+
+    #[test]
+    fn test_bounded_unzip_member_read_rejects_oversized_output() {
+        if Command::new("zip").arg("-h").output().is_err() {
+            return;
+        }
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("clio-bounded-zip-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        fs::write(temp_dir.join("small.txt"), b"small").expect("write small member");
+        fs::write(temp_dir.join("large.bin"), vec![b'x'; 4096]).expect("write large member");
+
+        let archive = temp_dir.join("members.zip");
+        let zip = Command::new("zip")
+            .current_dir(&temp_dir)
+            .args(["-q", "-j"])
+            .arg(&archive)
+            .args(["small.txt", "large.bin"])
+            .output()
+            .expect("run zip");
+        if !zip.status.success() {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+
+        assert_eq!(
+            read_unzip_member_bounded(&archive, "small.txt", 1024),
+            Some(b"small".to_vec())
+        );
+        assert_eq!(read_unzip_member_bounded(&archive, "large.bin", 1024), None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

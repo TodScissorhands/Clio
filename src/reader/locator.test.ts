@@ -60,6 +60,22 @@ describe("AnnotationLocator validation — epub-cfi-range", () => {
     const result = validateAnnotationLocator(locator);
     expect(result).not.toBeNull();
   });
+
+  it("rejects an unterminated CFI wrapper", () => {
+    const locator: AnnotationLocator = {
+      kind: "epub-cfi-range",
+      cfi: "epubcfi(/6/4!/4,/2/1:0,/2/1:5",
+    };
+    expect(validateAnnotationLocator(locator)).not.toBeNull();
+  });
+
+  it("rejects a range with an empty endpoint", () => {
+    const locator: AnnotationLocator = {
+      kind: "epub-cfi-range",
+      cfi: "epubcfi(,/2/1:0)",
+    };
+    expect(validateAnnotationLocator(locator)).not.toBeNull();
+  });
 });
 
 describe("AnnotationLocator validation — pdf-page-text", () => {
