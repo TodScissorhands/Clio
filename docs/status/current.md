@@ -92,6 +92,7 @@ Milestone 11, D6 Reader Experience & Reading State, D7 Library Sorting & Collect
 - PDF.js is the PDF engine; foliate-js is the EPUB engine.
 - Readium is reference-only and not a dependency.
 - Reader shell owns common chrome; engines own parsing/rendering/pagination/resource loading.
+- Frontend composition keeps application navigation and cross-feature overlays in `App.tsx`; library catalog loading and catalog IPC mutations are isolated in `src/library/useLibraryCatalog.ts`. `ReaderShell` remains the reader feature boundary for engine state, reading state, bookmarks, annotations, and reader chrome.
 - EPUB content is untrusted and keeps restrictive resource/security boundaries; packaged hostile-EPUB isolation remains unproven.
 - Conversion remains a capability and must not define the core architecture.
 - Platform-specific storage behavior belongs behind native/platform boundaries.

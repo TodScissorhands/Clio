@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConversionWorkspace } from "./tools/ConversionWorkspace";
@@ -10,33 +10,17 @@ import { KeyboardShortcutsModal } from "./library/KeyboardShortcutsModal";
 import { AboutClioModal } from "./library/AboutClioModal";
 import { QuickOpenDialog } from "./library/QuickOpenDialog";
 import {
-  addExternalDocumentToLibrary,
-  addDocumentToCollection,
-  addLibraryRoot,
-  createCollection,
-  deleteCollection,
   getLibraryDocumentPath,
-  listCollections,
-  listLibraryDocuments,
-  listLibraryRoots,
   openLibraryReaderDocument,
   openSelectedReaderDocument,
-  removeLibraryDocument,
-  removeDocumentFromCollection,
   removeLibraryRoot,
-  relinkLibraryDocument,
-  renameCollection,
   scanLibraryFolder,
   scanLibraryRoot,
   TauriDocumentStorage,
   type LibraryScanResult,
 } from "./storage/documentStorage";
-import {
-  isReaderFormat,
-  type Collection,
-  type LibraryRoot,
-  type StoredDocument,
-} from "./storage/domain";
+import { isReaderFormat, type StoredDocument } from "./storage/domain";
+import { useLibraryCatalog } from "./library/useLibraryCatalog";
 import { LibraryView } from "./library/LibraryView";
 import type {
   AppRoute,
@@ -109,10 +93,7 @@ function App() {
   const [isQuickOpen, setIsQuickOpen] = useState(false);
   const [openToolsRequest, setOpenToolsRequest] = useState(0);
   const [focusSearchRequest, setFocusSearchRequest] = useState(0);
-  // Library State
-  const [roots, setRoots] = useState<LibraryRoot[]>([]);
-  const [documents, setDocuments] = useState<StoredDocument[]>([]);
-  const [collections, setCollections] = useState<Collection[]>([]);
+  // Library catalog data and IPC operations live behind the library feature boundary.
   const [libraryScope, setLibraryScope] = useState<LibraryScope>(DEFAULT_LIBRARY_SCOPE);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -124,6 +105,24 @@ function App() {
   // Status & Diagnostics
   const [libraryMessage, setLibraryMessage] = useState("");
   const [libraryError, setLibraryError] = useState("");
+  const handleCatalogError = useCallback((error: unknown) => {
+    setLibraryError(error instanceof Error ? error.message : String(error));
+  }, []);
+  const {
+    roots,
+    documents,
+    collections,
+    refreshLibrary,
+    addRoot: addLibraryRootToCatalog,
+    createCollection,
+    renameCollection,
+    deleteCollection,
+    addDocumentToCollection,
+    removeDocumentFromCollection,
+    removeDocument: removeLibraryDocumentFromCatalog,
+    relinkDocument,
+    addExternalDocument: addExternalDocumentToCatalog,
+  } = useLibraryCatalog({ onError: handleCatalogError });
   const [libraryPending, setLibraryPending] = useState(false);
   const [readerPending, setReaderPending] = useState(false);
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
@@ -286,49 +285,6 @@ function App() {
     });
   }, [libraryScope, route, searchQuery, sortBy, viewMode, selectedDocIds]);
 
-  // Load Library Data
-  async function refreshLibrary(rootIds?: string[]) {
-    try {
-      const [nextRoots, nextDocuments, nextCollections] = await Promise.all([
-        listLibraryRoots(),
-        rootIds?.length
-          ? Promise.all(rootIds.map((rootId) => listLibraryDocuments(rootId, true))).then((byRoot) => byRoot.flat())
-          : listLibraryDocuments(undefined, true),
-        listCollections(),
-      ]);
-      setRoots(nextRoots);
-      if (rootIds?.length) {
-        const updatedRootIds = new Set(rootIds);
-        setDocuments((current) => [
-          ...current.filter((document) => document.source.kind !== "library" || !updatedRootIds.has(document.source.rootId)),
-          ...nextDocuments,
-        ]);
-      } else {
-        setDocuments(nextDocuments);
-      }
-      setCollections(nextCollections);
-    } catch (err) {
-      setLibraryError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([listLibraryRoots(), listLibraryDocuments(undefined, true), listCollections()])
-      .then(([nextRoots, nextDocuments, nextCollections]) => {
-        if (cancelled) return;
-        setRoots(nextRoots);
-        setDocuments(nextDocuments);
-        setCollections(nextCollections);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setLibraryError(error instanceof Error ? error.message : String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   // Collection CRUD
   async function handleCreateCollection(name: string) {
     try {
@@ -397,7 +353,7 @@ function App() {
   async function handleRemoveFromLibrary(documentIds: string[]) {
     try {
       for (const id of documentIds) {
-        await removeLibraryDocument(id);
+        await removeLibraryDocumentFromCatalog(id);
       }
       await refreshLibrary();
     } catch (err) {
@@ -421,8 +377,7 @@ function App() {
     if (!path || Array.isArray(path)) return;
     setLibraryPending(true);
     try {
-      const root = await addLibraryRoot(path);
-      setRoots((current) => [...current.filter((item) => item.id !== root.id), root]);
+      const root = await addLibraryRootToCatalog(path);
       handleLibraryScopeSelect({ kind: "root", rootId: root.id });
       setPendingRootId(root.id);
       setLibraryMessage(`Scanning “${root.label}”…`);
@@ -568,7 +523,7 @@ function App() {
     });
     if (!path || Array.isArray(path)) return;
     try {
-      await relinkLibraryDocument(doc.record.id, path);
+      await relinkDocument(doc.record.id, path);
       setMissingDoc(null);
       await refreshLibrary();
       setLibraryMessage(`Relinked “${doc.record.name}”.`);
@@ -850,7 +805,7 @@ function App() {
             onAddToLibrary={async () => {
               if (!externalPath) return;
               try {
-                const added = await addExternalDocumentToLibrary(externalPath);
+                const added = await addExternalDocumentToCatalog(externalPath);
                 setActiveDocumentId(added.record.id);
                 setExternalPath(null);
                 await refreshLibrary();
