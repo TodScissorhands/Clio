@@ -11,11 +11,13 @@ use uuid::Uuid;
 mod catalog_reconciliation;
 mod collections;
 pub mod commands;
+mod document_read_context;
 mod filesystem_observation;
 mod migrations;
 mod reader_artifacts;
 mod roots;
 mod rows;
+use document_read_context::DocumentReadContext;
 use rows::{
     annotation_from_row, bookmark_from_row, document_from_row, open_document_from_row,
     reading_state_from_row, OpenDocument,
@@ -282,33 +284,7 @@ impl LibraryDb {
         include_missing: bool,
     ) -> Result<Vec<DocumentDto>, String> {
         let connection = self.lock()?;
-        let mut col_stmt = connection
-            .prepare("SELECT document_id, collection_id FROM document_collections")
-            .map_err(db_error)?;
-        let mut doc_collections: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        let col_rows = col_stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(db_error)?;
-        for r in col_rows {
-            let (doc_id, col_id) = r.map_err(db_error)?;
-            doc_collections.entry(doc_id).or_default().push(col_id);
-        }
-
-        let mut rs_stmt = connection
-            .prepare("SELECT document_id, position_kind, page, cfi, progression, last_opened_at, updated_at FROM reading_state")
-            .map_err(db_error)?;
-        let mut doc_reading_states: std::collections::HashMap<String, ReadingState> =
-            std::collections::HashMap::new();
-        let rs_rows = rs_stmt
-            .query_map([], reading_state_from_row)
-            .map_err(db_error)?;
-        for r in rs_rows {
-            let state = r.map_err(db_error)?;
-            doc_reading_states.insert(state.document_id.clone(), state);
-        }
+        let mut read_context = DocumentReadContext::load(&connection)?;
 
         let mut statement = connection
             .prepare(
@@ -327,9 +303,7 @@ impl LibraryDb {
             .map_err(db_error)?;
         rows.map(|row| {
             let doc = row.map_err(db_error)?;
-            let collections = doc_collections.get(&doc.id).cloned().unwrap_or_default();
-            let reading_state = doc_reading_states.remove(&doc.id);
-            Ok(doc.into_dto(collections, reading_state))
+            Ok(read_context.attach(doc))
         })
         .collect()
     }

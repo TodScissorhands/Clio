@@ -898,6 +898,200 @@ fn test_collections_crud_and_membership_cascades() {
 }
 
 #[test]
+fn test_document_read_context_preserves_listing_semantics() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-read-context-{}", Uuid::new_v4()));
+    let other_dir = temp_dir.join("other-root");
+    fs::create_dir_all(&other_dir).expect("create other root");
+    fs::write(temp_dir.join("missing.txt"), b"missing").expect("write missing document");
+    fs::write(temp_dir.join("excluded.txt"), b"excluded").expect("write excluded document");
+    fs::write(temp_dir.join("rich.txt"), b"rich").expect("write rich document");
+    fs::write(temp_dir.join("plain.txt"), b"plain").expect("write plain document");
+    fs::write(other_dir.join("other.txt"), b"other").expect("write other document");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let root = db
+        .add_root(&temp_dir.to_string_lossy(), Some("Primary"))
+        .expect("add primary root");
+    let other_root = db
+        .add_root(&other_dir.to_string_lossy(), Some("Other"))
+        .expect("add other root");
+    db.scan_root(&root.id).expect("scan primary root");
+    db.scan_root(&other_root.id).expect("scan other root");
+
+    let primary_documents = db
+        .list_documents(Some(&root.id), true)
+        .expect("list primary documents");
+    let document_id = |name: &str| {
+        primary_documents
+            .iter()
+            .find(|document| document.name == name)
+            .map(|document| document.id.clone())
+            .expect("find document")
+    };
+    let missing_id = document_id("missing.txt");
+    let excluded_id = document_id("excluded.txt");
+    let rich_id = document_id("rich.txt");
+    let plain_id = document_id("plain.txt");
+
+    let first_collection = db
+        .create_collection("First", None)
+        .expect("create first collection");
+    let second_collection = db
+        .create_collection("Second", None)
+        .expect("create second collection");
+    db.add_document_to_collection(&first_collection.id, &missing_id)
+        .expect("add missing document to first collection");
+    db.add_document_to_collection(&first_collection.id, &excluded_id)
+        .expect("add excluded document to first collection");
+    db.add_document_to_collection(&second_collection.id, &excluded_id)
+        .expect("add excluded document to second collection");
+    db.add_document_to_collection(&first_collection.id, &rich_id)
+        .expect("add rich document to first collection");
+    db.add_document_to_collection(&second_collection.id, &rich_id)
+        .expect("add rich document to second collection");
+    db.add_document_to_collection(&first_collection.id, &plain_id)
+        .expect("add plain document to first collection");
+
+    fs::remove_file(temp_dir.join("missing.txt")).expect("remove missing document");
+    db.scan_root(&root.id).expect("rescan primary root");
+    db.remove_document(&excluded_id)
+        .expect("exclude document from library");
+
+    let mut rich_metadata = DocumentMetadata::fallback();
+    rich_metadata.title = Some("Rich document".to_string());
+    rich_metadata.authors = vec!["Author".to_string()];
+    db.update_metadata(&rich_id, rich_metadata)
+        .expect("restore rich metadata after scan");
+    db.set_reading_state(ReadingState {
+        document_id: rich_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.5 },
+        last_opened_at: "2026-10-06T10:00:00Z".to_string(),
+        updated_at: "2026-10-06T10:00:00Z".to_string(),
+    })
+    .expect("restore rich reading state after scan");
+    {
+        let connection = db.lock().expect("lock database");
+        connection
+            .execute(
+                "DELETE FROM document_metadata WHERE document_id = ?1",
+                [&plain_id],
+            )
+            .expect("remove plain metadata after scan");
+    }
+
+    let present_documents = db
+        .list_documents(Some(&root.id), false)
+        .expect("list present primary documents");
+    assert!(!present_documents
+        .iter()
+        .any(|document| document.id == missing_id));
+    assert!(!present_documents
+        .iter()
+        .any(|document| document.id == excluded_id));
+
+    let all_documents = db
+        .list_documents(Some(&root.id), true)
+        .expect("list all primary documents");
+    assert!(all_documents
+        .iter()
+        .any(|document| document.id == missing_id));
+    assert!(!all_documents
+        .iter()
+        .any(|document| document.id == excluded_id));
+
+    let first_documents = db
+        .list_collection_documents(&first_collection.id)
+        .expect("list first collection documents");
+    assert!(first_documents
+        .iter()
+        .any(|document| document.id == missing_id));
+    assert!(first_documents
+        .iter()
+        .any(|document| document.id == rich_id));
+    assert!(first_documents
+        .iter()
+        .any(|document| document.id == plain_id));
+    assert!(!first_documents
+        .iter()
+        .any(|document| document.id == excluded_id));
+
+    let second_documents = db
+        .list_collection_documents(&second_collection.id)
+        .expect("list second collection documents");
+    assert!(second_documents
+        .iter()
+        .any(|document| document.id == rich_id));
+    assert!(!second_documents
+        .iter()
+        .any(|document| document.id == excluded_id));
+    assert_eq!(
+        db.list_document_collections(&excluded_id)
+            .expect("list excluded document collections")
+            .len(),
+        2
+    );
+
+    let rich_from_library = present_documents
+        .iter()
+        .find(|document| document.id == rich_id)
+        .expect("find rich document in library listing");
+    let rich_from_collection = first_documents
+        .iter()
+        .find(|document| document.id == rich_id)
+        .expect("find rich document in collection listing");
+    for rich_document in [rich_from_library, rich_from_collection] {
+        assert_eq!(
+            rich_document
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta.title.as_deref()),
+            Some("Rich document")
+        );
+        assert_eq!(
+            rich_document
+                .metadata
+                .as_ref()
+                .map(|meta| meta.authors.as_slice()),
+            Some(["Author".to_string()].as_slice())
+        );
+        assert_eq!(rich_document.collections.len(), 2);
+        assert!(rich_document.collections.contains(&first_collection.id));
+        assert!(rich_document.collections.contains(&second_collection.id));
+        assert!(matches!(
+            rich_document.reading_state.as_ref().map(|state| &state.position),
+            Some(ReadingPosition::TextScroll { progression }) if (*progression - 0.5).abs() < f64::EPSILON
+        ));
+    }
+
+    let plain_from_library = present_documents
+        .iter()
+        .find(|document| document.id == plain_id)
+        .expect("find plain document in library listing");
+    let plain_from_collection = first_documents
+        .iter()
+        .find(|document| document.id == plain_id)
+        .expect("find plain document in collection listing");
+    assert!(plain_from_library.metadata.is_none());
+    assert!(plain_from_library.reading_state.is_none());
+    assert!(plain_from_collection.metadata.is_none());
+    assert!(plain_from_collection.reading_state.is_none());
+
+    let other_documents = db
+        .list_documents(Some(&other_root.id), false)
+        .expect("list other root documents");
+    assert_eq!(other_documents.len(), 1);
+    assert_eq!(other_documents[0].name, "other.txt");
+    assert_eq!(
+        db.list_collection_documents(&first_collection.id)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_thumbnail_data_url_generation() {
     let temp_dir = std::env::temp_dir().join(format!("clio-test-thumb-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).expect("create dir");
