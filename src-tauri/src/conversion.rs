@@ -132,6 +132,83 @@ pub fn is_tool_installed(tool: &str) -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+fn capabilities_for_tools(tool_available: impl Fn(&str) -> bool) -> Vec<ConversionCapability> {
+    let mut caps = Vec::new();
+
+    if tool_available("pdfunite") {
+        caps.push(ConversionCapability {
+            source_format: "pdf".into(),
+            target_format: "pdf".into(),
+            operation: OperationKind::MergePdf,
+            engine: ConversionEngine::Poppler,
+            label: "PDF Merge (Poppler)".into(),
+            description: "Merge multiple PDF documents into a single PDF".into(),
+        });
+    }
+
+    if tool_available("pdfseparate") && tool_available("pdfunite") && tool_available("pdfinfo") {
+        caps.push(ConversionCapability {
+            source_format: "pdf".into(),
+            target_format: "pdf".into(),
+            operation: OperationKind::ExtractPages,
+            engine: ConversionEngine::Poppler,
+            label: "PDF Page Extraction (Poppler)".into(),
+            description: "Extract page range or selection into a new PDF".into(),
+        });
+    }
+
+    // RotatePages: NOT registered. qpdf is not installed on this host and
+    // gs per-page selective rotation is unreliable. The variant exists in
+    // OperationKind so the architecture is ready, but no capability is
+    // advertised until a reliable backend (e.g. qpdf) is available.
+
+    if tool_available("pdftotext") {
+        caps.push(ConversionCapability {
+            source_format: "pdf".into(),
+            target_format: "txt".into(),
+            operation: OperationKind::ExtractText,
+            engine: ConversionEngine::Poppler,
+            label: "Text Extraction (Poppler)".into(),
+            description: "Extract plain text content from PDF document".into(),
+        });
+    }
+
+    if tool_available("pdftotext") && tool_available("pandoc") {
+        for target in &["md", "html", "docx", "odt", "epub"] {
+            caps.push(ConversionCapability {
+                source_format: "pdf".into(),
+                target_format: (*target).into(),
+                operation: OperationKind::Convert,
+                engine: ConversionEngine::PopplerPandoc,
+                label: "Poppler + Pandoc".into(),
+                description: format!("Extract text from PDF and convert to {target}"),
+            });
+        }
+    }
+
+    if tool_available("pandoc") {
+        let pandoc_sources = ["md", "txt", "html", "docx", "odt", "rtf", "epub"];
+        let pandoc_targets = ["md", "txt", "html", "docx", "odt", "epub"];
+
+        for src in &pandoc_sources {
+            for tgt in &pandoc_targets {
+                if src == tgt {
+                    continue;
+                }
+                caps.push(ConversionCapability {
+                    source_format: (*src).into(),
+                    target_format: (*tgt).into(),
+                    operation: OperationKind::Convert,
+                    engine: ConversionEngine::Pandoc,
+                    label: "Pandoc".into(),
+                    description: format!("Convert {src} to {tgt} format"),
+                });
+            }
+        }
+    }
+
+    caps
+}
 
 // ─── Capability Registry ──────────────────────────────────────────────────────
 
@@ -147,84 +224,9 @@ impl Default for CapabilityRegistry {
 
 impl CapabilityRegistry {
     pub fn new() -> Self {
-        let mut caps = Vec::new();
-
-        // PDF merge via Poppler (pdfunite)
-        if is_tool_installed("pdfunite") {
-            caps.push(ConversionCapability {
-                source_format: "pdf".into(),
-                target_format: "pdf".into(),
-                operation: OperationKind::MergePdf,
-                engine: ConversionEngine::Poppler,
-                label: "PDF Merge (Poppler)".into(),
-                description: "Merge multiple PDF documents into a single PDF".into(),
-            });
+        Self {
+            capabilities: capabilities_for_tools(is_tool_installed),
         }
-
-        // PDF page extraction via Poppler (pdfseparate + pdfunite + pdfinfo)
-        if is_tool_installed("pdfseparate")
-            && is_tool_installed("pdfunite")
-            && is_tool_installed("pdfinfo")
-        {
-            caps.push(ConversionCapability {
-                source_format: "pdf".into(),
-                target_format: "pdf".into(),
-                operation: OperationKind::ExtractPages,
-                engine: ConversionEngine::Poppler,
-                label: "PDF Page Extraction (Poppler)".into(),
-                description: "Extract page range or selection into a new PDF".into(),
-            });
-        }
-
-        // RotatePages: NOT registered. qpdf is not installed on this host and
-        // gs per-page selective rotation is unreliable. The variant exists in
-        // OperationKind so the architecture is ready, but no capability is
-        // advertised until a reliable backend (e.g. qpdf) is available.
-
-        // 1. PDF conversions
-        // PDF -> TXT: direct extraction via Poppler
-        caps.push(ConversionCapability {
-            source_format: "pdf".into(),
-            target_format: "txt".into(),
-            operation: OperationKind::ExtractText,
-            engine: ConversionEngine::Poppler,
-            label: "Text Extraction (Poppler)".into(),
-            description: "Extract plain text content from PDF document".into(),
-        });
-
-        // PDF -> Document formats via Poppler extraction + Pandoc formatting
-        for target in &["md", "html", "docx", "odt", "epub"] {
-            caps.push(ConversionCapability {
-                source_format: "pdf".into(),
-                target_format: (*target).into(),
-                operation: OperationKind::Convert,
-                engine: ConversionEngine::PopplerPandoc,
-                label: "Poppler + Pandoc".into(),
-                description: format!("Extract text from PDF and convert to {target}"),
-            });
-        }
-
-        // 2. Pandoc-supported document conversions (verified working)
-        let pandoc_sources = ["md", "txt", "html", "docx", "odt", "rtf", "epub"];
-        let pandoc_targets = ["md", "txt", "html", "docx", "odt", "epub"];
-
-        for src in &pandoc_sources {
-            for tgt in &pandoc_targets {
-                if src == tgt {
-                    continue; // Skip identity conversions
-                }
-                caps.push(ConversionCapability {
-                    source_format: (*src).into(),
-                    target_format: (*tgt).into(),
-                    operation: OperationKind::Convert,
-                    engine: ConversionEngine::Pandoc,
-                    label: "Pandoc".into(),
-                    description: format!("Convert {src} to {tgt} format"),
-                });
-            }
-        }
-
-        Self { capabilities: caps }
     }
 
     pub fn list_capabilities(&self, source_format: Option<&str>) -> Vec<ConversionCapability> {
@@ -1367,6 +1369,30 @@ mod tests {
         for (days, expected) in cases {
             assert_eq!(crate::storage::civil_date(days), expected);
         }
+    }
+
+    #[test]
+    fn test_capabilities_require_their_external_tools() {
+        let unavailable = capabilities_for_tools(|_| false);
+        assert!(unavailable.is_empty());
+
+        let only_pdftotext = capabilities_for_tools(|tool| tool == "pdftotext");
+        assert_eq!(only_pdftotext.len(), 1);
+        assert_eq!(only_pdftotext[0].operation, OperationKind::ExtractText);
+
+        let all_available = capabilities_for_tools(|_| true);
+        assert!(all_available
+            .iter()
+            .any(|cap| cap.operation == OperationKind::MergePdf));
+        assert!(all_available
+            .iter()
+            .any(|cap| cap.operation == OperationKind::ExtractPages));
+        assert!(all_available
+            .iter()
+            .any(|cap| cap.engine == ConversionEngine::Pandoc));
+        assert!(all_available
+            .iter()
+            .any(|cap| cap.engine == ConversionEngine::PopplerPandoc));
     }
 
     #[test]

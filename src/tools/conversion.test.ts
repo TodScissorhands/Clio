@@ -4,6 +4,7 @@ import {
   formatDetail,
   formatLabel,
   FORMAT_META,
+  outputFileName,
   type ConversionCapability,
   type ConversionJob,
   type JobStatus,
@@ -20,6 +21,12 @@ describe("Conversion Capability Architecture — Domain Types & Helpers", () => 
     expect(formatDetail("epub")).toBe("E-reader book");
     expect(formatDetail(".docx")).toBe("Word document");
     expect(formatDetail("unknown")).toBe("Document format");
+  });
+
+  it("extracts output filenames from Windows and POSIX paths", () => {
+    expect(outputFileName("/tmp/output.md")).toBe("output.md");
+    expect(outputFileName("C:\\Users\\reader\\output.md")).toBe("output.md");
+    expect(outputFileName("output.md")).toBe("output.md");
   });
 
   it("maps engine labels accurately to human-readable names", () => {

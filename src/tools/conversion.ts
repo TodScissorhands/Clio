@@ -75,6 +75,10 @@ export function engineLabel(engine: ConversionEngine): string {
   return ENGINE_LABELS[engine] ?? engine;
 }
 
+export function outputFileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
 export async function listConversionCapabilities(
   sourceFormat?: string
 ): Promise<ConversionCapability[]> {

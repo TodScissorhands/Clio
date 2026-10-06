@@ -7,6 +7,7 @@ import {
   formatLabel,
   getPdfPageCount,
   listConversionCapabilities,
+  outputFileName,
   parsePagesFromRange,
   planConversionJob,
   planExtractPagesJob,
@@ -406,7 +407,7 @@ export function ConversionWorkspace({
       setPlannedJob(completed);
       setOutputPath(completed.outputPath);
       setStatus("done");
-      setMessage(`Done: ${completed.outputPath.split("/").pop() ?? completed.outputPath}`);
+      setMessage(`Done: ${outputFileName(completed.outputPath)}`);
     });
   }
 
