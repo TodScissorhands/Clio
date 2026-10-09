@@ -66,9 +66,18 @@ impl LibraryDb {
             connection
                 .execute(
                     "INSERT INTO library_roots
-                         (id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![root.id, root.label, root.locator_kind, root.locator_value, root.last_scanned_at, root.created_at, root.updated_at],
+                         (id, label, locator_kind, locator_value, attachment_state,
+                          last_scanned_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'attached', ?5, ?6, ?7)",
+                    params![
+                        root.id,
+                        root.label,
+                        root.locator_kind,
+                        root.locator_value,
+                        root.last_scanned_at,
+                        root.created_at,
+                        root.updated_at
+                    ],
                 )
                 .map_err(db_error)?;
             root

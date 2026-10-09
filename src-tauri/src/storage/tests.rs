@@ -10,7 +10,7 @@ fn test_schema_migration_and_idempotence() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("query user_version");
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 }
 
 #[test]
@@ -1864,5 +1864,294 @@ fn test_relink_document_preserves_state() {
         _ => panic!("Expected PdfPage 12"),
     }
 
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+fn migration_snapshot(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
+    let mut statement = connection
+        .prepare(query)
+        .expect("prepare migration snapshot");
+    statement
+        .query_map([], |row| row.get(0))
+        .expect("query migration snapshot")
+        .map(|row| row.expect("read migration snapshot row"))
+        .collect()
+}
+
+fn downgrade_roots_to_v5(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             BEGIN IMMEDIATE;
+             CREATE TABLE library_roots_v5 (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 label TEXT NOT NULL,
+                 locator_kind TEXT NOT NULL,
+                 locator_value TEXT NOT NULL UNIQUE,
+                 last_scanned_at TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             INSERT INTO library_roots_v5
+                 (id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at)
+             SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+             FROM library_roots;
+             DROP TABLE library_roots;
+             ALTER TABLE library_roots_v5 RENAME TO library_roots;
+             PRAGMA user_version = 5;
+             COMMIT;
+             PRAGMA foreign_keys = ON;",
+        )
+        .expect("downgrade roots to v5");
+}
+
+#[test]
+fn test_schema_v6_migration_preserves_populated_catalog() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-schema-v6-{}", Uuid::new_v4()));
+    let root_dir = temp_dir.join("books");
+    let nested_dir = root_dir.join("fiction");
+    let missing_dir = temp_dir.join("missing-root");
+    let db_path = temp_dir.join("library.sqlite3");
+    fs::create_dir_all(&nested_dir).expect("create nested root");
+    fs::create_dir_all(&missing_dir).expect("create missing root");
+    fs::write(root_dir.join("present.txt"), b"present").expect("write present document");
+    fs::write(root_dir.join("missing.txt"), b"missing").expect("write missing document");
+    fs::write(root_dir.join("excluded.txt"), b"excluded").expect("write excluded document");
+    fs::write(nested_dir.join("nested.txt"), b"nested").expect("write nested document");
+
+    let db = LibraryDb::open(&db_path).expect("open database");
+    let root = db
+        .add_root(&root_dir.to_string_lossy(), Some("Books"))
+        .expect("add primary root");
+    let overlapping_root = db
+        .add_root(&nested_dir.to_string_lossy(), Some("Fiction"))
+        .expect("add overlapping root");
+    let missing_root = db
+        .add_root(&missing_dir.to_string_lossy(), Some("Missing"))
+        .expect("add missing root");
+    fs::remove_dir_all(&missing_dir).expect("remove missing root directory");
+
+    db.scan_root(&root.id).expect("scan primary root");
+    db.scan_root(&overlapping_root.id)
+        .expect("scan overlapping root");
+
+    let primary_documents = db
+        .list_documents(Some(&root.id), true)
+        .expect("list primary documents");
+    let present_id = primary_documents
+        .iter()
+        .find(|document| document.name == "present.txt")
+        .expect("find present document")
+        .id
+        .clone();
+    let missing_id = primary_documents
+        .iter()
+        .find(|document| document.name == "missing.txt")
+        .expect("find missing document")
+        .id
+        .clone();
+    let excluded_id = primary_documents
+        .iter()
+        .find(|document| document.name == "excluded.txt")
+        .expect("find excluded document")
+        .id
+        .clone();
+
+    fs::remove_file(root_dir.join("missing.txt")).expect("remove document");
+    db.scan_root(&root.id).expect("scan missing document");
+    db.remove_document(&excluded_id).expect("exclude document");
+
+    db.set_reading_state(ReadingState {
+        document_id: present_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.42 },
+        last_opened_at: "2026-10-06T12:00:00Z".to_string(),
+        updated_at: "2026-10-06T12:01:00Z".to_string(),
+    })
+    .expect("set reading state");
+    db.create_bookmark(
+        &present_id,
+        ReadingPosition::TextScroll { progression: 0.5 },
+        Some("Important"),
+    )
+    .expect("create bookmark");
+    db.create_annotation(
+        &present_id,
+        "highlight",
+        ReadingPosition::TextScroll { progression: 0.55 },
+        Some("Selected text"),
+        Some("Note"),
+        Some(r#"{"kind":"text-range","start":10,"end":20}"#),
+    )
+    .expect("create annotation");
+    db.update_metadata(
+        &present_id,
+        DocumentMetadata {
+            title: Some("Preserved title".to_string()),
+            authors: vec!["Author".to_string()],
+            publisher: Some("Publisher".to_string()),
+            published_date: Some("2026-10-06".to_string()),
+            description: Some("Description".to_string()),
+            language: Some("en".to_string()),
+            identifiers: vec!["id:123".to_string()],
+            provenance: MetadataProvenance::Embedded,
+            thumbnail_path: None,
+        },
+    )
+    .expect("update metadata");
+    let collection = db
+        .create_collection("Preserved", Some("Collection"))
+        .expect("create collection");
+    db.add_document_to_collection(&collection.id, &present_id)
+        .expect("add present membership");
+    db.add_document_to_collection(&collection.id, &missing_id)
+        .expect("add missing membership");
+
+    let snapshot_queries = [
+        "SELECT quote(id) || '|' || quote(label) || '|' || quote(locator_kind) || '|' || quote(locator_value) || '|' || coalesce(quote(last_scanned_at), 'NULL') || '|' || quote(created_at) || '|' || quote(updated_at) FROM library_roots ORDER BY id",
+        "SELECT quote(id) || '|' || quote(root_id) || '|' || quote(relative_path) || '|' || quote(name) || '|' || quote(format_id) || '|' || quote(size_bytes) || '|' || quote(first_seen_at) || '|' || quote(updated_at) || '|' || quote(last_seen_scan) || '|' || quote(availability) || '|' || coalesce(quote(excluded_at), 'NULL') FROM documents ORDER BY id",
+        "SELECT quote(document_id) || '|' || quote(position_kind) || '|' || coalesce(quote(page), 'NULL') || '|' || coalesce(quote(cfi), 'NULL') || '|' || coalesce(quote(progression), 'NULL') || '|' || quote(last_opened_at) || '|' || quote(updated_at) FROM reading_state ORDER BY document_id",
+        "SELECT quote(id) || '|' || quote(document_id) || '|' || quote(position_kind) || '|' || coalesce(quote(page), 'NULL') || '|' || coalesce(quote(cfi), 'NULL') || '|' || coalesce(quote(progression), 'NULL') || '|' || coalesce(quote(title), 'NULL') || '|' || quote(created_at) || '|' || quote(updated_at) FROM bookmarks ORDER BY id",
+        "SELECT quote(id) || '|' || quote(document_id) || '|' || quote(kind) || '|' || quote(position_kind) || '|' || coalesce(quote(page), 'NULL') || '|' || coalesce(quote(cfi), 'NULL') || '|' || coalesce(quote(progression), 'NULL') || '|' || coalesce(quote(selected_text), 'NULL') || '|' || coalesce(quote(note), 'NULL') || '|' || quote(created_at) || '|' || quote(updated_at) || '|' || coalesce(quote(locator), 'NULL') FROM annotations ORDER BY id",
+        "SELECT quote(document_id) || '|' || coalesce(quote(title), 'NULL') || '|' || quote(authors) || '|' || coalesce(quote(publisher), 'NULL') || '|' || coalesce(quote(published_date), 'NULL') || '|' || coalesce(quote(description), 'NULL') || '|' || coalesce(quote(language), 'NULL') || '|' || quote(identifiers) || '|' || quote(provenance) || '|' || coalesce(quote(thumbnail_path), 'NULL') || '|' || quote(updated_at) FROM document_metadata ORDER BY document_id",
+        "SELECT quote(id) || '|' || quote(name) || '|' || coalesce(quote(description), 'NULL') || '|' || quote(created_at) || '|' || quote(updated_at) FROM collections ORDER BY id",
+        "SELECT quote(collection_id) || '|' || quote(document_id) || '|' || quote(added_at) FROM document_collections ORDER BY collection_id, document_id",
+    ];
+    let before: Vec<Vec<String>> = {
+        let connection = db.lock().expect("lock database");
+        snapshot_queries
+            .iter()
+            .map(|query| migration_snapshot(&connection, query))
+            .collect()
+    };
+
+    {
+        let connection = db.lock().expect("lock database");
+        downgrade_roots_to_v5(&connection);
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read downgraded version");
+        assert_eq!(version, 5);
+    }
+    drop(db);
+
+    let migrated = LibraryDb::open(&db_path).expect("migrate database");
+    let connection = migrated.lock().expect("lock migrated database");
+    let after: Vec<Vec<String>> = snapshot_queries
+        .iter()
+        .map(|query| migration_snapshot(&connection, query))
+        .collect();
+    assert_eq!(before, after, "catalog rows changed during migration");
+
+    let attachment_states: Vec<String> = migration_snapshot(
+        &connection,
+        "SELECT attachment_state FROM library_roots ORDER BY id",
+    );
+    assert!(
+        attachment_states.iter().all(|state| state == "attached"),
+        "migrated roots must be attached"
+    );
+    let root_ids: Vec<String> =
+        migration_snapshot(&connection, "SELECT id FROM library_roots ORDER BY id");
+    assert!(root_ids.contains(&root.id));
+    assert!(root_ids.contains(&overlapping_root.id));
+    assert!(root_ids.contains(&missing_root.id));
+
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .expect("read foreign_keys");
+    assert_eq!(foreign_keys, 1);
+    assert!(migration_snapshot(&connection, "PRAGMA foreign_key_check").is_empty());
+    assert_eq!(
+        connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .expect("run integrity_check"),
+        "ok"
+    );
+    let attached_index: Option<String> = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_library_roots_attached_locator'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("find attached root index");
+    assert_eq!(
+        attached_index.as_deref(),
+        Some("idx_library_roots_attached_locator")
+    );
+
+    drop(connection);
+    drop(migrated);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_schema_v6_migration_rolls_back_on_attached_duplicate() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-schema-v6-fail-{}", Uuid::new_v4()));
+    let db_path = temp_dir.join("library.sqlite3");
+    fs::create_dir_all(&temp_dir).expect("create migration directory");
+    let db = LibraryDb::open(&db_path).expect("open database");
+    let first = db
+        .add_root(&temp_dir.to_string_lossy(), Some("First"))
+        .expect("add first root");
+    let second_path = temp_dir.join("second");
+    fs::create_dir_all(&second_path).expect("create second root");
+    let second = db
+        .add_root(&second_path.to_string_lossy(), Some("Second"))
+        .expect("add second root");
+    {
+        let connection = db.lock().expect("lock database");
+        downgrade_roots_to_v5(&connection);
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 BEGIN IMMEDIATE;
+                 CREATE TABLE library_roots_duplicate (
+                     id TEXT PRIMARY KEY NOT NULL,
+                     label TEXT NOT NULL,
+                     locator_kind TEXT NOT NULL,
+                     locator_value TEXT NOT NULL,
+                     last_scanned_at TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO library_roots_duplicate
+                     (id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at)
+                 SELECT id, label, locator_kind, '/duplicate', last_scanned_at, created_at, updated_at
+                 FROM library_roots;
+                 DROP TABLE library_roots;
+                 ALTER TABLE library_roots_duplicate RENAME TO library_roots;
+                 PRAGMA user_version = 5;
+                 COMMIT;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .expect("create duplicate v5 roots");
+    }
+    drop(db);
+
+    assert!(
+        LibraryDb::open(&db_path).is_err(),
+        "migration must reject duplicate attached locators"
+    );
+    let connection = rusqlite::Connection::open(&db_path).expect("reopen failed database");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read rollback version");
+    assert_eq!(version, 5);
+    let root_columns = migration_snapshot(
+        &connection,
+        "SELECT name FROM pragma_table_info('library_roots') ORDER BY cid",
+    );
+    assert!(
+        !root_columns
+            .iter()
+            .any(|column| column == "attachment_state"),
+        "failed migration must leave the v5 table"
+    );
+    let root_rows = migration_snapshot(&connection, "SELECT id FROM library_roots ORDER BY id");
+    let mut expected_ids = vec![first.id, second.id];
+    expected_ids.sort();
+    assert_eq!(root_rows, expected_ids);
+    drop(connection);
     let _ = fs::remove_dir_all(&temp_dir);
 }

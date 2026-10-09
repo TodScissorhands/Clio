@@ -1,6 +1,6 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub(super) fn run(connection: &mut Connection) -> Result<(), String> {
     connection
@@ -231,6 +231,144 @@ pub(super) fn run(connection: &mut Connection) -> Result<(), String> {
             .map_err(super::db_error)?;
         transaction.commit().map_err(super::db_error)?;
     }
+    if version < 6 {
+        let foreign_key_violations = connection
+            .prepare("PRAGMA foreign_key_check")
+            .and_then(|mut statement| {
+                let mut rows = statement.query([])?;
+                let mut count = 0;
+                while rows.next()?.is_some() {
+                    count += 1;
+                }
+                Ok(count)
+            })
+            .map_err(super::db_error)?;
+        if foreign_key_violations != 0 {
+            return Err(format!(
+                "Cannot migrate schema with {foreign_key_violations} foreign-key violations."
+            ));
+        }
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(super::db_error)?;
+        let foreign_keys_disabled: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .map_err(super::db_error)?;
+        if foreign_keys_disabled != 0 {
+            let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+            return Err(
+                "Could not disable SQLite foreign-key enforcement for schema migration."
+                    .to_string(),
+            );
+        }
+
+        let migration_result: Result<bool, rusqlite::Error> = (|| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE library_roots_new (
+                     id TEXT PRIMARY KEY NOT NULL,
+                     label TEXT NOT NULL,
+                     locator_kind TEXT NOT NULL,
+                     locator_value TEXT NOT NULL,
+                     attachment_state TEXT NOT NULL
+                         CHECK (attachment_state IN ('attached', 'detached')),
+                     last_scanned_at TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO library_roots_new
+                     (id, label, locator_kind, locator_value, attachment_state,
+                      last_scanned_at, created_at, updated_at)
+                 SELECT id, label, locator_kind, locator_value, 'attached',
+                        last_scanned_at, created_at, updated_at
+                 FROM library_roots;
+                 DROP TABLE library_roots;
+                 ALTER TABLE library_roots_new RENAME TO library_roots;
+                 CREATE UNIQUE INDEX idx_library_roots_attached_locator
+                     ON library_roots(locator_kind, locator_value)
+                     WHERE attachment_state = 'attached';",
+            )?;
+
+            let mut statement = transaction.prepare("PRAGMA foreign_key_check")?;
+            let mut rows = statement.query([])?;
+            let has_foreign_key_violation = rows.next()?.is_some();
+            drop(rows);
+            drop(statement);
+            if has_foreign_key_violation {
+                return Ok(false);
+            }
+
+            transaction.execute_batch("PRAGMA user_version = 6;")?;
+            transaction.commit()?;
+            Ok(true)
+        })();
+
+        match migration_result {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(error) = connection.execute_batch("PRAGMA foreign_keys = ON;") {
+                    return Err(format!(
+                        "Schema migration produced foreign-key violations, and restoring SQLite foreign-key enforcement failed: {error}"
+                    ));
+                }
+                return Err("Schema migration produced foreign-key violations.".to_string());
+            }
+            Err(error) => {
+                if let Err(restore_error) = connection.execute_batch("PRAGMA foreign_keys = ON;") {
+                    return Err(format!(
+                        "{}; restoring SQLite foreign-key enforcement failed: {restore_error}",
+                        super::db_error(error)
+                    ));
+                }
+                return Err(super::db_error(error));
+            }
+        }
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(super::db_error)?;
+        let foreign_keys_enabled: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .map_err(super::db_error)?;
+        if foreign_keys_enabled != 1 {
+            return Err(
+                "Could not restore SQLite foreign-key enforcement after schema migration."
+                    .to_string(),
+            );
+        }
+
+        let foreign_key_violations = connection
+            .prepare("PRAGMA foreign_key_check")
+            .and_then(|mut statement| {
+                let mut rows = statement.query([])?;
+                let mut count = 0;
+                while rows.next()?.is_some() {
+                    count += 1;
+                }
+                Ok(count)
+            })
+            .map_err(super::db_error)?;
+        if foreign_key_violations != 0 {
+            return Err(format!(
+                "Post-migration foreign-key check found {foreign_key_violations} violations."
+            ));
+        }
+
+        connection
+            .execute_batch("PRAGMA integrity_check;")
+            .map_err(super::db_error)?;
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(super::db_error)?;
+        if integrity != "ok" {
+            return Err(format!(
+                "Post-migration integrity check failed: {integrity}"
+            ));
+        }
+    }
+
     Ok(())
 }
 
