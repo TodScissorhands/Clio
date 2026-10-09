@@ -690,13 +690,15 @@ pub struct CollectionDto {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryRootDto {
     pub id: String,
     pub label: String,
     pub kind: &'static str,
     pub status: String,
+    pub attachment_state: String,
+    pub availability: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

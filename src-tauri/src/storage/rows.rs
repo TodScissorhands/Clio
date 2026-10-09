@@ -4,6 +4,7 @@ pub(super) struct RootRow {
     pub(super) label: String,
     pub(super) locator_kind: String,
     pub(super) locator_value: String,
+    pub(super) attachment_state: String,
     pub(super) last_scanned_at: Option<String>,
     pub(super) created_at: String,
     pub(super) updated_at: String,
@@ -11,18 +12,37 @@ pub(super) struct RootRow {
 
 impl RootRow {
     pub(super) fn into_dto(self) -> LibraryRootDto {
+        let is_attached = self.attachment_state == "attached";
+        let is_available = is_attached
+            && self.locator_kind == "filesystem-directory"
+            && directory_exists(&self.locator_value);
+
+        let availability = if is_attached {
+            if is_available {
+                Some("available".to_string())
+            } else {
+                Some("missing".to_string())
+            }
+        } else {
+            None
+        };
+
+        let status = if !is_attached {
+            "disabled"
+        } else if is_available {
+            "active"
+        } else {
+            "missing"
+        }
+        .to_string();
+
         LibraryRootDto {
             id: self.id,
             label: self.label,
             kind: "filesystem-directory",
-            status: if self.locator_kind == "filesystem-directory"
-                && directory_exists(&self.locator_value)
-            {
-                "active"
-            } else {
-                "missing"
-            }
-            .to_string(),
+            status,
+            attachment_state: self.attachment_state,
+            availability,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -83,9 +103,10 @@ pub(super) fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RootRow
         label: row.get(1)?,
         locator_kind: row.get(2)?,
         locator_value: row.get(3)?,
-        last_scanned_at: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        attachment_state: row.get(4)?,
+        last_scanned_at: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 

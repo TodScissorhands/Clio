@@ -6,7 +6,7 @@ impl LibraryDb {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
                  FROM library_roots WHERE id = ?1",
                 [root_id],
                 root_from_row,
@@ -22,7 +22,7 @@ impl LibraryDb {
         let connection = self.lock()?;
         let existing: Option<RootRow> = connection
             .query_row(
-                "SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
                  FROM library_roots WHERE locator_kind = 'filesystem-directory' AND locator_value = ?1",
                 [&locator_value],
                 root_from_row,
@@ -59,6 +59,7 @@ impl LibraryDb {
                     .unwrap_or_else(|| locator_value.clone()),
                 locator_kind: "filesystem-directory".to_string(),
                 locator_value,
+                attachment_state: "attached".to_string(),
                 last_scanned_at: None,
                 created_at: now.clone(),
                 updated_at: now,
@@ -89,7 +90,7 @@ impl LibraryDb {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
                  FROM library_roots ORDER BY label COLLATE NOCASE, id",
             )
             .map_err(db_error)?;
@@ -102,7 +103,7 @@ impl LibraryDb {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, label, locator_kind, locator_value, last_scanned_at, created_at, updated_at
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
                  FROM library_roots ORDER BY label COLLATE NOCASE, id",
             )
             .map_err(db_error)?;

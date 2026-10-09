@@ -25,7 +25,8 @@ fn test_library_root_crud() {
     assert_eq!(root.label, "Test Root");
     assert_eq!(root.kind, "filesystem-directory");
     assert_eq!(root.status, "active");
-
+    assert_eq!(root.attachment_state, "attached");
+    assert_eq!(root.availability.as_deref(), Some("available"));
     let roots = db.list_roots().expect("list roots");
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].id, root.id);
@@ -2153,5 +2154,98 @@ fn test_schema_v6_migration_rolls_back_on_attached_duplicate() {
     expected_ids.sort();
     assert_eq!(root_rows, expected_ids);
     drop(connection);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_root_attachment_and_availability_dto_mapping() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-test-root-dto-{}", Uuid::new_v4()));
+    let existing_dir = temp_dir.join("existing");
+    let missing_dir = temp_dir.join("missing");
+    fs::create_dir_all(&existing_dir).expect("create existing root dir");
+    fs::create_dir_all(&missing_dir).expect("create missing root dir");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+
+    let root_attached_avail = db
+        .add_root(&existing_dir.to_string_lossy(), Some("Attached Available"))
+        .expect("add attached available root");
+    let root_attached_missing = db
+        .add_root(&missing_dir.to_string_lossy(), Some("Attached Missing"))
+        .expect("add attached missing root");
+
+    // Remove the missing directory to simulate attached-missing
+    fs::remove_dir_all(&missing_dir).expect("remove missing dir");
+
+    // Verify attached available
+    assert_eq!(root_attached_avail.attachment_state, "attached");
+    assert_eq!(
+        root_attached_avail.availability.as_deref(),
+        Some("available")
+    );
+    assert_eq!(root_attached_avail.status, "active");
+
+    // Verify attached missing via list_roots
+    let roots = db.list_roots().expect("list roots");
+    let listed_attached_missing = roots
+        .iter()
+        .find(|r| r.id == root_attached_missing.id)
+        .expect("find attached missing root");
+    assert_eq!(listed_attached_missing.attachment_state, "attached");
+    assert_eq!(
+        listed_attached_missing.availability.as_deref(),
+        Some("missing")
+    );
+    assert_eq!(listed_attached_missing.status, "missing");
+
+    // Detach roots via direct database update to verify detached roundtrip and DTO mapping
+    {
+        let conn = db.lock().expect("lock db");
+        conn.execute(
+            "UPDATE library_roots SET attachment_state = 'detached' WHERE id = ?1",
+            [&root_attached_avail.id],
+        )
+        .expect("set detached on existing dir root");
+        conn.execute(
+            "UPDATE library_roots SET attachment_state = 'detached' WHERE id = ?1",
+            [&root_attached_missing.id],
+        )
+        .expect("set detached on missing dir root");
+    }
+
+    let roots_detached = db.list_roots().expect("list roots after detach");
+    let detached_existing = roots_detached
+        .iter()
+        .find(|r| r.id == root_attached_avail.id)
+        .expect("find detached root with existing dir");
+    assert_eq!(detached_existing.attachment_state, "detached");
+    assert_eq!(detached_existing.availability, None);
+    assert_eq!(detached_existing.status, "disabled");
+
+    let detached_missing = roots_detached
+        .iter()
+        .find(|r| r.id == root_attached_missing.id)
+        .expect("find detached root with missing dir");
+    assert_eq!(detached_missing.attachment_state, "detached");
+    assert_eq!(detached_missing.availability, None);
+    assert_eq!(detached_missing.status, "disabled");
+
+    // Serialization compatibility check
+    let json = serde_json::to_value(detached_existing).expect("serialize detached root");
+    assert_eq!(json["id"], root_attached_avail.id);
+    assert_eq!(json["label"], "Attached Available");
+    assert_eq!(json["kind"], "filesystem-directory");
+    assert_eq!(json["status"], "disabled");
+    assert_eq!(json["attachmentState"], "detached");
+    assert!(json["availability"].is_null());
+    assert!(json["createdAt"].is_string());
+    assert!(json["updatedAt"].is_string());
+
+    let json_attached =
+        serde_json::to_value(listed_attached_missing).expect("serialize attached root");
+    assert_eq!(json_attached["status"], "missing");
+    assert_eq!(json_attached["attachmentState"], "attached");
+    assert_eq!(json_attached["availability"], "missing");
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
