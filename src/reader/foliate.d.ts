@@ -7,6 +7,10 @@ declare module "foliate-js/epub.js" {
       sha1(bytes: ArrayBuffer): Promise<ArrayBuffer>;
     });
     init(): Promise<void>;
+    resources?: {
+      manifest: Array<{ href: string; mediaType: string | null }>;
+      getItemByHref(href: string): { href: string; mediaType: string | null } | undefined;
+    };
     destroy(): void;
     metadata?: Record<string, unknown>;
     sections: Array<{ createDocument(): Promise<Document | null> }>;

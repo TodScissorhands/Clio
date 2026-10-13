@@ -95,7 +95,7 @@ Milestone 11, D6 Reader Experience & Reading State, D7 Library Sorting & Collect
 - Readium is reference-only and not a dependency.
 - Reader shell owns common chrome; engines own parsing/rendering/pagination/resource loading.
 - Frontend composition keeps application navigation and cross-feature overlays in `App.tsx`; library catalog loading and catalog IPC mutations are isolated in `src/library/useLibraryCatalog.ts`. `ReaderShell` remains the reader feature boundary for engine state, reading state, bookmarks, annotations, and reader chrome.
-- EPUB content is untrusted and keeps restrictive resource/security boundaries; packaged hostile-EPUB isolation remains unproven.
+- EPUB content is untrusted. XHTML/HTML/SVG resource classification uses EPUB manifest media types where available, with markup detection for missing MIME metadata, so misleading filenames and unusual processing instructions do not bypass the sanitizer. Packaged hostile-EPUB isolation remains unproven.
 - Conversion remains a capability and must not define the core architecture.
 - Platform-specific storage behavior belongs behind native/platform boundaries.
 
@@ -104,7 +104,7 @@ PDF page extraction / rotation, durable PDF text locators and highlight renderin
 
 ## Blocked / requires triage
 
-The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains unproven because the packaged hostile EPUB could not be driven or inspected. Treat EPUB sanitization, CSP, and tokenized native reads as defense-in-depth rather than as proof of renderer isolation. An isolated renderer/resource proxy remains the stronger boundary for arbitrary hostile EPUBs.
+The exact Blob-origin-to-Tauri ACL/native command reachability boundary remains unproven. The isolated release harness confirms that the rendition shares the `tauri://localhost` origin with the host and can discover `parent.__TAURI_INTERNALS__.invoke`; the sanitizer regression tests do not exercise the production command registry or native reader-token authorization. Treat EPUB sanitization, CSP, and tokenized native reads as defense-in-depth rather than as proof of renderer isolation. An isolated renderer/resource proxy remains the stronger boundary for arbitrary hostile EPUBs.
 
 ## Recently verified
 Phase 4 Scan + Reconciliation correction (independent review passed): nested-root ownership is enforced for whole-root and folder-scoped scans. Incomplete observations report errors, reconcile successfully observed files, skip missing-document reconciliation, and leave `last_scanned_at` unchanged. Verification: both focused regression tests passed; serial Rust suite 106/106; formatting check, strict Clippy, Bun tests (286/286), and `git diff --check` passed.

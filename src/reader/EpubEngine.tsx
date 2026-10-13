@@ -1,5 +1,6 @@
 import { useEffect, useImperativeHandle, useRef } from "react";
 import { EPUB } from "foliate-js/epub.js";
+import { classifyEpubMarkup, normalizeResourceHref } from "./epubResourceSecurity";
 import { Overlayer } from "foliate-js/overlayer.js";
 import "foliate-js/view.js";
 import { BlobReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
@@ -46,27 +47,6 @@ const EXTERNAL_RESOURCE_ATTRIBUTES = ["src", "href", "xlink:href", "action", "fo
 const EXTERNAL_RESOURCE_SCHEME = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i;
 const INLINE_IMAGE_ELEMENTS: Record<string, true> = { img: true, image: true, source: true };
 
-function normalizeResourceHref(href: string) {
-  return href.split(/[?#]/, 1)[0].replace(/^\.\//, "");
-}
-
-function isHtmlResource(href: string) {
-  return /\.(xhtml|html?|xhtm)$/i.test(normalizeResourceHref(href));
-}
-
-function isSvgResource(href: string) {
-  return /\.svgz?$/i.test(normalizeResourceHref(href));
-}
-
-function looksLikeMarkup(text: string) {
-  const candidate = text
-    .replace(/^\uFEFF/, "")
-    .trimStart()
-    .replace(/^(?:(?:<!--[\s\S]*?-->|<\?xml\b[\s\S]*?\?>)\s*)+/i, "");
-  return /^<!doctype\s+html(?:\s|>)/i.test(candidate)
-    || /^<(?:html|svg)(?:\s|\/?>)/i.test(candidate)
-    || /^<[A-Za-z_][\w:.-]*(?:\s|\/?>)/.test(candidate);
-}
 
 function isSafeInlineImage(element: Element, attributeName: string, value: string) {
   const name = element.localName.toLowerCase();
@@ -111,9 +91,8 @@ function stripUnsafeMarkup(root: Document | Element, svg: boolean) {
   }
 }
 
-function sanitizeEpubResource(text: string, href: string) {
-  const svg = isSvgResource(href);
-  const svgMarkup = svg || /^(?:\uFEFF)?\s*(?:<\?xml\b[\s\S]*?\?>\s*)?<svg(?:\s|\/?>)/i.test(text);
+function sanitizeEpubResource(text: string, kind: "html" | "svg") {
+  const svgMarkup = kind === "svg";
   const parser = new DOMParser();
   let parsed = parser.parseFromString(text, svgMarkup ? "image/svg+xml" : "application/xhtml+xml");
   if (parsed.querySelector("parsererror")) parsed = parser.parseFromString(text, "text/html");
@@ -172,7 +151,12 @@ async function openEpub(file: Blob) {
         const entry = findEntry(href);
         if (!entry) return null;
         const text = new TextDecoder().decode(await entry.getData(new Uint8ArrayWriter()));
-        return isHtmlResource(href) || isSvgResource(href) || looksLikeMarkup(text) ? sanitizeEpubResource(text, href) : text;
+        const resources = epub?.resources;
+        const normalizedHref = normalizeResourceHref(href);
+        const mediaType = resources?.getItemByHref(href)?.mediaType
+          ?? resources?.manifest.find((item) => normalizeResourceHref(item.href) === normalizedHref)?.mediaType;
+        const kind = classifyEpubMarkup(href, text, mediaType);
+        return kind ? sanitizeEpubResource(text, kind) : text;
       },
       loadBlob: async (href: string) => new Blob([await loadBytes(href)]),
       getSize: (href: string) => findEntry(href)?.uncompressedSize ?? 0,
