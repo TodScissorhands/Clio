@@ -263,6 +263,88 @@ impl LibraryDb {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }
+
+    pub fn preview_purge_root(&self, root_id: &str) -> Result<PurgeRootPreviewDto, String> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let preview = transaction
+            .query_row(
+                "SELECT id, label, locator_value, attachment_state,
+                        (SELECT COUNT(*) FROM documents WHERE root_id = library_roots.id),
+                        (SELECT COUNT(*) FROM reading_state s
+                         JOIN documents d ON d.id = s.document_id
+                         WHERE d.root_id = library_roots.id),
+                        (SELECT COUNT(*) FROM bookmarks b
+                         JOIN documents d ON d.id = b.document_id
+                         WHERE d.root_id = library_roots.id),
+                        (SELECT COUNT(*) FROM annotations a
+                         JOIN documents d ON d.id = a.document_id
+                         WHERE d.root_id = library_roots.id),
+                        (SELECT COUNT(*) FROM document_metadata m
+                         JOIN documents d ON d.id = m.document_id
+                         WHERE d.root_id = library_roots.id),
+                        (SELECT COUNT(*) FROM document_collections c
+                         JOIN documents d ON d.id = c.document_id
+                         WHERE d.root_id = library_roots.id)
+                 FROM library_roots WHERE id = ?1",
+                [root_id],
+                |row| {
+                    Ok(PurgeRootPreviewDto {
+                        root_id: row.get(0)?,
+                        label: row.get(1)?,
+                        locator_value: row.get(2)?,
+                        attachment_state: row.get(3)?,
+                        document_count: row.get::<_, i64>(4)?.max(0) as u64,
+                        reading_state_count: row.get::<_, i64>(5)?.max(0) as u64,
+                        bookmark_count: row.get::<_, i64>(6)?.max(0) as u64,
+                        annotation_count: row.get::<_, i64>(7)?.max(0) as u64,
+                        metadata_count: row.get::<_, i64>(8)?.max(0) as u64,
+                        collection_membership_count: row.get::<_, i64>(9)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "Library root was not found.".to_string())?;
+        if preview.attachment_state != "detached" {
+            return Err("Only detached library roots can be purged.".to_string());
+        }
+        Ok(preview)
+    }
+
+    pub fn purge_root(&self, root_id: &str) -> Result<(), String> {
+        let _scan_guard = self
+            .scan_lock
+            .lock()
+            .map_err(|_| "Library scanner is busy.".to_string())?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let attachment_state: Option<String> = transaction
+            .query_row(
+                "SELECT attachment_state FROM library_roots WHERE id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let attachment_state =
+            attachment_state.ok_or_else(|| "Library root was not found.".to_string())?;
+        if attachment_state != "detached" {
+            return Err("Only detached library roots can be purged.".to_string());
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM library_roots WHERE id = ?1 AND attachment_state = 'detached'",
+                [root_id],
+            )
+            .map_err(db_error)?;
+        if deleted != 1 {
+            return Err("Library root changed before Purge could complete.".to_string());
+        }
+        transaction.commit().map_err(db_error)
+    }
 }
 
 fn ensure_root_can_be_located(root: &RootRow) -> Result<(), String> {

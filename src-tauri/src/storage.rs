@@ -33,8 +33,8 @@ pub use commands::{
     library_document_list, library_document_path, library_document_relink, library_document_remove,
     library_folder_scan, library_metadata_get, library_metadata_update, library_root_add,
     library_root_list, library_root_locate_confirm, library_root_locate_preview,
-    library_root_remove, library_root_scan, library_thumbnail_get, reading_state_get,
-    reading_state_list, reading_state_set,
+    library_root_purge, library_root_purge_preview, library_root_remove, library_root_scan,
+    library_thumbnail_get, reading_state_get, reading_state_list, reading_state_set,
 };
 #[cfg(test)]
 use migrations::table_exists;
@@ -754,6 +754,21 @@ pub struct LocateRootPreviewDto {
     pub updated_at: String,
     pub candidate_locator: String,
     pub document_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeRootPreviewDto {
+    pub root_id: String,
+    pub label: String,
+    pub locator_value: String,
+    pub attachment_state: String,
+    pub document_count: u64,
+    pub reading_state_count: u64,
+    pub bookmark_count: u64,
+    pub annotation_count: u64,
+    pub metadata_count: u64,
+    pub collection_membership_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

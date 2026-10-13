@@ -3743,3 +3743,337 @@ fn locate_root_confirmation_rechecks_new_attached_overlaps_atomically() {
     );
     fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }
+fn purge_catalog_snapshot(db: &LibraryDb) -> Vec<Vec<String>> {
+    let queries = [
+        "SELECT quote(id) || '|' || quote(label) || '|' || quote(locator_value) || '|' || quote(attachment_state) FROM library_roots ORDER BY id",
+        "SELECT quote(id) || '|' || quote(root_id) || '|' || quote(relative_path) || '|' || quote(name) || '|' || coalesce(quote(excluded_at), 'NULL') FROM documents ORDER BY id",
+        "SELECT quote(document_id) || '|' || quote(position_kind) || '|' || quote(last_opened_at) FROM reading_state ORDER BY document_id",
+        "SELECT quote(id) || '|' || quote(document_id) || '|' || quote(title) FROM bookmarks ORDER BY id",
+        "SELECT quote(id) || '|' || quote(document_id) || '|' || quote(kind) || '|' || coalesce(quote(note), 'NULL') FROM annotations ORDER BY id",
+        "SELECT quote(document_id) || '|' || coalesce(quote(thumbnail_path), 'NULL') FROM document_metadata ORDER BY document_id",
+        "SELECT quote(id) || '|' || quote(name) FROM collections ORDER BY id",
+        "SELECT quote(collection_id) || '|' || quote(document_id) FROM document_collections ORDER BY collection_id, document_id",
+    ];
+    let connection = db.lock().expect("lock database");
+    queries
+        .iter()
+        .map(|query| migration_snapshot(&connection, query))
+        .collect()
+}
+
+#[test]
+fn purge_preview_reports_cascade_impact_and_is_read_only() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-purge-preview-{}", Uuid::new_v4()));
+    let books_path = temp_dir.join("Books");
+    let other_path = temp_dir.join("Other");
+    fs::create_dir_all(&books_path).expect("create selected root");
+    fs::create_dir_all(&other_path).expect("create unrelated root");
+    let kept_path = books_path.join("kept.txt");
+    let excluded_path = books_path.join("excluded.txt");
+    let other_document_path = other_path.join("other.txt");
+    fs::write(&kept_path, b"keep physical bytes").expect("write selected document");
+    fs::write(&excluded_path, b"excluded physical bytes").expect("write excluded document");
+    fs::write(&other_document_path, b"unrelated physical bytes").expect("write unrelated document");
+    let thumbnail_path = temp_dir.join("selected-thumbnail.bin");
+    fs::write(&thumbnail_path, b"thumbnail bytes").expect("write thumbnail artifact");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&books_path.to_string_lossy(), Some("Selected"))
+        .expect("add selected root");
+    let other_root = db
+        .add_root(&other_path.to_string_lossy(), Some("Unrelated"))
+        .expect("add unrelated root");
+    db.scan_root(&root.id).expect("scan selected root");
+    db.scan_root(&other_root.id).expect("scan unrelated root");
+    let selected_documents = db
+        .list_documents(Some(&root.id), false)
+        .expect("list selected documents");
+    let kept_id = selected_documents
+        .iter()
+        .find(|document| document.name == "kept.txt")
+        .expect("find selected document")
+        .id
+        .clone();
+    let excluded_id = selected_documents
+        .iter()
+        .find(|document| document.name == "excluded.txt")
+        .expect("find excluded document")
+        .id
+        .clone();
+    let other_id = db
+        .list_documents(Some(&other_root.id), false)
+        .expect("list unrelated document")
+        .into_iter()
+        .next()
+        .expect("unrelated document exists")
+        .id;
+    db.update_metadata(
+        &kept_id,
+        DocumentMetadata {
+            title: Some("Selected metadata".to_string()),
+            authors: vec!["A. Author".to_string()],
+            publisher: None,
+            published_date: None,
+            description: None,
+            language: None,
+            identifiers: vec![],
+            provenance: MetadataProvenance::Fallback,
+            thumbnail_path: Some(thumbnail_path.to_string_lossy().into_owned()),
+        },
+    )
+    .expect("set selected metadata");
+    db.set_reading_state(ReadingState {
+        document_id: kept_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.3 },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set selected reading state");
+    db.set_reading_state(ReadingState {
+        document_id: other_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.6 },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set unrelated reading state");
+    db.create_bookmark(
+        &kept_id,
+        ReadingPosition::TextScroll { progression: 0.3 },
+        Some("Selected bookmark"),
+    )
+    .expect("create selected bookmark");
+    db.create_annotation(
+        &kept_id,
+        "note",
+        ReadingPosition::TextScroll { progression: 0.3 },
+        Some("Selected text"),
+        Some("Selected annotation"),
+        None,
+    )
+    .expect("create selected annotation");
+    let collection = db
+        .create_collection("Shared", Some("Contains selected and unrelated documents"))
+        .expect("create shared collection");
+    db.add_document_to_collection(&collection.id, &kept_id)
+        .expect("add selected collection membership");
+    db.add_document_to_collection(&collection.id, &excluded_id)
+        .expect("add excluded collection membership");
+    db.add_document_to_collection(&collection.id, &other_id)
+        .expect("add unrelated collection membership");
+    db.remove_document(&excluded_id)
+        .expect("exclude selected document");
+    db.remove_root(&root.id).expect("detach selected root");
+
+    let before_preview = purge_catalog_snapshot(&db);
+    let preview = db
+        .preview_purge_root(&root.id)
+        .expect("preview detached root purge");
+    assert_eq!(preview.root_id, root.id);
+    assert_eq!(preview.label, "Selected");
+    assert_eq!(
+        preview.locator_value,
+        fs::canonicalize(&books_path).unwrap().to_string_lossy()
+    );
+    assert_eq!(preview.attachment_state, "detached");
+    assert_eq!(preview.document_count, 2);
+    assert_eq!(preview.reading_state_count, 1);
+    assert_eq!(preview.bookmark_count, 1);
+    assert_eq!(preview.annotation_count, 1);
+    assert_eq!(preview.metadata_count, 2);
+    assert_eq!(preview.collection_membership_count, 2);
+    assert_eq!(purge_catalog_snapshot(&db), before_preview);
+
+    db.purge_root(&root.id).expect("purge detached root");
+    let after_purge = purge_catalog_snapshot(&db);
+    assert_eq!(after_purge[0].len(), 1, "unrelated root remains");
+    assert_eq!(after_purge[1].len(), 1, "only unrelated document remains");
+    assert_eq!(after_purge[2].len(), 1, "unrelated reading state remains");
+    assert!(after_purge[3].is_empty(), "selected bookmark cascades");
+    assert!(after_purge[4].is_empty(), "selected annotation cascades");
+    assert_eq!(after_purge[5].len(), 1, "unrelated metadata remains");
+    assert_eq!(after_purge[6].len(), 1, "shared collection remains");
+    assert_eq!(after_purge[7].len(), 1, "unrelated membership remains");
+    assert!(db.purge_root(&root.id).unwrap_err().contains("not found"));
+    assert_eq!(purge_catalog_snapshot(&db), after_purge);
+    assert_eq!(
+        fs::read(&kept_path).expect("selected source remains"),
+        b"keep physical bytes"
+    );
+    assert_eq!(
+        fs::read(&excluded_path).expect("excluded source remains"),
+        b"excluded physical bytes"
+    );
+    assert_eq!(
+        fs::read(&other_document_path).expect("unrelated source remains"),
+        b"unrelated physical bytes"
+    );
+    assert_eq!(
+        fs::read(&thumbnail_path).expect("thumbnail file remains"),
+        b"thumbnail bytes"
+    );
+    assert_eq!(
+        db.list_collection_documents(&collection.id)
+            .expect("list surviving collection membership")
+            .into_iter()
+            .map(|document| document.id)
+            .collect::<Vec<_>>(),
+        vec![other_id]
+    );
+    let foreign_key_violations: i64 = db
+        .lock()
+        .expect("lock database")
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .expect("check foreign-key constraints");
+    assert_eq!(foreign_key_violations, 0);
+    fs::remove_dir_all(temp_dir).expect("remove test directory");
+}
+
+#[test]
+fn purge_rejects_attached_and_missing_roots_without_mutation() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-purge-eligibility-{}", Uuid::new_v4()));
+    let available_path = temp_dir.join("available");
+    let missing_path = temp_dir.join("missing");
+    fs::create_dir_all(&available_path).expect("create available root");
+    fs::create_dir_all(&missing_path).expect("create root to remove");
+    fs::write(available_path.join("available.txt"), b"available").expect("write available source");
+    fs::write(missing_path.join("missing.txt"), b"missing").expect("write missing source");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let available_root = db
+        .add_root(&available_path.to_string_lossy(), Some("Available"))
+        .expect("add available root");
+    let missing_root = db
+        .add_root(&missing_path.to_string_lossy(), Some("Missing"))
+        .expect("add root to make missing");
+    db.scan_root(&available_root.id)
+        .expect("scan available root");
+    db.scan_root(&missing_root.id).expect("scan missing root");
+
+    let before_available = purge_catalog_snapshot(&db);
+    assert!(db
+        .preview_purge_root(&available_root.id)
+        .unwrap_err()
+        .contains("Only detached"));
+    assert!(db
+        .purge_root(&available_root.id)
+        .unwrap_err()
+        .contains("Only detached"));
+    assert_eq!(purge_catalog_snapshot(&db), before_available);
+    assert!(available_path.join("available.txt").exists());
+
+    fs::remove_dir_all(&missing_path).expect("remove attached root directory");
+    let before_missing = purge_catalog_snapshot(&db);
+    assert!(db
+        .preview_purge_root(&missing_root.id)
+        .unwrap_err()
+        .contains("Only detached"));
+    assert!(db
+        .purge_root(&missing_root.id)
+        .unwrap_err()
+        .contains("Only detached"));
+    assert_eq!(purge_catalog_snapshot(&db), before_missing);
+    assert!(db
+        .list_roots()
+        .expect("list roots after rejected purge")
+        .iter()
+        .any(|root| root.id == missing_root.id && root.attachment_state == "attached"));
+
+    let missing_root_id = Uuid::new_v4().to_string();
+    assert!(db
+        .preview_purge_root(&missing_root_id)
+        .unwrap_err()
+        .contains("not found"));
+    assert!(db
+        .purge_root(&missing_root_id)
+        .unwrap_err()
+        .contains("not found"));
+    assert_eq!(purge_catalog_snapshot(&db), before_missing);
+    fs::remove_dir_all(temp_dir).expect("remove test directory");
+}
+
+#[test]
+fn stale_purge_preview_does_not_authorize_purge_after_root_reattaches() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-purge-stale-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old");
+    let new_path = temp_dir.join("new");
+    fs::create_dir_all(&old_path).expect("create original root");
+    fs::create_dir_all(&new_path).expect("create new root location");
+    fs::write(old_path.join("book.txt"), b"book").expect("write source");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&old_path.to_string_lossy(), Some("Rebound"))
+        .expect("add root");
+    db.scan_root(&root.id).expect("scan root");
+    db.remove_root(&root.id).expect("detach root");
+    let preview = db
+        .preview_purge_root(&root.id)
+        .expect("preview detached root");
+    assert_eq!(preview.attachment_state, "detached");
+    let locate_preview = db
+        .preview_locate_root(&root.id, &new_path.to_string_lossy())
+        .expect("preview root reattachment");
+    db.confirm_locate_root(&locate_preview)
+        .expect("reattach root before purge");
+    let before_rejected_purge = purge_catalog_snapshot(&db);
+
+    assert!(db
+        .purge_root(&preview.root_id)
+        .unwrap_err()
+        .contains("Only detached"));
+    assert_eq!(purge_catalog_snapshot(&db), before_rejected_purge);
+    assert!(db
+        .list_roots()
+        .expect("list roots after stale purge")
+        .iter()
+        .any(|current| current.id == root.id && current.attachment_state == "attached"));
+    assert!(old_path.join("book.txt").exists());
+    assert!(new_path.exists());
+    fs::remove_dir_all(temp_dir).expect("remove test directory");
+}
+
+#[test]
+fn purge_waits_for_existing_scan_lock() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-purge-scan-lock-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).expect("create root");
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&temp_dir.to_string_lossy(), Some("Detached"))
+        .expect("add root");
+    db.remove_root(&root.id).expect("detach root");
+
+    let scan_guard = db.scan_lock.lock().expect("hold active scan lock");
+    let thread_db = db.clone();
+    let thread_root_id = root.id.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let purge_thread = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal purge attempt");
+        finished_tx
+            .send(thread_db.purge_root(&thread_root_id))
+            .expect("send purge result");
+    });
+    started_rx.recv().expect("wait for purge attempt");
+    assert!(matches!(
+        finished_rx.recv_timeout(std::time::Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert!(db
+        .list_roots()
+        .expect("root remains while scan lock is held")
+        .iter()
+        .any(|current| current.id == root.id));
+
+    drop(scan_guard);
+    finished_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("purge finishes after scan lock releases")
+        .expect("purge succeeds after scan lock releases");
+    purge_thread.join().expect("join purge thread");
+    assert!(db.list_roots().expect("list purged roots").is_empty());
+    assert!(temp_dir.exists(), "purge leaves filesystem untouched");
+    fs::remove_dir_all(temp_dir).expect("remove test directory");
+}

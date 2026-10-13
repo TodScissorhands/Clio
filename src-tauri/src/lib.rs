@@ -185,6 +185,23 @@ fn detach_library_root_locked(
     Ok(())
 }
 
+pub(crate) fn purge_library_root(db: &LibraryDb, root_id: &str) -> Result<(), String> {
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    purge_library_root_locked(db, root_id, &mut authorizations)
+}
+
+fn purge_library_root_locked(
+    db: &LibraryDb,
+    root_id: &str,
+    authorizations: &mut HashMap<String, ReaderAuthorizationEntry>,
+) -> Result<(), String> {
+    db.purge_root(root_id)?;
+    authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(root_id));
+    Ok(())
+}
+
 pub(crate) fn locate_library_root(
     db: &LibraryDb,
     preview: &LocateRootPreviewDto,
@@ -295,6 +312,8 @@ pub fn run() {
             storage::commands::library_root_remove,
             storage::commands::library_root_locate_preview,
             storage::commands::library_root_locate_confirm,
+            storage::commands::library_root_purge_preview,
+            storage::commands::library_root_purge,
             storage::commands::library_root_scan,
             storage::commands::library_folder_scan,
             storage::commands::library_document_list,
@@ -605,6 +624,50 @@ mod tests {
             .join()
             .expect("join document-open thread")
             .is_err());
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn purge_revokes_library_tokens_and_serializes_waiting_reads() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+        let library_open = db
+            .open_library_document(&document_id, |path, root_id| {
+                mint_library_reader_token(&db, path, root_id)
+            })
+            .expect("mint library token");
+        let direct_open = storage::direct_open(
+            document_path.to_string_lossy().into_owned(),
+            mint_reader_token,
+        )
+        .expect("mint direct-open token");
+
+        db.remove_root(&root_id)
+            .expect("detach without changing token registry");
+        assert_eq!(
+            read_document_bytes(library_open.locator.value.clone())
+                .expect("library token remains until purge"),
+            b"library token content"
+        );
+
+        let mut authorizations = reader_authorizations().lock().expect("lock registry");
+        let token = library_open.locator.value;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let read_thread = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal read attempt");
+            read_document_bytes(token)
+        });
+        started_rx.recv().expect("wait for read attempt");
+        purge_library_root_locked(&db, &root_id, &mut authorizations)
+            .expect("purge while holding authorization gate");
+        drop(authorizations);
+
+        assert!(read_thread.join().expect("join reader").is_err());
+        assert!(document_path.exists(), "purge preserves physical document");
+        assert_eq!(
+            read_document_bytes(direct_open.locator.value).expect("direct token remains valid"),
+            b"library token content"
+        );
+        assert!(db.list_roots().expect("list purged roots").is_empty());
         fs::remove_dir_all(test_dir).expect("remove temporary directory");
     }
 }
