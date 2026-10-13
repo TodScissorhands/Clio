@@ -31,9 +31,12 @@ fn test_library_root_crud() {
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].id, root.id);
 
-    db.remove_root(&root.id).expect("remove root");
-    let roots_after = db.list_roots().expect("list roots after remove");
-    assert!(roots_after.is_empty());
+    db.remove_root(&root.id).expect("detach root");
+    let roots_after = db.list_roots().expect("list roots after detach");
+    assert_eq!(roots_after.len(), 1);
+    assert_eq!(roots_after[0].id, root.id);
+    assert_eq!(roots_after[0].attachment_state, "detached");
+    assert_eq!(roots_after[0].availability, None);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -175,7 +178,7 @@ fn test_open_library_document_and_direct_open() {
     let doc_id = &docs[0].id;
 
     let opened = db
-        .open_library_document(doc_id, |path| {
+        .open_library_document(doc_id, |path, _root_id| {
             assert_eq!(
                 fs::canonicalize(path).unwrap(),
                 fs::canonicalize(&book_path).unwrap()
@@ -187,7 +190,7 @@ fn test_open_library_document_and_direct_open() {
     assert_eq!(opened.locator.kind, "desktop-token");
     assert_eq!(opened.locator.value, "fake-token-123");
 
-    let missing_open = db.open_library_document("nonexistent-id", |_| Ok("token".to_string()));
+    let missing_open = db.open_library_document("nonexistent-id", |_, _| Ok("token".to_string()));
     assert!(missing_open.is_err());
 
     let direct = direct_open(book_path.to_string_lossy().into_owned(), |_| {
@@ -334,7 +337,7 @@ fn test_reading_state_roundtrip_and_validation() {
 }
 
 #[test]
-fn test_bookmark_crud_validation_and_cascade_delete() {
+fn test_bookmark_crud_validation_and_detach_preservation() {
     let temp_dir = std::env::temp_dir().join(format!("clio-test-bm-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).expect("create dir");
     fs::write(temp_dir.join("book.pdf"), b"%PDF sample").expect("write file");
@@ -444,16 +447,17 @@ fn test_bookmark_crud_validation_and_cascade_delete() {
     assert_eq!(after_delete.len(), 1);
     assert_eq!(after_delete[0].id, bm2.id);
 
-    // 10. Cascade delete on document/root deletion
-    db.remove_root(&root.id).expect("remove root");
-    let after_cascade = db.list_bookmarks(&doc_id).expect("list after cascade");
-    assert!(after_cascade.is_empty());
+    // 10. Detaching the root preserves the document's remaining bookmark.
+    db.remove_root(&root.id).expect("detach root");
+    let after_detach = db.list_bookmarks(&doc_id).expect("list after detach");
+    assert_eq!(after_detach.len(), 1);
+    assert_eq!(after_detach[0].id, bm2.id);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
-fn test_annotation_crud_and_cascade_delete() {
+fn test_annotation_crud_and_detach_preservation() {
     let temp_dir = std::env::temp_dir().join(format!("clio-test-ann-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).expect("create dir");
     fs::write(temp_dir.join("book.pdf"), b"%PDF sample").expect("write file");
@@ -636,10 +640,10 @@ fn test_annotation_locator_crud_and_schema_v3() {
         .expect("list other");
     assert!(other_listed.is_empty());
 
-    // 8. Cascade delete: removing root deletes annotations.
-    db.remove_root(&root.id).expect("remove root");
-    let after_cascade = db.list_annotations(&doc_id).expect("list after cascade");
-    assert!(after_cascade.is_empty());
+    // 8. Detaching the root preserves its annotations.
+    db.remove_root(&root.id).expect("detach root");
+    let after_detach = db.list_annotations(&doc_id).expect("list after detach");
+    assert_eq!(after_detach.len(), 4);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -889,11 +893,41 @@ fn test_collections_crud_and_membership_cascades() {
     let docs_still_here = db.list_documents(Some(&root.id), false).expect("list docs");
     assert_eq!(docs_still_here.len(), 2);
 
-    // 6. Delete document (via root remove): membership cleaned up, collection intact
-    db.remove_root(&root.id).expect("remove root");
-    assert_eq!(db.list_documents(None, false).expect("list").len(), 0);
-    let c1_after_root_delete = db.list_collections().expect("list cols");
-    assert_eq!(c1_after_root_delete[0].document_count, 0);
+    // 6. Detaching hides root-owned documents without deleting their catalog records.
+    db.remove_root(&root.id).expect("detach root");
+    assert!(db
+        .list_documents(None, false)
+        .expect("list active docs")
+        .is_empty());
+    assert!(db
+        .list_documents(Some(&root.id), false)
+        .unwrap_err()
+        .contains("detached"));
+    assert!(db
+        .list_collection_documents(&c1.id)
+        .expect("list active collection docs")
+        .is_empty());
+    let c1_after_detach = db
+        .list_collections()
+        .expect("list collections after detach");
+    assert_eq!(c1_after_detach[0].document_count, 0);
+    let connection = db.lock().expect("lock database");
+    let document_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM documents WHERE root_id = ?1",
+            [&root.id],
+            |row| row.get(0),
+        )
+        .expect("count preserved documents");
+    let membership_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM document_collections WHERE collection_id = ?1",
+            [&c1.id],
+            |row| row.get(0),
+        )
+        .expect("count preserved memberships");
+    assert_eq!(document_count, 2);
+    assert_eq!(membership_count, 1);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -1498,7 +1532,7 @@ fn test_excluded_document_cannot_be_resolved_by_id() {
     db.remove_document(&document_id).expect("exclude document");
     assert!(db.document_path(&document_id).is_err());
     assert!(db
-        .open_library_document(&document_id, |_| Ok("must-not-mint".to_string()))
+        .open_library_document(&document_id, |_, _| Ok("must-not-mint".to_string()))
         .is_err());
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -1868,6 +1902,106 @@ fn test_relink_document_preserves_state() {
     }
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn relink_rejects_detached_destination_without_mutating_catalog_state() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-relink-detached-{}", Uuid::new_v4()));
+    let source_root_path = temp_dir.join("source");
+    let destination_root_path = temp_dir.join("detached-destination");
+    fs::create_dir_all(&source_root_path).expect("create source root");
+    fs::create_dir_all(&destination_root_path).expect("create destination root");
+    let old_file = source_root_path.join("old.pdf");
+    let destination_file = destination_root_path.join("destination.pdf");
+    fs::write(&old_file, b"%PDF source").expect("write source file");
+    fs::write(&destination_file, b"%PDF destination").expect("write destination file");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let source_root = db
+        .add_root(&source_root_path.to_string_lossy(), None)
+        .expect("add source root");
+    let destination_root = db
+        .add_root(&destination_root_path.to_string_lossy(), None)
+        .expect("add destination root");
+    db.scan_root(&source_root.id).expect("scan source");
+    db.scan_root(&destination_root.id)
+        .expect("scan destination");
+    let document_id = db
+        .list_documents(Some(&source_root.id), false)
+        .expect("list source")
+        .into_iter()
+        .next()
+        .expect("source document")
+        .id;
+    db.set_reading_state(ReadingState {
+        document_id: document_id.clone(),
+        position: ReadingPosition::PdfPage {
+            page: 7,
+            progression: None,
+        },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set reading state");
+
+    fs::remove_file(&old_file).expect("remove old source file");
+    db.scan_root(&source_root.id).expect("mark source missing");
+    db.remove_document(&document_id)
+        .expect("exclude source document");
+    db.remove_root(&destination_root.id)
+        .expect("detach destination root");
+
+    let before: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read source state before failed relink");
+    let reading_state_before = db
+        .get_reading_state(&document_id)
+        .expect("read state")
+        .expect("reading state exists");
+
+    let error = db
+        .relink_document(&document_id, &destination_file.to_string_lossy())
+        .expect_err("detached destination must be rejected");
+    assert!(error.contains("not inside any Library folder"));
+
+    let after: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read source state after failed relink");
+    assert_eq!(after, before);
+    let reading_state_after = db
+        .get_reading_state(&document_id)
+        .expect("read state after failed relink")
+        .expect("reading state remains");
+    assert_eq!(
+        reading_state_after.document_id,
+        reading_state_before.document_id
+    );
+    assert_eq!(
+        reading_state_after.last_opened_at,
+        reading_state_before.last_opened_at
+    );
+    assert_eq!(
+        reading_state_after.updated_at,
+        reading_state_before.updated_at
+    );
+    match reading_state_after.position {
+        ReadingPosition::PdfPage { page, .. } => assert_eq!(page, 7),
+        _ => panic!("reading position changed after failed relink"),
+    }
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }
 
 fn migration_snapshot(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
@@ -2513,6 +2647,243 @@ fn test_add_root_rejects_unsafe_missing_attached_root_path() {
         roots_before,
         db.list_roots().expect("list roots after rejection"),
         "validation failure must leave database unchanged"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_detaching_root_preserves_catalog_and_isolates_active_operations() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-detach-root-{}", Uuid::new_v4()));
+    let detached_path = temp_dir.join("detached");
+    let active_path = temp_dir.join("active");
+    fs::create_dir_all(&detached_path).expect("create detached root directory");
+    fs::create_dir_all(&active_path).expect("create active root directory");
+    let document_path = detached_path.join("book.txt");
+    let excluded_path = detached_path.join("excluded.txt");
+    let active_document_path = active_path.join("active.txt");
+    fs::write(&document_path, "book contents").expect("write book");
+    fs::write(&excluded_path, "excluded contents").expect("write excluded document");
+    fs::write(&active_document_path, "active contents").expect("write active document");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let detached_root = db
+        .add_root(&detached_path.to_string_lossy(), Some("Detached"))
+        .expect("add detached root");
+    let active_root = db
+        .add_root(&active_path.to_string_lossy(), Some("Active"))
+        .expect("add active root");
+    db.scan_root(&detached_root.id)
+        .expect("scan detached candidate");
+    db.scan_root(&active_root.id).expect("scan active root");
+
+    let detached_documents = db
+        .list_documents(Some(&detached_root.id), false)
+        .expect("list attached root documents");
+    let document_id = detached_documents
+        .iter()
+        .find(|document| document.name == "book.txt")
+        .expect("find book")
+        .id
+        .clone();
+    let excluded_id = detached_documents
+        .iter()
+        .find(|document| document.name == "excluded.txt")
+        .expect("find excluded document")
+        .id
+        .clone();
+    let active_documents = db
+        .list_documents(Some(&active_root.id), false)
+        .expect("list active root documents");
+    assert_eq!(active_documents.len(), 1);
+    let active_id = active_documents[0].id.clone();
+
+    let collection = db
+        .create_collection("Saved", None)
+        .expect("create collection");
+    db.add_document_to_collection(&collection.id, &document_id)
+        .expect("add book to collection");
+    let state = ReadingState {
+        document_id: document_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.25 },
+        last_opened_at: "2026-10-01T12:00:00Z".to_string(),
+        updated_at: "2026-10-01T12:00:00Z".to_string(),
+    };
+    db.set_reading_state(state).expect("save reading state");
+    db.create_bookmark(
+        &document_id,
+        ReadingPosition::TextScroll { progression: 0.25 },
+        Some("Keep"),
+    )
+    .expect("create bookmark");
+    db.create_annotation(
+        &document_id,
+        "note",
+        ReadingPosition::TextScroll { progression: 0.25 },
+        Some("Selected"),
+        Some("Preserve this"),
+        None,
+    )
+    .expect("create annotation");
+    db.remove_document(&excluded_id)
+        .expect("exclude document before detach");
+    let excluded_at_before: Option<String> = db
+        .lock()
+        .expect("lock db")
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&excluded_id],
+            |row| row.get(0),
+        )
+        .expect("read excluded state");
+    assert!(excluded_at_before.is_some());
+
+    let root_locator_before = db
+        .root(&detached_root.id)
+        .expect("load root")
+        .expect("root exists")
+        .locator_value;
+    let scan_time_before = db
+        .root(&detached_root.id)
+        .expect("load root")
+        .expect("root exists")
+        .last_scanned_at;
+    db.remove_root(&detached_root.id).expect("detach root");
+    db.remove_root(&detached_root.id)
+        .expect("detaching an already detached root is idempotent");
+
+    let listed_root = db
+        .list_roots()
+        .expect("list roots")
+        .into_iter()
+        .find(|root| root.id == detached_root.id)
+        .expect("detached root record remains");
+    assert_eq!(listed_root.attachment_state, "detached");
+    assert_eq!(listed_root.availability, None);
+    let detached_root_row = db
+        .root(&detached_root.id)
+        .expect("load detached root")
+        .expect("detached root remains");
+    assert_eq!(detached_root_row.last_scanned_at, scan_time_before);
+    assert_eq!(detached_root_row.locator_value, root_locator_before);
+
+    assert!(document_path.exists(), "detachment must not remove files");
+    assert!(excluded_path.exists(), "detachment must not remove files");
+    assert_eq!(
+        db.list_documents(None, false)
+            .expect("list active documents")
+            .iter()
+            .map(|document| document.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![active_id.as_str()]
+    );
+    assert!(db
+        .list_documents(Some(&detached_root.id), true)
+        .unwrap_err()
+        .contains("detached"));
+    assert!(db.document_path(&document_id).is_err());
+    let mut token_minted = false;
+    assert!(db
+        .open_library_document(&document_id, |_, _| {
+            token_minted = true;
+            Ok("unexpected-token".to_string())
+        })
+        .is_err());
+    assert!(
+        !token_minted,
+        "detached document must not mint reader access"
+    );
+    assert!(db
+        .add_document_to_collection(&collection.id, &document_id)
+        .is_err());
+
+    let roots_before_rejected_scan = db.list_roots().expect("roots before rejected scan");
+    let documents_before_rejected_scan: Vec<String> = db
+        .list_documents(None, true)
+        .expect("active docs before scan")
+        .into_iter()
+        .map(|document| document.id)
+        .collect();
+    assert!(db.scan_root(&detached_root.id).is_err());
+    assert_eq!(
+        roots_before_rejected_scan,
+        db.list_roots().expect("roots after rejected scan")
+    );
+    let documents_after_rejected_scan: Vec<String> = db
+        .list_documents(None, true)
+        .expect("active docs after scan")
+        .into_iter()
+        .map(|document| document.id)
+        .collect();
+    assert_eq!(
+        documents_before_rejected_scan,
+        documents_after_rejected_scan
+    );
+
+    let connection = db.lock().expect("lock db");
+    let preserved_document: (String, String, Option<String>, String) = connection
+        .query_row(
+            "SELECT root_id, relative_path, excluded_at, availability
+             FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read preserved document");
+    assert_eq!(preserved_document.0, detached_root.id);
+    assert_eq!(preserved_document.1, "book.txt");
+    assert_eq!(preserved_document.2, None);
+    assert_eq!(preserved_document.3, "present");
+    let excluded_at_after: Option<String> = connection
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&excluded_id],
+            |row| row.get(0),
+        )
+        .expect("read preserved exclusion");
+    assert_eq!(excluded_at_after, excluded_at_before);
+    let document_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM documents WHERE root_id = ?1",
+            [&detached_root.id],
+            |row| row.get(0),
+        )
+        .expect("count preserved documents");
+    assert_eq!(document_count, 2);
+    let membership_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM document_collections WHERE document_id = ?1",
+            [&document_id],
+            |row| row.get(0),
+        )
+        .expect("count preserved memberships");
+    assert_eq!(membership_count, 1);
+    drop(connection);
+    assert_eq!(
+        db.get_reading_state(&document_id)
+            .expect("get preserved reading state")
+            .expect("reading state remains")
+            .document_id,
+        document_id
+    );
+    assert_eq!(
+        db.list_bookmarks(&document_id)
+            .expect("list bookmarks")
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.list_annotations(&document_id)
+            .expect("list annotations")
+            .len(),
+        1
+    );
+    assert!(db
+        .list_collection_documents(&collection.id)
+        .expect("list active collection documents")
+        .is_empty());
+    assert_eq!(
+        db.list_collections().expect("list collection counts")[0].document_count,
+        0
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

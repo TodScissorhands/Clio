@@ -32,6 +32,10 @@ SQLite schema version 5 stores library roots, document/source metadata, availabi
 
 Scans are explicit, scoped to a selected root, and reconcile the catalog with the observed filesystem. A missing root is an observation, not a catalog mutation. Files absent from an existing scanned root are marked missing; missing records retain their metadata and reading state. “Remove from Library” excludes a record from active catalog views without deleting the source file, and later scans keep it excluded. Removing a document from a collection removes only that membership.
 
+Detaching a root changes its attachment state without deleting the root, documents, source coordinates, exclusions, collection memberships, reading state, bookmarks, annotations, or physical files. Detached roots remain visible in root management with no availability; they are excluded from scans, active document and collection browsing, and library-path/reader authorization. Operations that explicitly list or scan a detached root reject it. Detach also revokes all library-issued reader tokens associated with that root; directly opened tokens are independent and are not revoked by root detachment. The reader authorization registry lock serializes library-token minting and reads with detachment: when Detach returns, no later read can use a revoked library token, while a read that acquired the lock first may complete before Detach returns. Reattaching, locating, or purging a root is not implemented.
+
+Relink selects destinations only from attached filesystem roots. Detached roots remain preserved as catalog records but cannot receive documents through Relink.
+
 The current domain model represents reading positions as PDF page positions, EPUB CFI positions, or text scroll positions, with last-opened and update timestamps. It does not introduce a universal document AST or format-specific content database.
 
 ## Native command surface

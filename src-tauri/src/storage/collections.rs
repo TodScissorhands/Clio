@@ -46,9 +46,11 @@ impl LibraryDb {
         let mut stmt = connection
             .prepare(
                 "SELECT c.id, c.name, c.description, c.created_at, c.updated_at,
-                        COUNT(dc.document_id) as doc_count
+                        COUNT(r.id) as doc_count
                  FROM collections c
                  LEFT JOIN document_collections dc ON dc.collection_id = c.id
+                 LEFT JOIN documents d ON d.id = dc.document_id
+                 LEFT JOIN library_roots r ON r.id = d.root_id AND r.attachment_state = 'attached'
                  GROUP BY c.id
                  ORDER BY c.name COLLATE NOCASE, c.id",
             )
@@ -93,9 +95,11 @@ impl LibraryDb {
         connection
             .query_row(
                 "SELECT c.id, c.name, c.description, c.created_at, c.updated_at,
-                        COUNT(dc.document_id) as doc_count
+                        COUNT(r.id) as doc_count
                  FROM collections c
                  LEFT JOIN document_collections dc ON dc.collection_id = c.id
+                 LEFT JOIN documents d ON d.id = dc.document_id
+                 LEFT JOIN library_roots r ON r.id = d.root_id AND r.attachment_state = 'attached'
                  WHERE c.id = ?1
                  GROUP BY c.id",
                 [id],
@@ -143,7 +147,10 @@ impl LibraryDb {
         }
         let doc_exists: Option<String> = connection
             .query_row(
-                "SELECT id FROM documents WHERE id = ?1",
+                "SELECT d.id
+                 FROM documents d
+                 JOIN library_roots r ON r.id = d.root_id AND r.attachment_state = 'attached'
+                 WHERE d.id = ?1",
                 [document_id],
                 |r| r.get(0),
             )
@@ -193,6 +200,7 @@ impl LibraryDb {
                         dm.description, dm.language, dm.identifiers, dm.provenance, dm.thumbnail_path
                  FROM documents d
                  JOIN document_collections dc ON dc.document_id = d.id
+                 JOIN library_roots r ON r.id = d.root_id AND r.attachment_state = 'attached'
                  LEFT JOIN document_metadata dm ON dm.document_id = d.id
                  WHERE dc.collection_id = ?1 AND d.excluded_at IS NULL
                  ORDER BY d.name COLLATE NOCASE, d.id",

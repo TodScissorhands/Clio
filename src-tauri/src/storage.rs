@@ -1,5 +1,5 @@
 use crate::metadata::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -124,6 +124,9 @@ impl LibraryDb {
         let root = self
             .root(root_id)?
             .ok_or_else(|| "Library root was not found.".to_string())?;
+        if root.attachment_state != "attached" {
+            return Err("Library root is detached.".to_string());
+        }
         if root.locator_kind != "filesystem-directory" {
             return Err("This library root is not a filesystem directory.".to_string());
         }
@@ -153,7 +156,21 @@ impl LibraryDb {
         let now = timestamp();
         let scan_marker = format!("{now}_{}", Uuid::new_v4());
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(db_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let attachment_state: String = transaction
+            .query_row(
+                "SELECT attachment_state FROM library_roots WHERE id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "Library root was not found.".to_string())?;
+        if attachment_state != "attached" {
+            return Err("Library root is detached.".to_string());
+        }
         let mut inserted = 0;
         let mut updated = 0;
         for (path, relative_path) in &files {
@@ -286,6 +303,19 @@ impl LibraryDb {
         include_missing: bool,
     ) -> Result<Vec<DocumentDto>, String> {
         let connection = self.lock()?;
+        if let Some(root_id) = root_id {
+            let attachment_state: Option<String> = connection
+                .query_row(
+                    "SELECT attachment_state FROM library_roots WHERE id = ?1",
+                    [root_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_error)?;
+            if attachment_state.as_deref() == Some("detached") {
+                return Err("Library root is detached.".to_string());
+            }
+        }
         let mut read_context = DocumentReadContext::load(&connection)?;
 
         let mut statement = connection
@@ -295,8 +325,10 @@ impl LibraryDb {
                         dm.title, dm.authors, dm.publisher, dm.published_date,
                         dm.description, dm.language, dm.identifiers, dm.provenance, dm.thumbnail_path
                  FROM documents d
+                 JOIN library_roots r ON r.id = d.root_id AND r.attachment_state = 'attached'
                  LEFT JOIN document_metadata dm ON dm.document_id = d.id
-                 WHERE (?1 IS NULL OR d.root_id = ?1) AND (?2 OR d.availability = 'present') AND d.excluded_at IS NULL
+                 WHERE (?1 IS NULL OR d.root_id = ?1) AND (?2 OR d.availability = 'present')
+                   AND d.excluded_at IS NULL
                  ORDER BY d.name COLLATE NOCASE, d.id",
             )
             .map_err(db_error)?;
@@ -329,7 +361,7 @@ impl LibraryDb {
         mint_token: F,
     ) -> Result<ReaderOpen, String>
     where
-        F: FnOnce(&Path) -> Result<String, String>,
+        F: FnOnce(&Path, &str) -> Result<String, String>,
     {
         let document = self
             .document(document_id)?
@@ -338,7 +370,7 @@ impl LibraryDb {
             return Err("This library document is missing from its root.".to_string());
         }
         let path = canonical_library_path(&document.root_locator, &document.relative_path)?;
-        let token = mint_token(&path)?;
+        let token = mint_token(&path, &document.root_id)?;
         Ok(ReaderOpen {
             record: document.record,
             source: SourceRef::Library {
@@ -377,7 +409,7 @@ impl LibraryDb {
         let mut target_rel_path = None;
 
         for root in &roots {
-            if root.locator_kind != "filesystem-directory" {
+            if root.locator_kind != "filesystem-directory" || root.attachment_state != "attached" {
                 continue;
             }
             if let Ok(root_canon) = Path::new(&root.locator_value).canonicalize() {
@@ -413,7 +445,26 @@ impl LibraryDb {
         let now = timestamp();
 
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(db_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+
+        let target_root_attached: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM library_roots
+                    WHERE id = ?1 AND attachment_state = 'attached'
+                 )",
+                [&root_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !target_root_attached {
+            return Err(
+                "The selected file is not inside any Library folder. Add its folder to the Library first."
+                    .to_string(),
+            );
+        }
 
         // Ensure target document exists
         let exists: bool = transaction
@@ -465,7 +516,6 @@ impl LibraryDb {
         transaction.commit().map_err(db_error)?;
         drop(connection);
 
-        // Fetch and return the updated DocumentDto
         let docs = self.list_documents(Some(&root_id), true)?;
         docs.into_iter()
             .find(|d| d.id == document_id)
@@ -484,7 +534,7 @@ impl LibraryDb {
         let roots = self.raw_roots()?;
         let mut matching_root = None;
         for root in &roots {
-            if root.locator_kind != "filesystem-directory" {
+            if root.locator_kind != "filesystem-directory" || root.attachment_state != "attached" {
                 continue;
             }
             if let Ok(root_canon) = Path::new(&root.locator_value).canonicalize() {
@@ -527,7 +577,7 @@ impl LibraryDb {
                 "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
                         d.root_id, d.relative_path, d.availability, r.locator_value
                  FROM documents d JOIN library_roots r ON r.id = d.root_id
-                 WHERE d.id = ?1 AND d.excluded_at IS NULL",
+                 WHERE d.id = ?1 AND d.excluded_at IS NULL AND r.attachment_state = 'attached'",
                 [document_id],
                 open_document_from_row,
             )

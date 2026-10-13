@@ -44,6 +44,7 @@ struct ReaderAuthorization {
 #[derive(Clone)]
 struct ReaderAuthorizationEntry {
     path: PathBuf,
+    root_id: Option<String>,
     expires_at: Instant,
 }
 
@@ -129,6 +130,28 @@ fn mint_reader_token(document: &Path) -> Result<String, String> {
     let mut authorizations = reader_authorizations()
         .lock()
         .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    mint_reader_token_locked(&mut authorizations, document, None)
+}
+
+fn mint_library_reader_token(
+    db: &LibraryDb,
+    document: &Path,
+    root_id: &str,
+) -> Result<String, String> {
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    if !db.root_is_attached(root_id)? {
+        return Err("Library root is detached.".to_string());
+    }
+    mint_reader_token_locked(&mut authorizations, document, Some(root_id))
+}
+
+fn mint_reader_token_locked(
+    authorizations: &mut HashMap<String, ReaderAuthorizationEntry>,
+    document: &Path,
+    root_id: Option<&str>,
+) -> Result<String, String> {
     loop {
         let candidate = Uuid::new_v4().to_string();
         if !authorizations.contains_key(&candidate) {
@@ -136,6 +159,7 @@ fn mint_reader_token(document: &Path) -> Result<String, String> {
                 candidate.clone(),
                 ReaderAuthorizationEntry {
                     path: document.to_path_buf(),
+                    root_id: root_id.map(ToOwned::to_owned),
                     expires_at: Instant::now() + READER_AUTHORIZATION_TTL,
                 },
             );
@@ -144,12 +168,31 @@ fn mint_reader_token(document: &Path) -> Result<String, String> {
     }
 }
 
+pub(crate) fn detach_library_root(db: &LibraryDb, root_id: &str) -> Result<(), String> {
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    detach_library_root_locked(db, root_id, &mut authorizations)
+}
+
+fn detach_library_root_locked(
+    db: &LibraryDb,
+    root_id: &str,
+    authorizations: &mut HashMap<String, ReaderAuthorizationEntry>,
+) -> Result<(), String> {
+    db.remove_root(root_id)?;
+    authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(root_id));
+    Ok(())
+}
+
 #[tauri::command]
 fn library_document_open(
     db: tauri::State<'_, LibraryDb>,
     document_id: String,
 ) -> Result<ReaderOpen, String> {
-    db.open_library_document(&document_id, mint_reader_token)
+    db.open_library_document(&document_id, |path, root_id| {
+        mint_library_reader_token(&db, path, root_id)
+    })
 }
 
 #[tauri::command]
@@ -174,20 +217,17 @@ fn authorize_reader_document(path: String) -> Result<ReaderAuthorization, String
 
 #[tauri::command]
 fn read_document_bytes(token: String) -> Result<Vec<u8>, String> {
-    let entry = {
-        let mut authorizations = reader_authorizations()
-            .lock()
-            .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
-        match authorizations.get(&token) {
-            Some(entry) if entry.expires_at > Instant::now() => Some(entry.clone()),
-            Some(_) => {
-                authorizations.remove(&token);
-                None
-            }
-            None => None,
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    let entry = match authorizations.get(&token) {
+        Some(entry) if entry.expires_at > Instant::now() => entry,
+        Some(_) => {
+            authorizations.remove(&token);
+            return Err("Reader authorization token is invalid or expired.".to_string());
         }
-    }
-    .ok_or_else(|| "Reader authorization token is invalid or expired.".to_string())?;
+        None => return Err("Reader authorization token is invalid or expired.".to_string()),
+    };
 
     verify_authorized_path(&entry.path)?;
     fs::read(&entry.path).map_err(|error| format!("Could not read document bytes: {error}"))
@@ -343,13 +383,17 @@ mod tests {
 
         // Step 7 & 8: Open PDF and EPUB through storage boundary
         let pdf_open = db_reopened
-            .open_library_document(&pdf_doc.id, mint_reader_token)
+            .open_library_document(&pdf_doc.id, |path, root_id| {
+                mint_library_reader_token(&db_reopened, path, root_id)
+            })
             .expect("open library pdf");
         assert_eq!(pdf_open.record.name, "document.pdf");
         assert_eq!(pdf_open.locator.kind, "desktop-token");
 
         let epub_open = db_reopened
-            .open_library_document(&epub_doc.id, mint_reader_token)
+            .open_library_document(&epub_doc.id, |path, root_id| {
+                mint_library_reader_token(&db_reopened, path, root_id)
+            })
             .expect("open library epub");
         assert_eq!(epub_open.record.name, "story.epub");
         assert_eq!(epub_open.locator.kind, "desktop-token");
@@ -367,5 +411,100 @@ mod tests {
         assert!(read_document_bytes("/etc/passwd".to_string()).is_err());
 
         let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    fn library_token_fixture() -> (PathBuf, LibraryDb, String, PathBuf, String) {
+        let test_dir = std::env::temp_dir().join(format!("clio-token-detach-{}", Uuid::new_v4()));
+        let root_path = test_dir.join("Books");
+        fs::create_dir_all(&root_path).expect("create library root");
+        let document_path = root_path.join("document.pdf");
+        fs::write(&document_path, b"library token content").expect("write library document");
+        let db = LibraryDb::open_in_memory().expect("open database");
+        let root = db
+            .add_root(&root_path.to_string_lossy(), None)
+            .expect("add root");
+        db.scan_root(&root.id).expect("scan root");
+        let document_id = db
+            .list_documents(Some(&root.id), false)
+            .expect("list documents")
+            .into_iter()
+            .next()
+            .expect("scanned document")
+            .id;
+        (test_dir, db, root.id, document_path, document_id)
+    }
+
+    #[test]
+    fn detach_revokes_library_tokens_but_preserves_direct_open_tokens() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+        let library_open = db
+            .open_library_document(&document_id, |path, root_id| {
+                mint_library_reader_token(&db, path, root_id)
+            })
+            .expect("mint library token");
+        let direct_open = storage::direct_open(
+            document_path.to_string_lossy().into_owned(),
+            mint_reader_token,
+        )
+        .expect("mint direct-open token");
+
+        assert_eq!(
+            read_document_bytes(library_open.locator.value.clone()).expect("read library token"),
+            b"library token content"
+        );
+        detach_library_root(&db, &root_id).expect("detach root");
+        assert!(read_document_bytes(library_open.locator.value).is_err());
+        assert_eq!(
+            read_document_bytes(direct_open.locator.value).expect("read direct-open token"),
+            b"library token content"
+        );
+
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn mint_waiting_on_detach_gate_cannot_mint_for_detached_root() {
+        let (test_dir, db, root_id, document_path, _) = library_token_fixture();
+        let mut authorizations = reader_authorizations().lock().expect("lock registry");
+        let thread_db = db.clone();
+        let thread_root_id = root_id.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mint_thread = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal mint start");
+            mint_library_reader_token(&thread_db, &document_path, &thread_root_id)
+        });
+
+        started_rx.recv().expect("wait for mint attempt");
+        detach_library_root_locked(&db, &root_id, &mut authorizations)
+            .expect("detach root while holding gate");
+        drop(authorizations);
+        assert!(mint_thread.join().expect("join mint thread").is_err());
+
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn read_waiting_on_detach_gate_cannot_use_revoked_library_token() {
+        let (test_dir, db, root_id, _, document_id) = library_token_fixture();
+        let opened = db
+            .open_library_document(&document_id, |path, root_id| {
+                mint_library_reader_token(&db, path, root_id)
+            })
+            .expect("mint library token");
+        let token = opened.locator.value;
+        let mut authorizations = reader_authorizations().lock().expect("lock registry");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let read_thread = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal read start");
+            read_document_bytes(token)
+        });
+
+        started_rx.recv().expect("wait for read attempt");
+        detach_library_root_locked(&db, &root_id, &mut authorizations)
+            .expect("detach root while holding gate");
+        drop(authorizations);
+        assert!(read_thread.join().expect("join read thread").is_err());
+
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
     }
 }

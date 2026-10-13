@@ -16,6 +16,12 @@ impl LibraryDb {
             .map_err(db_error)
     }
 
+    pub(crate) fn root_is_attached(&self, root_id: &str) -> Result<bool, String> {
+        Ok(self
+            .root(root_id)?
+            .is_some_and(|root| root.attachment_state == "attached"))
+    }
+
     pub fn add_root(&self, path: &str, label: Option<&str>) -> Result<LibraryRootDto, String> {
         let directory = canonical_directory(path)?;
         let locator_value = directory.to_string_lossy().into_owned();
@@ -93,10 +99,21 @@ impl LibraryDb {
     }
 
     pub fn remove_root(&self, root_id: &str) -> Result<(), String> {
+        let _scan_guard = self
+            .scan_lock
+            .lock()
+            .map_err(|_| "Library scanner is busy.".to_string())?;
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(db_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
         transaction
-            .execute("DELETE FROM library_roots WHERE id = ?1", [root_id])
+            .execute(
+                "UPDATE library_roots
+                 SET attachment_state = 'detached', updated_at = ?1
+                 WHERE id = ?2 AND attachment_state = 'attached'",
+                params![timestamp(), root_id],
+            )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }

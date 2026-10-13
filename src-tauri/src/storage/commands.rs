@@ -21,7 +21,7 @@ pub fn library_root_list(db: State<'_, LibraryDb>) -> Result<Vec<LibraryRootDto>
 
 #[tauri::command]
 pub fn library_root_remove(db: State<'_, LibraryDb>, root_id: String) -> Result<(), String> {
-    db.remove_root(&root_id)
+    crate::detach_library_root(&db, &root_id)
 }
 
 #[tauri::command]
