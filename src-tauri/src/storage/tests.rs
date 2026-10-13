@@ -118,6 +118,41 @@ fn test_scanner_discovery_and_normalization() {
 }
 
 #[test]
+fn test_scanner_respects_nested_root_boundaries() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-nested-scan-{}", Uuid::new_v4()));
+    let inner_dir = temp_dir.join("inner");
+    fs::create_dir_all(&inner_dir).expect("create nested root");
+    fs::write(temp_dir.join("outer.txt"), b"outer document").expect("write outer document");
+    fs::write(inner_dir.join("inner.txt"), b"inner document").expect("write inner document");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let outer_root = db
+        .add_root(&temp_dir.to_string_lossy(), Some("Outer"))
+        .expect("add outer root");
+    let inner_root_id = insert_root_for_ownership_test(&db, &inner_dir, "Inner", "attached");
+
+    let outer_scan = db.scan_root(&outer_root.id).expect("scan outer root");
+    assert_eq!(outer_scan.scanned, 1);
+    assert_eq!(outer_scan.inserted, 1);
+    let outer_documents = db
+        .list_documents(Some(&outer_root.id), false)
+        .expect("list outer-root documents");
+    assert_eq!(outer_documents.len(), 1);
+    assert_eq!(outer_documents[0].relative_path, "outer.txt");
+
+    let inner_scan = db.scan_root(&inner_root_id).expect("scan inner root");
+    assert_eq!(inner_scan.scanned, 1);
+    assert_eq!(inner_scan.inserted, 1);
+    let inner_documents = db
+        .list_documents(Some(&inner_root_id), false)
+        .expect("list inner-root documents");
+    assert_eq!(inner_documents.len(), 1);
+    assert_eq!(inner_documents[0].relative_path, "inner.txt");
+
+    fs::remove_dir_all(&temp_dir).expect("remove temporary directory");
+}
+
+#[test]
 fn test_scanner_folder_scope_preserves_other_root_documents() {
     let temp_dir = std::env::temp_dir().join(format!("clio-test-folder-scan-{}", Uuid::new_v4()));
     let nested = temp_dir.join("plays");

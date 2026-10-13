@@ -183,7 +183,28 @@ impl LibraryDb {
                 }],
             });
         }
-        let filesystem_observation = filesystem_observation::observe(&root_path, relative_path)?;
+        let mut nested_boundaries = Vec::new();
+        for other in self.raw_roots()? {
+            if other.id == root.id
+                || other.attachment_state != "attached"
+                || other.locator_kind != "filesystem-directory"
+            {
+                continue;
+            }
+            match fs::canonicalize(&other.locator_value) {
+                Ok(path) => nested_boundaries.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "Could not validate attached library root '{}': {error}",
+                        other.locator_value
+                    ));
+                }
+            }
+        }
+
+        let filesystem_observation =
+            filesystem_observation::observe(&root_path, relative_path, &nested_boundaries)?;
         let filesystem_observation::FilesystemObservation {
             scope_path,
             files,

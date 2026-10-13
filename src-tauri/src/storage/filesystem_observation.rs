@@ -13,6 +13,7 @@ pub(super) struct FilesystemObservation {
 pub(super) fn observe(
     root_path: &Path,
     relative_path: Option<&str>,
+    nested_boundaries: &[PathBuf],
 ) -> Result<FilesystemObservation, String> {
     let canonical_root = fs::canonicalize(root_path)
         .map_err(|error| format!("Could not access library directory: {error}"))?;
@@ -45,7 +46,13 @@ pub(super) fn observe(
 
     let mut files = Vec::new();
     let mut errors = Vec::new();
-    collect_files(&canonical_root, &scan_path, &mut files, &mut errors);
+    collect_files(
+        &canonical_root,
+        &scan_path,
+        nested_boundaries,
+        &mut files,
+        &mut errors,
+    );
     files.sort_by(|left, right| left.1.cmp(&right.1));
     errors.sort_by(|left, right| {
         left.path
@@ -63,6 +70,7 @@ pub(super) fn observe(
 fn collect_files(
     root: &Path,
     current: &Path,
+    nested_boundaries: &[PathBuf],
     files: &mut Vec<(PathBuf, String)>,
     errors: &mut Vec<ScanErrorDto>,
 ) {
@@ -102,7 +110,9 @@ fn collect_files(
             }
         };
         if metadata.is_dir() {
-            collect_files(root, &path, files, errors);
+            if !nested_boundaries.contains(&path) {
+                collect_files(root, &path, nested_boundaries, files, errors);
+            }
         } else if metadata.is_file() && SUPPORTED_FORMATS.contains(&extension(&path).as_str()) {
             if let Ok(relative) = path.strip_prefix(root) {
                 let rel = relative.to_string_lossy().replace('\\', "/");
