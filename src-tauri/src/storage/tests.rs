@@ -901,17 +901,19 @@ fn test_collections_crud_and_membership_cascades() {
 #[test]
 fn test_document_read_context_preserves_listing_semantics() {
     let temp_dir = std::env::temp_dir().join(format!("clio-read-context-{}", Uuid::new_v4()));
+    let primary_dir = temp_dir.join("primary");
     let other_dir = temp_dir.join("other-root");
+    fs::create_dir_all(&primary_dir).expect("create primary root");
     fs::create_dir_all(&other_dir).expect("create other root");
-    fs::write(temp_dir.join("missing.txt"), b"missing").expect("write missing document");
-    fs::write(temp_dir.join("excluded.txt"), b"excluded").expect("write excluded document");
-    fs::write(temp_dir.join("rich.txt"), b"rich").expect("write rich document");
-    fs::write(temp_dir.join("plain.txt"), b"plain").expect("write plain document");
+    fs::write(primary_dir.join("missing.txt"), b"missing").expect("write missing document");
+    fs::write(primary_dir.join("excluded.txt"), b"excluded").expect("write excluded document");
+    fs::write(primary_dir.join("rich.txt"), b"rich").expect("write rich document");
+    fs::write(primary_dir.join("plain.txt"), b"plain").expect("write plain document");
     fs::write(other_dir.join("other.txt"), b"other").expect("write other document");
 
     let db = LibraryDb::open_in_memory().expect("open db");
     let root = db
-        .add_root(&temp_dir.to_string_lossy(), Some("Primary"))
+        .add_root(&primary_dir.to_string_lossy(), Some("Primary"))
         .expect("add primary root");
     let other_root = db
         .add_root(&other_dir.to_string_lossy(), Some("Other"))
@@ -953,7 +955,7 @@ fn test_document_read_context_preserves_listing_semantics() {
     db.add_document_to_collection(&first_collection.id, &plain_id)
         .expect("add plain document to first collection");
 
-    fs::remove_file(temp_dir.join("missing.txt")).expect("remove missing document");
+    fs::remove_file(primary_dir.join("missing.txt")).expect("remove missing document");
     db.scan_root(&root.id).expect("rescan primary root");
     db.remove_document(&excluded_id)
         .expect("exclude document from library");
@@ -1924,16 +1926,30 @@ fn test_schema_v6_migration_preserves_populated_catalog() {
     let root = db
         .add_root(&root_dir.to_string_lossy(), Some("Books"))
         .expect("add primary root");
-    let overlapping_root = db
-        .add_root(&nested_dir.to_string_lossy(), Some("Fiction"))
-        .expect("add overlapping root");
+    let overlapping_root_id = Uuid::new_v4().to_string();
+    let overlapping_locator = canonical_directory(&nested_dir.to_string_lossy())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    {
+        let connection = db.lock().expect("lock database");
+        connection
+            .execute(
+                "INSERT INTO library_roots
+                     (id, label, locator_kind, locator_value, attachment_state,
+                      last_scanned_at, created_at, updated_at)
+                 VALUES (?1, 'Fiction', 'filesystem-directory', ?2, 'attached', NULL, ?3, ?3)",
+                params![overlapping_root_id, overlapping_locator, timestamp()],
+            )
+            .expect("insert legacy overlapping root directly");
+    }
     let missing_root = db
         .add_root(&missing_dir.to_string_lossy(), Some("Missing"))
         .expect("add missing root");
     fs::remove_dir_all(&missing_dir).expect("remove missing root directory");
 
     db.scan_root(&root.id).expect("scan primary root");
-    db.scan_root(&overlapping_root.id)
+    db.scan_root(&overlapping_root_id)
         .expect("scan overlapping root");
 
     let primary_documents = db
@@ -2054,7 +2070,7 @@ fn test_schema_v6_migration_preserves_populated_catalog() {
     let root_ids: Vec<String> =
         migration_snapshot(&connection, "SELECT id FROM library_roots ORDER BY id");
     assert!(root_ids.contains(&root.id));
-    assert!(root_ids.contains(&overlapping_root.id));
+    assert!(root_ids.contains(&overlapping_root_id));
     assert!(root_ids.contains(&missing_root.id));
 
     let foreign_keys: i64 = connection
@@ -2092,11 +2108,13 @@ fn test_schema_v6_migration_rolls_back_on_attached_duplicate() {
     let db_path = temp_dir.join("library.sqlite3");
     fs::create_dir_all(&temp_dir).expect("create migration directory");
     let db = LibraryDb::open(&db_path).expect("open database");
-    let first = db
-        .add_root(&temp_dir.to_string_lossy(), Some("First"))
-        .expect("add first root");
+    let first_path = temp_dir.join("first");
     let second_path = temp_dir.join("second");
+    fs::create_dir_all(&first_path).expect("create first root");
     fs::create_dir_all(&second_path).expect("create second root");
+    let first = db
+        .add_root(&first_path.to_string_lossy(), Some("First"))
+        .expect("add first root");
     let second = db
         .add_root(&second_path.to_string_lossy(), Some("Second"))
         .expect("add second root");
@@ -2246,6 +2264,256 @@ fn test_root_attachment_and_availability_dto_mapping() {
     assert_eq!(json_attached["status"], "missing");
     assert_eq!(json_attached["attachmentState"], "attached");
     assert_eq!(json_attached["availability"], "missing");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_paths_overlap_component_comparison() {
+    let base = Path::new("/home/user/docs");
+    let same = Path::new("/home/user/docs");
+    let child = Path::new("/home/user/docs/nested");
+    let parent = Path::new("/home/user");
+    let sibling_similar = Path::new("/home/user/docs-old");
+    let unrelated = Path::new("/var/log");
+
+    assert!(roots::paths_overlap(base, same));
+    assert!(roots::paths_overlap(same, base));
+    assert!(roots::paths_overlap(base, child));
+    assert!(roots::paths_overlap(child, base));
+    assert!(roots::paths_overlap(base, parent));
+    assert!(roots::paths_overlap(parent, base));
+
+    assert!(!roots::paths_overlap(base, sibling_similar));
+    assert!(!roots::paths_overlap(sibling_similar, base));
+    assert!(!roots::paths_overlap(base, unrelated));
+    assert!(!roots::paths_overlap(unrelated, base));
+}
+
+#[test]
+fn test_attached_root_overlap_validation() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-test-overlap-{}", Uuid::new_v4()));
+    let base_docs = temp_dir.join("docs");
+    let sub_docs = base_docs.join("sub");
+    let docs_old = temp_dir.join("docs-old");
+    let detached_dir = temp_dir.join("detached");
+    let detached_sub = detached_dir.join("sub");
+    fs::create_dir_all(&sub_docs).expect("create sub_docs");
+    fs::create_dir_all(&docs_old).expect("create docs_old");
+    fs::create_dir_all(&detached_sub).expect("create detached_sub");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+
+    // 1. Initial attached root
+    let root_docs = db
+        .add_root(&base_docs.to_string_lossy(), Some("Docs"))
+        .expect("add base docs root");
+
+    // 2. Adding identical attached root must fail and leave database unchanged
+    let roots_before = db.list_roots().expect("list roots");
+    let err_identical = db.add_root(&base_docs.to_string_lossy(), Some("Docs Duplicate"));
+    assert!(
+        err_identical.is_err(),
+        "Adding an identical attached root must be rejected"
+    );
+    assert!(err_identical.unwrap_err().contains("overlaps"));
+    let roots_after_identical = db.list_roots().expect("list roots");
+    assert_eq!(
+        roots_before, roots_after_identical,
+        "rejected operation must leave database unchanged"
+    );
+
+    // 3. Adding a descendant attached root must fail and leave database unchanged
+    let err_descendant = db.add_root(&sub_docs.to_string_lossy(), Some("Sub Docs"));
+    assert!(
+        err_descendant.is_err(),
+        "Adding a descendant attached root must be rejected"
+    );
+    assert!(err_descendant.unwrap_err().contains("overlaps"));
+    let roots_after_descendant = db.list_roots().expect("list roots");
+    assert_eq!(
+        roots_before, roots_after_descendant,
+        "rejected descendant operation must leave database unchanged"
+    );
+
+    // 4. Adding an ancestor attached root must fail and leave database unchanged
+    let separate_parent = temp_dir.join("parent");
+    let separate_child = separate_parent.join("child");
+    fs::create_dir_all(&separate_child).expect("create child dir");
+    let _child_root = db
+        .add_root(&separate_child.to_string_lossy(), Some("Child"))
+        .expect("add child root");
+
+    let roots_before_ancestor = db.list_roots().expect("list roots");
+    let err_ancestor = db.add_root(&separate_parent.to_string_lossy(), Some("Parent"));
+    assert!(
+        err_ancestor.is_err(),
+        "Adding an ancestor attached root must be rejected"
+    );
+    assert!(err_ancestor.unwrap_err().contains("overlaps"));
+    let roots_after_ancestor = db.list_roots().expect("list roots");
+    assert_eq!(
+        roots_before_ancestor, roots_after_ancestor,
+        "rejected ancestor operation must leave database unchanged"
+    );
+
+    // 5. Accepting sibling/non-overlapping paths, including similarly prefixed names (`docs` and `docs-old`)
+    let root_docs_old = db
+        .add_root(&docs_old.to_string_lossy(), Some("Docs Old"))
+        .expect("add sibling docs-old root");
+    assert_eq!(root_docs_old.label, "Docs Old");
+    assert_eq!(root_docs_old.attachment_state, "attached");
+    let all_roots = db.list_roots().expect("list roots");
+    assert!(all_roots.iter().any(|r| r.id == root_docs.id));
+    assert!(all_roots.iter().any(|r| r.id == root_docs_old.id));
+
+    // 6. Ignoring detached roots when checking overlap
+    let detached_parent_dir = temp_dir.join("detached_parent");
+    let detached_child_dir = detached_parent_dir.join("child");
+    let detached_same_dir = temp_dir.join("detached_same");
+    fs::create_dir_all(&detached_child_dir).expect("create detached child dir");
+    fs::create_dir_all(&detached_same_dir).expect("create detached same dir");
+
+    let detached_parent_root = db
+        .add_root(
+            &detached_parent_dir.to_string_lossy(),
+            Some("Detached Parent"),
+        )
+        .expect("add parent to detach");
+    let detached_same_root = db
+        .add_root(&detached_same_dir.to_string_lossy(), Some("Detached Same"))
+        .expect("add same to detach");
+    {
+        let conn = db.lock().expect("lock db");
+        conn.execute(
+            "UPDATE library_roots SET attachment_state = 'detached' WHERE id IN (?1, ?2)",
+            params![detached_parent_root.id, detached_same_root.id],
+        )
+        .expect("set detached");
+    }
+
+    // Adding descendant of a detached root must succeed
+    let attached_child = db
+        .add_root(
+            &detached_child_dir.to_string_lossy(),
+            Some("Attached Child"),
+        )
+        .expect("adding child of detached root must succeed");
+    assert_eq!(attached_child.attachment_state, "attached");
+
+    // Adding same path as a detached root must also succeed as new attached root
+    let new_attached_same_path = db
+        .add_root(
+            &detached_same_dir.to_string_lossy(),
+            Some("New Attached Same Path"),
+        )
+        .expect("adding root at same path as detached root must succeed");
+    assert_eq!(new_attached_same_path.attachment_state, "attached");
+    // 7. Preserving pre-existing legacy overlaps without modifying or merging their records
+    let legacy_nested = temp_dir.join("legacy_base");
+    let legacy_inner = legacy_nested.join("inner");
+    fs::create_dir_all(&legacy_inner).expect("create legacy inner");
+    let legacy_outer_root = db
+        .add_root(&legacy_nested.to_string_lossy(), Some("Legacy Outer"))
+        .expect("add legacy outer");
+
+    // Insert legacy inner directly via SQL to simulate pre-existing overlap
+    let legacy_inner_id = Uuid::new_v4().to_string();
+    let legacy_inner_canon = canonical_directory(&legacy_inner.to_string_lossy())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    {
+        let conn = db.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO library_roots
+                 (id, label, locator_kind, locator_value, attachment_state,
+                  last_scanned_at, created_at, updated_at)
+             VALUES (?1, 'Legacy Inner', 'filesystem-directory', ?2, 'attached', NULL, ?3, ?3)",
+            params![legacy_inner_id, legacy_inner_canon, timestamp()],
+        )
+        .expect("insert legacy overlapping root directly");
+    }
+
+    // Both legacy overlapping roots coexist in list_roots without modification or merging
+    let roots_with_legacy = db.list_roots().expect("list roots with legacy overlap");
+    let outer_found = roots_with_legacy
+        .iter()
+        .find(|r| r.id == legacy_outer_root.id)
+        .expect("find legacy outer");
+    let inner_found = roots_with_legacy
+        .iter()
+        .find(|r| r.id == legacy_inner_id)
+        .expect("find legacy inner");
+    assert_eq!(outer_found.label, "Legacy Outer");
+    assert_eq!(inner_found.label, "Legacy Inner");
+    assert_ne!(outer_found.id, inner_found.id);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_add_root_handles_missing_attached_root_paths() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-test-missing-root-{}", Uuid::new_v4()));
+    let missing_root_path = temp_dir.join("removed");
+    let sibling_path = temp_dir.join("sibling");
+    fs::create_dir_all(&missing_root_path).expect("create root directory");
+    fs::create_dir_all(&sibling_path).expect("create sibling directory");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    db.add_root(&missing_root_path.to_string_lossy(), Some("Removed"))
+        .expect("add existing root");
+    fs::remove_dir_all(&missing_root_path).expect("remove root directory");
+
+    let sibling = db
+        .add_root(&sibling_path.to_string_lossy(), Some("Sibling"))
+        .expect("add non-overlapping sibling beside missing root");
+    assert_eq!(sibling.label, "Sibling");
+
+    let roots_before_overlap = db.list_roots().expect("list roots");
+    let err = db.add_root(&temp_dir.to_string_lossy(), Some("Parent"));
+    assert!(err.is_err(), "overlapping candidate must be rejected");
+    assert!(err.unwrap_err().contains("overlaps"));
+    assert_eq!(
+        roots_before_overlap,
+        db.list_roots().expect("list roots after rejection"),
+        "rejected operation must leave database unchanged"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_add_root_rejects_unsafe_missing_attached_root_path() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-test-unsafe-root-{}", Uuid::new_v4()));
+    let candidate_path = temp_dir.join("candidate");
+    fs::create_dir_all(&candidate_path).expect("create candidate directory");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let unsafe_root_id = Uuid::new_v4().to_string();
+    let unsafe_locator = format!("relative-{}/../unsafe", Uuid::new_v4());
+    {
+        let connection = db.lock().expect("lock db");
+        connection
+            .execute(
+                "INSERT INTO library_roots
+                     (id, label, locator_kind, locator_value, attachment_state,
+                      last_scanned_at, created_at, updated_at)
+                 VALUES (?1, 'Unsafe', 'filesystem-directory', ?2, 'attached', NULL, ?3, ?3)",
+                params![unsafe_root_id, unsafe_locator, timestamp()],
+            )
+            .expect("insert unsafe root locator");
+    }
+
+    let roots_before = db.list_roots().expect("list roots");
+    let err = db.add_root(&candidate_path.to_string_lossy(), Some("Candidate"));
+    assert!(err.is_err(), "unsafe stored path must reject validation");
+    assert!(err.unwrap_err().contains("not absolute and normalized"));
+    assert_eq!(
+        roots_before,
+        db.list_roots().expect("list roots after rejection"),
+        "validation failure must leave database unchanged"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
