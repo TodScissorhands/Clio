@@ -12,6 +12,100 @@ use std::{
 use tauri::Manager;
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(crate) struct TestLifecycleMutex<T> {
+    held: Mutex<bool>,
+    released: std::sync::Condvar,
+    value: Mutex<T>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestLifecycleGuard<'a, T> {
+    mutex: &'a TestLifecycleMutex<T>,
+    value: Option<std::sync::MutexGuard<'a, T>>,
+}
+
+#[cfg(test)]
+impl<T> TestLifecycleMutex<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self {
+            held: Mutex::new(false),
+            released: std::sync::Condvar::new(),
+            value: Mutex::new(value),
+        }
+    }
+
+    pub(crate) fn lock(&self) -> Result<TestLifecycleGuard<'_, T>, ()> {
+        self.lock_with_attempt_hook(|_| {})
+    }
+
+    pub(crate) fn lock_with_attempt_hook<F>(
+        &self,
+        on_attempt: F,
+    ) -> Result<TestLifecycleGuard<'_, T>, ()>
+    where
+        F: FnOnce(bool),
+    {
+        // Guard drop must acquire `held` before marking the lock available;
+        // this callback runs before Condvar::wait atomically parks the waiter.
+        // Owner release therefore cannot overtake a registered contender.
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        if *held {
+            on_attempt(true);
+            while *held {
+                held = self
+                    .released
+                    .wait(held)
+                    .unwrap_or_else(|error| error.into_inner());
+            }
+        } else {
+            on_attempt(false);
+        }
+        *held = true;
+        drop(held);
+
+        let value = self.value.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(TestLifecycleGuard {
+            mutex: self,
+            value: Some(value),
+        })
+    }
+}
+
+#[cfg(test)]
+impl<T> std::ops::Deref for TestLifecycleGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+            .as_deref()
+            .expect("test lock guard remains active")
+    }
+}
+
+#[cfg(test)]
+impl<T> std::ops::DerefMut for TestLifecycleGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+            .as_deref_mut()
+            .expect("test lock guard remains active")
+    }
+}
+
+#[cfg(test)]
+impl<T> Drop for TestLifecycleGuard<'_, T> {
+    fn drop(&mut self) {
+        drop(self.value.take());
+        let mut held = self
+            .mutex
+            .held
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *held = false;
+        self.mutex.released.notify_one();
+    }
+}
+
 use storage::{LibraryDb, LibraryRootDto, LocateRootPreviewDto, ReaderOpen};
 
 const SUPPORTED: &[&str] = &[
@@ -48,10 +142,15 @@ struct ReaderAuthorizationEntry {
     expires_at: Instant,
 }
 
-static READER_AUTHORIZATIONS: LazyLock<Mutex<HashMap<String, ReaderAuthorizationEntry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(test)]
+type ReaderAuthorizationMutex = TestLifecycleMutex<HashMap<String, ReaderAuthorizationEntry>>;
+#[cfg(not(test))]
+type ReaderAuthorizationMutex = Mutex<HashMap<String, ReaderAuthorizationEntry>>;
 
-fn reader_authorizations() -> &'static Mutex<HashMap<String, ReaderAuthorizationEntry>> {
+static READER_AUTHORIZATIONS: LazyLock<ReaderAuthorizationMutex> =
+    LazyLock::new(|| ReaderAuthorizationMutex::new(HashMap::new()));
+
+fn reader_authorizations() -> &'static ReaderAuthorizationMutex {
     &READER_AUTHORIZATIONS
 }
 
@@ -175,6 +274,21 @@ pub(crate) fn detach_library_root(db: &LibraryDb, root_id: &str) -> Result<(), S
     detach_library_root_locked(db, root_id, &mut authorizations)
 }
 
+#[cfg(test)]
+fn detach_library_root_with_lock_attempt_hook<F>(
+    db: &LibraryDb,
+    root_id: &str,
+    on_lock_attempt: F,
+) -> Result<(), String>
+where
+    F: FnOnce(bool),
+{
+    let mut authorizations = reader_authorizations()
+        .lock_with_attempt_hook(on_lock_attempt)
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    detach_library_root_locked(db, root_id, &mut authorizations)
+}
+
 fn detach_library_root_locked(
     db: &LibraryDb,
     root_id: &str,
@@ -211,6 +325,22 @@ pub(crate) fn locate_library_root(
         .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
     locate_library_root_locked(db, preview, &mut authorizations)
 }
+#[cfg(test)]
+pub(crate) fn locate_library_root_with_lock_attempt_hook<F>(
+    db: &LibraryDb,
+    preview: &LocateRootPreviewDto,
+    on_scan_lock_attempt: F,
+) -> Result<LibraryRootDto, String>
+where
+    F: FnOnce(bool),
+{
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    let root = db.confirm_locate_root_with_lock_attempt_hook(preview, on_scan_lock_attempt)?;
+    authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(preview.root_id.as_str()));
+    Ok(root)
+}
 
 fn locate_library_root_locked(
     db: &LibraryDb,
@@ -220,6 +350,97 @@ fn locate_library_root_locked(
     let root = db.confirm_locate_root(preview)?;
     authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(preview.root_id.as_str()));
     Ok(root)
+}
+pub(crate) fn authorized_library_document_path(
+    db: &LibraryDb,
+    document_id: &str,
+) -> Result<String, String> {
+    authorized_library_document_path_inner(db, document_id, || {})
+}
+
+#[cfg(test)]
+fn authorized_library_document_path_with_hook<F>(
+    db: &LibraryDb,
+    document_id: &str,
+    after_resolution: F,
+) -> Result<String, String>
+where
+    F: FnOnce(),
+{
+    authorized_library_document_path_inner(db, document_id, after_resolution)
+}
+
+fn authorized_library_document_path_inner<F>(
+    db: &LibraryDb,
+    document_id: &str,
+    after_resolution: F,
+) -> Result<String, String>
+where
+    F: FnOnce(),
+{
+    let _authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    let path = db.document_path(document_id);
+    after_resolution();
+    path
+}
+
+pub(crate) fn execute_authorized_conversion_job(
+    db: &LibraryDb,
+    job: &mut conversion::ConversionJob,
+    library_document_ids: Option<&[Option<String>]>,
+) -> Result<(), String> {
+    if let Some(document_ids) = library_document_ids.filter(|ids| !ids.is_empty()) {
+        let _authorizations = reader_authorizations()
+            .lock()
+            .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+        validate_conversion_library_ids(db, job, document_ids)?;
+        return conversion::execute_job(job);
+    }
+    conversion::execute_job(job)
+}
+
+fn validate_conversion_library_ids(
+    db: &LibraryDb,
+    job: &conversion::ConversionJob,
+    document_ids: &[Option<String>],
+) -> Result<(), String> {
+    if job.source_paths.is_empty() {
+        if document_ids.len() != 1 {
+            return Err("Library source IDs do not match the conversion inputs.".to_string());
+        }
+        if let Some(document_id) = &document_ids[0] {
+            validate_library_conversion_source(db, document_id, &job.source_path)?;
+        }
+    } else {
+        if document_ids.len() != job.source_paths.len() {
+            return Err("Library source IDs do not match the conversion inputs.".to_string());
+        }
+        for (source_path, document_id) in job.source_paths.iter().zip(document_ids) {
+            if let Some(document_id) = document_id {
+                validate_library_conversion_source(db, document_id, source_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_library_conversion_source(
+    db: &LibraryDb,
+    document_id: &str,
+    source_path: &str,
+) -> Result<(), String> {
+    let authorized_path = db.document_path(document_id)?;
+    let requested_path = fs::canonicalize(source_path)
+        .map_err(|error| format!("Could not validate library conversion source: {error}"))?;
+    if requested_path.as_path() != Path::new(&authorized_path) {
+        return Err(
+            "Library document changed or is no longer attached. Reopen it before converting."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -500,6 +721,130 @@ mod tests {
             b"library token content"
         );
 
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+    #[test]
+    fn library_path_resolution_waiting_on_detach_gate_cannot_return_a_path() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+
+        std::thread::scope(|scope| {
+            let thread_db = db.clone();
+            let thread_document_id = document_id.clone();
+            let (resolved_tx, resolved_rx) = std::sync::mpsc::channel();
+            let (release_path_tx, release_path_rx) = std::sync::mpsc::channel();
+            let path_thread = scope.spawn(move || {
+                authorized_library_document_path_with_hook(&thread_db, &thread_document_id, || {
+                    let _ = resolved_tx.send(());
+                    let _ = release_path_rx.recv();
+                })
+            });
+
+            resolved_rx
+                .recv()
+                .expect("wait for path resolution inside authorization gate");
+            let detach_db = db.clone();
+            let detach_root_id = root_id.clone();
+            let (lock_attempt_tx, lock_attempt_rx) = std::sync::mpsc::channel();
+            let (detached_tx, detached_rx) = std::sync::mpsc::channel();
+            let detach_thread = scope.spawn(move || {
+                let result = detach_library_root_with_lock_attempt_hook(
+                    &detach_db,
+                    &detach_root_id,
+                    |contended| {
+                        let _ = lock_attempt_tx.send(contended);
+                    },
+                );
+                let _ = detached_tx.send(result);
+            });
+            let authorization_lock_contended = lock_attempt_rx
+                .recv()
+                .expect("wait for Detach authorization-lock acquisition attempt");
+            let early_detach = detached_rx.try_recv();
+            let detach_completed_early = early_detach.is_ok();
+            let root_state_while_held = db
+                .list_roots()
+                .expect("list roots during protected resolution")
+                .into_iter()
+                .find(|root| root.id == root_id)
+                .expect("root remains present")
+                .attachment_state;
+
+            release_path_tx
+                .send(())
+                .expect("release protected resolution");
+            let resolved_path = path_thread.join().expect("join path resolution");
+            detach_thread.join().expect("join Detach");
+            let detach_result = match early_detach {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    detached_rx.recv().expect("receive Detach result")
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("Detach result channel disconnected")
+                }
+            };
+            detach_result.expect("Detach completes after path resolution");
+            assert!(
+                authorization_lock_contended,
+                "Detach reached the authorization lock while path resolution held it"
+            );
+            assert!(
+                !detach_completed_early,
+                "Detach must not complete before protected resolution is released"
+            );
+            assert_eq!(root_state_while_held, "attached");
+            assert_eq!(
+                resolved_path.expect("path resolves before Detach"),
+                fs::canonicalize(&document_path)
+                    .expect("canonicalize document")
+                    .to_string_lossy()
+            );
+        });
+
+        assert!(
+            authorized_library_document_path(&db, &document_id).is_err(),
+            "sequential path resolution rejects detached roots"
+        );
+        assert!(document_path.exists(), "Detach preserves physical files");
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn library_conversion_rejects_detached_document_at_execution() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+        let source_path = authorized_library_document_path(&db, &document_id)
+            .expect("resolve attached library document");
+        detach_library_root(&db, &root_id).expect("detach root");
+
+        let mut job = conversion::ConversionJob {
+            id: Uuid::new_v4().to_string(),
+            source_path: source_path.clone(),
+            source_paths: Vec::new(),
+            source_format: "pdf".to_string(),
+            target_format: "txt".to_string(),
+            output_path: test_dir
+                .join("converted.txt")
+                .to_string_lossy()
+                .into_owned(),
+            operation: conversion::OperationKind::ExtractText,
+            engine: conversion::ConversionEngine::Poppler,
+            status: conversion::JobStatus::Planned,
+            error: None,
+            created_at: String::new(),
+            completed_at: None,
+            page_selection: None,
+            overwrite: false,
+        };
+        let library_document_ids = [Some(document_id)];
+        let result = execute_authorized_conversion_job(&db, &mut job, Some(&library_document_ids));
+        assert!(result
+            .expect_err("detached library document must not be converted")
+            .contains("Library document was not found"));
+        assert!(
+            !test_dir.join("converted.txt").exists(),
+            "failed authorization does not create conversion output"
+        );
+        assert!(document_path.exists(), "Detach preserves physical files");
         fs::remove_dir_all(test_dir).expect("remove temporary directory");
     }
 

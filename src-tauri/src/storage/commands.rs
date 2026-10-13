@@ -85,7 +85,7 @@ pub fn library_document_path(
     db: State<'_, LibraryDb>,
     document_id: String,
 ) -> Result<String, String> {
-    db.document_path(&document_id)
+    crate::authorized_library_document_path(&db, &document_id)
 }
 #[tauri::command]
 pub fn library_document_remove(

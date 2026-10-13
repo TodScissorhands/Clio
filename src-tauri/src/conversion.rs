@@ -1228,16 +1228,18 @@ pub fn conversion_plan_extract_pages_job(
     )
 }
 
-/// Execute a previously planned job.
-///
-/// The job fields supplied by the frontend are fully re-validated inside
-/// `execute_job` before any file operations occur. The frontend cannot
-/// bypass the planner's security checks by submitting a crafted job.
+/// Execute a previously planned job. Library-backed inputs are reauthorized
+/// against their document IDs under the lifecycle authorization gate.
 #[tauri::command]
-pub async fn conversion_execute_job(job: ConversionJob) -> Result<ConversionJob, String> {
+pub async fn conversion_execute_job(
+    db: tauri::State<'_, crate::LibraryDb>,
+    job: ConversionJob,
+    library_document_ids: Option<Vec<Option<String>>>,
+) -> Result<ConversionJob, String> {
+    let db = db.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut job = job;
-        execute_job(&mut job)?;
+        crate::execute_authorized_conversion_job(&db, &mut job, library_document_ids.as_deref())?;
         Ok(job)
     })
     .await

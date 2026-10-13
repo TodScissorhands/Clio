@@ -2003,6 +2003,236 @@ fn relink_rejects_detached_destination_without_mutating_catalog_state() {
 
     fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }
+#[test]
+fn relink_rejects_root_rebound_after_destination_selection_without_mutation() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-relink-stale-root-{}", Uuid::new_v4()));
+    let source_path = temp_dir.join("source");
+    let old_destination_path = temp_dir.join("old-destination");
+    let new_destination_path = temp_dir.join("new-destination");
+    fs::create_dir_all(&source_path).expect("create source root");
+    fs::create_dir_all(&old_destination_path).expect("create old destination root");
+    let source_file = source_path.join("source.pdf");
+    let old_destination_file = old_destination_path.join("target.pdf");
+    fs::write(&source_file, b"%PDF source").expect("write source");
+    fs::write(&old_destination_file, b"%PDF old target").expect("write old target");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let source_root = db
+        .add_root(&source_path.to_string_lossy(), None)
+        .expect("add source root");
+    let destination_root = db
+        .add_root(&old_destination_path.to_string_lossy(), None)
+        .expect("add destination root");
+    db.scan_root(&source_root.id).expect("scan source root");
+    let document_id = db
+        .list_documents(Some(&source_root.id), false)
+        .expect("list source documents")
+        .into_iter()
+        .next()
+        .expect("source document")
+        .id;
+    db.set_reading_state(ReadingState {
+        document_id: document_id.clone(),
+        position: ReadingPosition::PdfPage {
+            page: 9,
+            progression: None,
+        },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set reading state");
+    let collection = db
+        .create_collection("Relink state", None)
+        .expect("create collection");
+    db.add_document_to_collection(&collection.id, &document_id)
+        .expect("add collection membership");
+    db.create_bookmark(
+        &document_id,
+        ReadingPosition::PdfPage {
+            page: 9,
+            progression: None,
+        },
+        Some("Keep this bookmark"),
+    )
+    .expect("create bookmark");
+    db.remove_document(&document_id)
+        .expect("exclude source document");
+
+    let before: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read source document before Relink");
+    let reading_state_before = db
+        .get_reading_state(&document_id)
+        .expect("read reading state")
+        .expect("reading state exists");
+    let bookmark_ids_before: Vec<String> = db
+        .list_bookmarks(&document_id)
+        .expect("list bookmarks")
+        .into_iter()
+        .map(|bookmark| bookmark.id)
+        .collect();
+    let collections_before = db
+        .list_document_collections(&document_id)
+        .expect("list memberships");
+
+    let error = db
+        .relink_document_with_hook(
+            &document_id,
+            &old_destination_file.to_string_lossy(),
+            || {
+                db.remove_root(&destination_root.id)
+                    .expect("detach selected destination");
+                fs::remove_dir_all(&old_destination_path).expect("remove old destination");
+                fs::create_dir_all(&new_destination_path).expect("create rebound destination");
+                fs::write(new_destination_path.join("target.pdf"), b"%PDF replacement")
+                    .expect("write replacement target");
+                let preview = db
+                    .preview_locate_root(
+                        &destination_root.id,
+                        &new_destination_path.to_string_lossy(),
+                    )
+                    .expect("preview destination rebind");
+                db.confirm_locate_root(&preview)
+                    .expect("rebind destination root");
+            },
+        )
+        .expect_err("stale destination mapping must be rejected");
+    assert!(error.contains("root changed while relinking"));
+    assert_eq!(
+        db.list_roots()
+            .expect("list roots after rejected Relink")
+            .into_iter()
+            .find(|root| root.id == destination_root.id)
+            .expect("destination root remains")
+            .attachment_state,
+        "attached"
+    );
+    let after: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read source document after rejected Relink");
+    assert_eq!(after, before);
+    let reading_state_after = db
+        .get_reading_state(&document_id)
+        .expect("read reading state after Relink")
+        .expect("reading state remains");
+    assert_eq!(
+        reading_state_after.last_opened_at,
+        reading_state_before.last_opened_at
+    );
+    assert_eq!(
+        reading_state_after.updated_at,
+        reading_state_before.updated_at
+    );
+    let bookmark_ids_after: Vec<String> = db
+        .list_bookmarks(&document_id)
+        .expect("list bookmarks after Relink")
+        .into_iter()
+        .map(|bookmark| bookmark.id)
+        .collect();
+    assert_eq!(bookmark_ids_after, bookmark_ids_before);
+    assert_eq!(
+        db.list_document_collections(&document_id)
+            .expect("list memberships after Relink"),
+        collections_before
+    );
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+#[test]
+fn deepest_root_skips_not_found_roots_but_rejects_other_canonicalization_errors() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-root-canonicalize-{}", Uuid::new_v4()));
+    let source_path = temp_dir.join("source");
+    let library_path = temp_dir.join("Library");
+    let missing_path = temp_dir.join("missing-root");
+    fs::create_dir_all(&source_path).expect("create source root");
+    fs::create_dir_all(library_path.join("Nested")).expect("create nested library root");
+    fs::create_dir_all(&missing_path).expect("create missing root");
+    let source_file = source_path.join("source.pdf");
+    let target_file = library_path.join("Nested").join("target.pdf");
+    fs::write(&source_file, b"%PDF source").expect("write source");
+    fs::write(&target_file, b"%PDF target").expect("write target");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let source_root = db
+        .add_root(&source_path.to_string_lossy(), None)
+        .expect("add source root");
+    let library_root = db
+        .add_root(&library_path.to_string_lossy(), None)
+        .expect("add library root");
+    let missing_root = db
+        .add_root(&missing_path.to_string_lossy(), None)
+        .expect("add root that will become missing");
+    db.scan_root(&source_root.id).expect("scan source");
+    let document_id = db
+        .list_documents(Some(&source_root.id), false)
+        .expect("list source")
+        .into_iter()
+        .next()
+        .expect("source document")
+        .id;
+    fs::remove_dir_all(&missing_path).expect("make attached root missing");
+
+    let relinked = db
+        .relink_document(&document_id, &target_file.to_string_lossy())
+        .expect("NotFound root is not a matching active directory");
+    assert_eq!(relinked.root_id, library_root.id);
+    assert_eq!(relinked.relative_path, "Nested/target.pdf");
+    assert!(db
+        .list_roots()
+        .expect("list roots")
+        .iter()
+        .any(|root| root.id == missing_root.id && root.attachment_state == "attached"));
+
+    let invalid_root_id = Uuid::new_v4().to_string();
+    db.lock()
+        .expect("lock database")
+        .execute(
+            "INSERT INTO library_roots
+                 (id, label, locator_kind, locator_value, attachment_state,
+                  last_scanned_at, created_at, updated_at)
+             VALUES (?1, 'Invalid locator', 'filesystem-directory', ?2, 'attached', NULL, ?3, ?3)",
+            params![invalid_root_id, "invalid\0root", timestamp()],
+        )
+        .expect("insert invalid attached locator");
+    let before: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read document before invalid-root Relink");
+
+    let error = db
+        .relink_document(&document_id, &target_file.to_string_lossy())
+        .expect_err("uncomparable attached root must not be silently skipped");
+    assert!(error.contains("Could not validate attached library root"));
+    let after: (String, String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, availability, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read document after invalid-root Relink");
+    assert_eq!(after, before);
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
 
 fn insert_root_for_ownership_test(
     db: &LibraryDb,
@@ -3743,6 +3973,139 @@ fn locate_root_confirmation_rechecks_new_attached_overlaps_atomically() {
     );
     fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }
+#[test]
+fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-scan-locate-race-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old-root");
+    let candidate_path = temp_dir.join("located-root");
+    fs::create_dir_all(&old_path).expect("create original root");
+    fs::create_dir_all(&candidate_path).expect("create candidate root");
+    fs::write(old_path.join("book.txt"), "original content").expect("write original document");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&old_path.to_string_lossy(), Some("Books"))
+        .expect("add root");
+    db.scan_root(&root.id).expect("initial scan");
+    db.lock()
+        .expect("lock database to set deterministic root version")
+        .execute(
+            "UPDATE library_roots SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+            [&root.id],
+        )
+        .expect("set deterministic root version");
+    let original_locator = fs::canonicalize(&old_path)
+        .expect("canonicalize original root")
+        .to_string_lossy()
+        .into_owned();
+    let documents_before = locate_document_snapshot(&db, &root.id);
+    assert_eq!(documents_before.len(), 1);
+    let document_id = documents_before[0].0.clone();
+
+    std::thread::scope(|scope| {
+        let scan_db = db.clone();
+        let scan_root_id = root.id.clone();
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (release_scan_tx, release_scan_rx) = std::sync::mpsc::channel();
+        let scan_thread = scope.spawn(move || {
+            scan_db.scan_root_at_with_observation_hook(&scan_root_id, None, || {
+                observed_tx.send(()).expect("signal filesystem observation");
+                let _ = release_scan_rx.recv();
+            })
+        });
+        observed_rx
+            .recv()
+            .expect("wait for scan filesystem observation");
+        fs::remove_dir_all(&old_path).expect("make observed root missing");
+        let preview = db
+            .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
+            .expect("preview missing-root location");
+
+        let locate_db = db.clone();
+        let (lock_attempt_tx, lock_attempt_rx) = std::sync::mpsc::channel();
+        let (locate_result_tx, locate_result_rx) = std::sync::mpsc::channel();
+        let locate_thread = scope.spawn(move || {
+            let result = crate::locate_library_root_with_lock_attempt_hook(
+                &locate_db,
+                &preview,
+                |contended| {
+                    let _ = lock_attempt_tx.send(contended);
+                },
+            );
+            let _ = locate_result_tx.send(result);
+        });
+        let scan_lock_contended = lock_attempt_rx
+            .recv()
+            .expect("wait for Locate scan-lock acquisition attempt");
+        let early_locate = locate_result_rx.try_recv();
+        let locate_completed_early = early_locate.is_ok();
+        let root_while_scan_paused = db
+            .list_roots()
+            .expect("list roots during scan")
+            .into_iter()
+            .find(|candidate| candidate.id == root.id)
+            .expect("root remains present");
+        let stored_locator: String = db
+            .lock()
+            .expect("lock database during paused scan")
+            .query_row(
+                "SELECT locator_value FROM library_roots WHERE id = ?1",
+                [&root.id],
+                |row| row.get(0),
+            )
+            .expect("read root locator while scan is paused");
+
+        release_scan_tx
+            .send(())
+            .expect("release scan filesystem observation");
+        let scan_result = scan_thread
+            .join()
+            .expect("join scan")
+            .expect("scan completes against the original root");
+        locate_thread.join().expect("join Locate confirmation");
+        let locate_result = match early_locate {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => locate_result_rx
+                .recv()
+                .expect("receive concurrent Locate result"),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Locate result channel disconnected.".to_string())
+            }
+        };
+
+        assert!(scan_lock_contended, "Locate observed the held scan lock");
+        assert!(
+            !locate_completed_early,
+            "Locate cannot complete while the scan holds the scan lock"
+        );
+        assert_eq!(
+            root_while_scan_paused.availability.as_deref(),
+            Some("missing")
+        );
+        assert_eq!(stored_locator, original_locator);
+        assert_eq!(scan_result.missing, 1);
+        assert!(locate_result
+            .expect_err("scan updates make the original preview stale")
+            .contains("Library root changed since Locate Root preview"));
+    });
+
+    let refreshed_preview = db
+        .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
+        .expect("refresh preview after the completed scan");
+    let located_root = crate::locate_library_root(&db, &refreshed_preview)
+        .expect("confirm location after refreshing stale preview");
+    assert_eq!(located_root.attachment_state, "attached");
+    assert_eq!(located_root.availability.as_deref(), Some("available"));
+    let final_documents = locate_document_snapshot(&db, &root.id);
+    assert_eq!(final_documents.len(), 1);
+    assert_eq!(final_documents[0].0, document_id);
+    assert_eq!(final_documents[0].1, root.id);
+    assert_eq!(final_documents[0].2, "book.txt");
+    assert_eq!(final_documents[0].3, "missing");
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
 fn purge_catalog_snapshot(db: &LibraryDb) -> Vec<Vec<String>> {
     let queries = [
         "SELECT quote(id) || '|' || quote(label) || '|' || quote(locator_value) || '|' || quote(attachment_state) FROM library_roots ORDER BY id",

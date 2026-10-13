@@ -22,6 +22,7 @@ type DocumentInfo = {
   extension: string;
   size: number;
   supported: boolean;
+  libraryDocumentId?: string;
 };
 
 const fileFilters = [
@@ -38,7 +39,11 @@ function formatBytes(bytes: number) {
 }
 
 /** Pending job ready to be retried with overwrite=true. */
-type PendingOverwrite = { job: ConversionJob; label: string };
+type PendingOverwrite = {
+  job: ConversionJob;
+  label: string;
+  libraryDocumentIds?: Array<string | null>;
+};
 
 export interface ConversionWorkspaceProps {
   initialDocument?: StoredDocument | null;
@@ -100,7 +105,10 @@ export function ConversionWorkspace({
         if (cancelled) return;
         const info = await invoke<DocumentInfo>("inspect_document", { path });
         if (cancelled) return;
-        await loadDocumentInfo(info);
+        await loadDocumentInfo({
+          ...info,
+          libraryDocumentId: initialDocument.record.id,
+        });
       } catch (err) {
         if (!cancelled) {
           setStatus("error");
@@ -124,7 +132,7 @@ export function ConversionWorkspace({
           });
           const info = await invoke<DocumentInfo>("inspect_document", { path });
           if (info.extension.toLowerCase() === "pdf") {
-            infos.push(info);
+            infos.push({ ...info, libraryDocumentId: doc.record.id });
           }
         } catch {}
       }
@@ -281,13 +289,14 @@ export function ConversionWorkspace({
   async function runJob(
     job: ConversionJob,
     overwriteLabel: string,
-    onSuccess: (completed: ConversionJob) => void
+    onSuccess: (completed: ConversionJob) => void,
+    libraryDocumentIds?: Array<string | null>
   ) {
     setStatus("converting");
     setPendingOverwrite(null);
     try {
       traceConversionStage("native_execute_started");
-      const completedJob = await executeConversionJob(job);
+      const completedJob = await executeConversionJob(job, libraryDocumentIds);
       traceConversionStage("native_execute_returned");
       onSuccess(completedJob);
     } catch (error) {
@@ -299,7 +308,7 @@ export function ConversionWorkspace({
       // If the backend rejected because output exists, offer a one-click overwrite.
       if (msg.includes("already exists")) {
         const overwroteJob: ConversionJob = { ...job, overwrite: true };
-        setPendingOverwrite({ job: overwroteJob, label: overwriteLabel });
+        setPendingOverwrite({ job: overwroteJob, label: overwriteLabel, libraryDocumentIds });
       }
     }
   }
@@ -313,6 +322,7 @@ export function ConversionWorkspace({
     if (!output) return;
     setMessage(`Merging ${mergeFiles.length} PDF files…`);
     const sourcePaths = mergeFiles.map((f) => f.path);
+    const libraryDocumentIds = mergeFiles.map((file) => file.libraryDocumentId ?? null);
     try {
       const jobToRun = await planMergeJob(sourcePaths, output, false);
       await runJob(jobToRun, `Overwrite and merge ${mergeFiles.length} PDFs`, (completed) => {
@@ -320,7 +330,7 @@ export function ConversionWorkspace({
         setOutputPath(completed.outputPath);
         setStatus("done");
         setMessage(`Successfully merged ${mergeFiles.length} PDFs with ${completed.engine}.`);
-      });
+      }, libraryDocumentIds.some(Boolean) ? libraryDocumentIds : undefined);
     } catch (error) {
       setStatus("error");
       setMessage(String(error));
@@ -354,7 +364,7 @@ export function ConversionWorkspace({
         setOutputPath(completed.outputPath);
         setStatus("done");
         setMessage(`Converted successfully with ${completed.engine}.`);
-      });
+      }, document.libraryDocumentId ? [document.libraryDocumentId] : undefined);
     } catch (error) {
       traceConversionStage("conversion_failed");
       conversionTimingRef.current = null;
@@ -392,7 +402,7 @@ export function ConversionWorkspace({
         setOutputPath(completed.outputPath);
         setStatus("done");
         setMessage(`Extracted ${pageLabel} successfully. Source PDF is not modified.`);
-      });
+      }, document.libraryDocumentId ? [document.libraryDocumentId] : undefined);
     } catch (error) {
       setStatus("error");
       setMessage(String(error));
@@ -401,14 +411,14 @@ export function ConversionWorkspace({
 
   async function confirmOverwrite() {
     if (!pendingOverwrite) return;
-    const { job, label } = pendingOverwrite;
+    const { job, label, libraryDocumentIds } = pendingOverwrite;
     setMessage(`${label}…`);
     await runJob(job, label, (completed) => {
       setPlannedJob(completed);
       setOutputPath(completed.outputPath);
       setStatus("done");
       setMessage(`Done: ${outputFileName(completed.outputPath)}`);
-    });
+    }, libraryDocumentIds);
   }
 
   return (

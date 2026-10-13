@@ -43,10 +43,20 @@ const SUPPORTED_FORMATS: &[&str] = &[
     "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "markdown", "txt",
 ];
 
+#[cfg(test)]
+type ScanLock = crate::TestLifecycleMutex<()>;
+#[cfg(not(test))]
+type ScanLock = Mutex<()>;
+
+#[cfg(test)]
+type ScanGuard<'a> = crate::TestLifecycleGuard<'a, ()>;
+#[cfg(not(test))]
+type ScanGuard<'a> = std::sync::MutexGuard<'a, ()>;
+
 #[derive(Clone)]
 pub struct LibraryDb {
     connection: Arc<Mutex<Connection>>,
-    scan_lock: Arc<Mutex<()>>,
+    scan_lock: Arc<ScanLock>,
     pub thumbnail_dir: PathBuf,
 }
 
@@ -67,7 +77,7 @@ impl LibraryDb {
             .map_err(|e| format!("Could not create thumbnail directory: {e}"))?;
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
-            scan_lock: Arc::new(Mutex::new(())),
+            scan_lock: Arc::new(ScanLock::new(())),
             thumbnail_dir: thumb_dir,
         };
         db.migrate()?;
@@ -82,7 +92,7 @@ impl LibraryDb {
         let connection = Connection::open_in_memory().map_err(db_error)?;
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
-            scan_lock: Arc::new(Mutex::new(())),
+            scan_lock: Arc::new(ScanLock::new(())),
             thumbnail_dir: thumb_dir,
         };
         db.migrate()?;
@@ -118,6 +128,31 @@ impl LibraryDb {
         root_id: &str,
         relative_path: Option<&str>,
     ) -> Result<LibraryScanResultDto, String> {
+        self.scan_root_at_inner(root_id, relative_path, || {})
+    }
+
+    #[cfg(test)]
+    fn scan_root_at_with_observation_hook<F>(
+        &self,
+        root_id: &str,
+        relative_path: Option<&str>,
+        after_observation: F,
+    ) -> Result<LibraryScanResultDto, String>
+    where
+        F: FnOnce(),
+    {
+        self.scan_root_at_inner(root_id, relative_path, after_observation)
+    }
+
+    fn scan_root_at_inner<F>(
+        &self,
+        root_id: &str,
+        relative_path: Option<&str>,
+        after_observation: F,
+    ) -> Result<LibraryScanResultDto, String>
+    where
+        F: FnOnce(),
+    {
         let _scan_guard = self
             .scan_lock
             .lock()
@@ -154,23 +189,35 @@ impl LibraryDb {
             files,
             mut errors,
         } = filesystem_observation;
+        after_observation();
+        let observed_locator = root.locator_value.clone();
+        let observed_updated_at = root.updated_at.clone();
         let now = timestamp();
         let scan_marker = format!("{now}_{}", Uuid::new_v4());
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let attachment_state: String = transaction
+        let current_root: Option<(String, String, String, String)> = transaction
             .query_row(
-                "SELECT attachment_state FROM library_roots WHERE id = ?1",
+                "SELECT locator_kind, attachment_state, locator_value, updated_at
+                 FROM library_roots WHERE id = ?1",
                 [root_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
-            .map_err(db_error)?
-            .ok_or_else(|| "Library root was not found.".to_string())?;
+            .map_err(db_error)?;
+        let Some((locator_kind, attachment_state, locator_value, updated_at)) = current_root else {
+            return Err("Library root was not found.".to_string());
+        };
         if attachment_state != "attached" {
             return Err("Library root is detached.".to_string());
+        }
+        if locator_kind != root.locator_kind
+            || locator_value != observed_locator
+            || updated_at != observed_updated_at
+        {
+            return Err("Library root changed during scan. Retry the scan.".to_string());
         }
         let mut inserted = 0;
         let mut updated = 0;
@@ -394,8 +441,18 @@ impl LibraryDb {
         })
     }
     pub fn document_path(&self, document_id: &str) -> Result<String, String> {
-        let document = self
-            .document(document_id)?
+        let connection = self.lock()?;
+        let document = connection
+            .query_row(
+                "SELECT d.id, d.name, d.format_id, d.size_bytes, d.first_seen_at, d.updated_at,
+                        d.root_id, d.relative_path, d.availability, r.locator_value
+                 FROM documents d JOIN library_roots r ON r.id = d.root_id
+                 WHERE d.id = ?1 AND d.excluded_at IS NULL AND r.attachment_state = 'attached'",
+                [document_id],
+                open_document_from_row,
+            )
+            .optional()
+            .map_err(db_error)?
             .ok_or_else(|| "Library document was not found.".to_string())?;
         if document.availability != "present" {
             return Err("This library document is missing from its root.".to_string());
@@ -409,6 +466,31 @@ impl LibraryDb {
         document_id: &str,
         new_path: &str,
     ) -> Result<DocumentDto, String> {
+        self.relink_document_inner(document_id, new_path, || {})
+    }
+
+    #[cfg(test)]
+    fn relink_document_with_hook<F>(
+        &self,
+        document_id: &str,
+        new_path: &str,
+        after_destination_selection: F,
+    ) -> Result<DocumentDto, String>
+    where
+        F: FnOnce(),
+    {
+        self.relink_document_inner(document_id, new_path, after_destination_selection)
+    }
+
+    fn relink_document_inner<F>(
+        &self,
+        document_id: &str,
+        new_path: &str,
+        after_destination_selection: F,
+    ) -> Result<DocumentDto, String>
+    where
+        F: FnOnce(),
+    {
         let p = Path::new(new_path);
         let canonical_p = p
             .canonicalize()
@@ -418,7 +500,7 @@ impl LibraryDb {
         }
 
         let roots = self.raw_roots()?;
-        let (root_id, relative_path) = match deepest_attached_root(&roots, &canonical_p) {
+        let (root_id, relative_path) = match deepest_attached_root(&roots, &canonical_p)? {
             Some((root, relative_path)) => (
                 root.id.clone(),
                 relative_path.to_string_lossy().replace('\\', "/"),
@@ -443,27 +525,46 @@ impl LibraryDb {
             .unwrap_or("Untitled document")
             .to_string();
         let now = timestamp();
+        after_destination_selection();
 
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
 
-        let target_root_attached: bool = transaction
+        let target_root: Option<(String, String, String)> = transaction
             .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM library_roots
-                    WHERE id = ?1 AND attachment_state = 'attached'
-                 )",
+                "SELECT locator_kind, attachment_state, locator_value
+                 FROM library_roots WHERE id = ?1",
                 [&root_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
+            .optional()
             .map_err(db_error)?;
-        if !target_root_attached {
+        let Some((locator_kind, attachment_state, locator_value)) = target_root else {
             return Err(
                 "The selected file is not inside any Library folder. Add its folder to the Library first."
                     .to_string(),
             );
+        };
+        if locator_kind != "filesystem-directory" || attachment_state != "attached" {
+            return Err(
+                "The selected file is not inside any Library folder. Add its folder to the Library first."
+                    .to_string(),
+            );
+        }
+        let current_root_path = Path::new(&locator_value)
+            .canonicalize()
+            .map_err(|error| format!("Could not validate the selected Library folder: {error}"))?;
+        let current_relative_path = canonical_p
+            .strip_prefix(&current_root_path)
+            .map_err(|_| {
+                "Library root changed while relinking. Select the file again.".to_string()
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if current_relative_path != relative_path {
+            return Err("Library root changed while relinking. Select the file again.".to_string());
         }
 
         // Ensure target document exists
@@ -533,7 +634,7 @@ impl LibraryDb {
 
         let roots = self.raw_roots()?;
         let matching_root =
-            deepest_attached_root(&roots, &canonical_p).map(|(root, _)| root.id.clone());
+            deepest_attached_root(&roots, &canonical_p)?.map(|(root, _)| root.id.clone());
 
         let root_id = match matching_root {
             Some(rid) => rid,
@@ -1195,28 +1296,40 @@ fn canonical_directory(path: &str) -> Result<PathBuf, String> {
 fn deepest_attached_root<'a>(
     roots: &'a [RootRow],
     canonical_path: &Path,
-) -> Option<(&'a RootRow, PathBuf)> {
-    roots
-        .iter()
-        .filter_map(|root| {
-            if root.locator_kind != "filesystem-directory" || root.attachment_state != "attached" {
-                return None;
+) -> Result<Option<(&'a RootRow, PathBuf)>, String> {
+    let mut best: Option<(&RootRow, PathBuf, PathBuf)> = None;
+    for root in roots {
+        if root.locator_kind != "filesystem-directory" || root.attachment_state != "attached" {
+            continue;
+        }
+        let canonical_root = match Path::new(&root.locator_value).canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not validate attached library root '{}': {error}",
+                    root.locator_value
+                ));
             }
-            let canonical_root = Path::new(&root.locator_value).canonicalize().ok()?;
-            let relative_path = canonical_path
-                .strip_prefix(&canonical_root)
-                .ok()?
-                .to_path_buf();
-            Some((root, canonical_root, relative_path))
-        })
-        .max_by(|(left, left_path, _), (right, right_path, _)| {
-            left_path
-                .components()
-                .count()
-                .cmp(&right_path.components().count())
-                .then_with(|| left.id.cmp(&right.id))
-        })
-        .map(|(root, _, relative_path)| (root, relative_path))
+        };
+        let Ok(relative_path) = canonical_path.strip_prefix(&canonical_root) else {
+            continue;
+        };
+        let relative_path = relative_path.to_path_buf();
+        let replace_best = match &best {
+            None => true,
+            Some((best_root, best_path, _)) => {
+                let candidate_depth = canonical_root.components().count();
+                let best_depth = best_path.components().count();
+                candidate_depth > best_depth
+                    || (candidate_depth == best_depth && root.id > best_root.id)
+            }
+        };
+        if replace_best {
+            best = Some((root, canonical_root, relative_path));
+        }
+    }
+    Ok(best.map(|(root, _, relative_path)| (root, relative_path)))
 }
 
 fn canonical_library_path(root: &str, relative: &str) -> Result<PathBuf, String> {

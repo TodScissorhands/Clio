@@ -113,8 +113,14 @@ export async function planMergeJob(
   });
 }
 
-export async function executeConversionJob(job: ConversionJob): Promise<ConversionJob> {
-  return invoke<ConversionJob>("conversion_execute_job", { job });
+export async function executeConversionJob(
+  job: ConversionJob,
+  libraryDocumentIds?: Array<string | null>
+): Promise<ConversionJob> {
+  return invoke<ConversionJob>("conversion_execute_job", {
+    job,
+    libraryDocumentIds: libraryDocumentIds ?? null,
+  });
 }
 
 export async function getPdfPageCount(sourcePath: string): Promise<number> {

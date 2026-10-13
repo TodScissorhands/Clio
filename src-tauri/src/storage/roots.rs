@@ -137,6 +137,35 @@ impl LibraryDb {
         &self,
         preview: &LocateRootPreviewDto,
     ) -> Result<LibraryRootDto, String> {
+        let scan_guard = self
+            .scan_lock
+            .lock()
+            .map_err(|_| "Library scanner is busy.".to_string())?;
+        self.confirm_locate_root_with_scan_guard(preview, scan_guard)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_locate_root_with_lock_attempt_hook<F>(
+        &self,
+        preview: &LocateRootPreviewDto,
+        on_lock_attempt: F,
+    ) -> Result<LibraryRootDto, String>
+    where
+        F: FnOnce(bool),
+    {
+        let scan_guard = self
+            .scan_lock
+            .lock_with_attempt_hook(on_lock_attempt)
+            .map_err(|_| "Library scanner is busy.".to_string())?;
+        self.confirm_locate_root_with_scan_guard(preview, scan_guard)
+    }
+
+    fn confirm_locate_root_with_scan_guard(
+        &self,
+        preview: &LocateRootPreviewDto,
+        scan_guard: ScanGuard<'_>,
+    ) -> Result<LibraryRootDto, String> {
+        let _scan_guard = scan_guard;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -218,7 +247,6 @@ impl LibraryDb {
         transaction.commit().map_err(db_error)?;
         Ok(root.into_dto())
     }
-
     pub fn list_roots(&self) -> Result<Vec<LibraryRootDto>, String> {
         let connection = self.lock()?;
         let mut statement = connection
