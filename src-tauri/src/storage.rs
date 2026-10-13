@@ -128,7 +128,7 @@ impl LibraryDb {
         root_id: &str,
         relative_path: Option<&str>,
     ) -> Result<LibraryScanResultDto, String> {
-        self.scan_root_at_inner(root_id, relative_path, || {})
+        self.scan_root_at_inner(root_id, relative_path, |_| {})
     }
 
     #[cfg(test)]
@@ -139,7 +139,7 @@ impl LibraryDb {
         after_observation: F,
     ) -> Result<LibraryScanResultDto, String>
     where
-        F: FnOnce(),
+        F: FnOnce(&mut filesystem_observation::FilesystemObservation),
     {
         self.scan_root_at_inner(root_id, relative_path, after_observation)
     }
@@ -151,7 +151,7 @@ impl LibraryDb {
         after_observation: F,
     ) -> Result<LibraryScanResultDto, String>
     where
-        F: FnOnce(),
+        F: FnOnce(&mut filesystem_observation::FilesystemObservation),
     {
         let _scan_guard = self
             .scan_lock
@@ -203,14 +203,14 @@ impl LibraryDb {
             }
         }
 
-        let filesystem_observation =
+        let mut filesystem_observation =
             filesystem_observation::observe(&root_path, relative_path, &nested_boundaries)?;
+        after_observation(&mut filesystem_observation);
         let filesystem_observation::FilesystemObservation {
             scope_path,
             files,
             mut errors,
         } = filesystem_observation;
-        after_observation();
         let observed_locator = root.locator_value.clone();
         let observed_updated_at = root.updated_at.clone();
         let now = timestamp();
@@ -330,13 +330,21 @@ impl LibraryDb {
                 )
                 .map_err(db_error)?;
         }
-        let missing = catalog_reconciliation::reconcile_missing_documents(
-            &transaction,
-            root_id,
-            scope_path.as_deref(),
-            &scan_marker,
-            &now,
-        )?;
+        let missing = if errors.is_empty() {
+            catalog_reconciliation::reconcile_missing_documents(
+                &transaction,
+                root_id,
+                scope_path.as_deref(),
+                &scan_marker,
+                &now,
+            )?
+        } else {
+            catalog_reconciliation::count_missing_documents(
+                &transaction,
+                root_id,
+                scope_path.as_deref(),
+            )?
+        };
         transaction.commit().map_err(db_error)?;
         errors.sort_by(|left, right| {
             left.path

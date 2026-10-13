@@ -153,6 +153,199 @@ fn test_scanner_respects_nested_root_boundaries() {
 }
 
 #[test]
+fn test_folder_scans_reject_nested_root_boundaries() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-folder-nested-scan-{}", Uuid::new_v4()));
+    let inner_dir = temp_dir.join("inner");
+    let inner_child_dir = inner_dir.join("chapter");
+    fs::create_dir_all(&inner_child_dir).expect("create nested-root descendant");
+    fs::write(temp_dir.join("outer.txt"), b"outer document").expect("write outer document");
+    fs::write(inner_dir.join("inner.txt"), b"inner document").expect("write inner document");
+    fs::write(inner_child_dir.join("chapter.txt"), b"chapter document")
+        .expect("write descendant document");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let outer_root = db
+        .add_root(&temp_dir.to_string_lossy(), Some("Outer"))
+        .expect("add outer root");
+    let inner_root_id = insert_root_for_ownership_test(&db, &inner_dir, "Inner", "attached");
+    let outer_scan = db.scan_root(&outer_root.id).expect("scan outer root");
+    assert_eq!(outer_scan.scanned, 1);
+
+    let outer_documents_before = db
+        .list_documents(Some(&outer_root.id), true)
+        .expect("list outer documents before scoped scans")
+        .into_iter()
+        .map(|document| (document.id, document.relative_path))
+        .collect::<Vec<_>>();
+    assert_eq!(outer_documents_before.len(), 1);
+    assert_eq!(outer_documents_before[0].1, "outer.txt");
+
+    for relative_path in ["inner", "inner/chapter"] {
+        let error = db
+            .scan_folder(&outer_root.id, relative_path)
+            .expect_err("scoped scan must reject another root's content");
+        assert!(error.contains("inside another attached library root"));
+    }
+
+    let outer_documents_after = db
+        .list_documents(Some(&outer_root.id), true)
+        .expect("list outer documents after rejected scoped scans")
+        .into_iter()
+        .map(|document| (document.id, document.relative_path))
+        .collect::<Vec<_>>();
+    assert_eq!(outer_documents_after, outer_documents_before);
+
+    let inner_scan = db.scan_root(&inner_root_id).expect("scan inner root");
+    assert_eq!(inner_scan.scanned, 2);
+    let inner_documents = db
+        .list_documents(Some(&inner_root_id), false)
+        .expect("list inner-root documents");
+    assert_eq!(inner_documents.len(), 2);
+    assert!(inner_documents
+        .iter()
+        .all(|document| document.root_id == inner_root_id));
+
+    fs::remove_dir_all(&temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn test_incomplete_scan_preserves_unobserved_catalog_and_user_state() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-incomplete-scan-{}", Uuid::new_v4()));
+    let blocked_dir = temp_dir.join("blocked");
+    fs::create_dir_all(&blocked_dir).expect("create blocked subtree");
+    fs::write(blocked_dir.join("kept.txt"), b"kept document").expect("write kept document");
+    fs::write(blocked_dir.join("excluded.txt"), b"excluded document")
+        .expect("write excluded document");
+    fs::write(temp_dir.join("accessible.txt"), b"accessible document")
+        .expect("write accessible document");
+
+    let db = LibraryDb::open_in_memory().expect("open db");
+    let root = db
+        .add_root(&temp_dir.to_string_lossy(), Some("Incomplete scan"))
+        .expect("add root");
+    db.scan_root(&root.id).expect("initial complete scan");
+    let documents = db
+        .list_documents(Some(&root.id), true)
+        .expect("list initial documents");
+    let kept_id = documents
+        .iter()
+        .find(|document| document.relative_path == "blocked/kept.txt")
+        .expect("find kept document")
+        .id
+        .clone();
+    let excluded_id = documents
+        .iter()
+        .find(|document| document.relative_path == "blocked/excluded.txt")
+        .expect("find excluded document")
+        .id
+        .clone();
+    db.set_reading_state(ReadingState {
+        document_id: kept_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.4 },
+        last_opened_at: "2026-10-10T10:00:00Z".to_string(),
+        updated_at: "2026-10-10T10:01:00Z".to_string(),
+    })
+    .expect("set reading state");
+    db.create_bookmark(
+        &kept_id,
+        ReadingPosition::TextScroll { progression: 0.4 },
+        Some("Keep"),
+    )
+    .expect("create bookmark");
+    db.remove_document(&excluded_id)
+        .expect("exclude document in blocked subtree");
+
+    let blocked_document_snapshot = |db: &LibraryDb| {
+        let connection = db.lock().expect("lock database for document snapshot");
+        let mut statement = connection
+            .prepare(
+                "SELECT id, relative_path, availability, excluded_at, last_seen_scan, updated_at
+                 FROM documents WHERE root_id = ?1 AND relative_path LIKE 'blocked/%'
+                 ORDER BY relative_path",
+            )
+            .expect("prepare blocked document snapshot");
+        statement
+            .query_map([root.id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .expect("query blocked document snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect blocked document snapshot")
+    };
+    let documents_before = blocked_document_snapshot(&db);
+    assert_eq!(documents_before.len(), 2);
+    assert!(documents_before
+        .iter()
+        .any(|(id, _, _, excluded_at, _, _)| id == &excluded_id && excluded_at.is_some()));
+    let root_scan_time_before = db
+        .root(&root.id)
+        .expect("load root")
+        .expect("root exists")
+        .last_scanned_at;
+    let reading_state_before = db
+        .get_reading_state(&kept_id)
+        .expect("read reading state")
+        .expect("reading state exists");
+    let bookmarks_before = db
+        .list_bookmarks(&kept_id)
+        .expect("list bookmarks before incomplete scan");
+
+    let result = db
+        .scan_root_at_with_observation_hook(&root.id, None, |observation| {
+            observation
+                .files
+                .retain(|(_, relative_path)| !relative_path.starts_with("blocked/"));
+            observation.errors.push(ScanErrorDto {
+                path: blocked_dir.display().to_string(),
+                message: "injected inaccessible subtree".to_string(),
+            });
+        })
+        .expect("incomplete scan reports a result");
+
+    assert_eq!(result.scanned, 1);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].path, blocked_dir.display().to_string());
+    assert!(result.errors[0]
+        .message
+        .contains("injected inaccessible subtree"));
+    assert_eq!(result.missing, 0);
+    assert_eq!(blocked_document_snapshot(&db), documents_before);
+    assert_eq!(
+        db.root(&root.id)
+            .expect("load root after incomplete scan")
+            .expect("root remains")
+            .last_scanned_at,
+        root_scan_time_before
+    );
+    let reading_state_after = db
+        .get_reading_state(&kept_id)
+        .expect("read reading state after scan")
+        .expect("reading state remains");
+    assert_eq!(
+        serde_json::to_value(reading_state_after).expect("serialize reading state"),
+        serde_json::to_value(reading_state_before).expect("serialize original reading state")
+    );
+    assert_eq!(
+        serde_json::to_value(
+            db.list_bookmarks(&kept_id)
+                .expect("list bookmarks after incomplete scan")
+        )
+        .expect("serialize bookmarks"),
+        serde_json::to_value(bookmarks_before).expect("serialize original bookmarks")
+    );
+    assert!(fs::read(blocked_dir.join("kept.txt")).is_ok());
+
+    fs::remove_dir_all(&temp_dir).expect("remove temporary directory");
+}
+
+#[test]
 fn test_scanner_folder_scope_preserves_other_root_documents() {
     let temp_dir = std::env::temp_dir().join(format!("clio-test-folder-scan-{}", Uuid::new_v4()));
     let nested = temp_dir.join("plays");
@@ -4015,6 +4208,8 @@ fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
     let candidate_path = temp_dir.join("located-root");
     fs::create_dir_all(&old_path).expect("create original root");
     fs::create_dir_all(&candidate_path).expect("create candidate root");
+    fs::write(candidate_path.join("book.txt"), "located content")
+        .expect("write document at candidate location");
     fs::write(old_path.join("book.txt"), "original content").expect("write original document");
 
     let db = LibraryDb::open_in_memory().expect("open database");
@@ -4043,7 +4238,7 @@ fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
         let (observed_tx, observed_rx) = std::sync::mpsc::channel();
         let (release_scan_tx, release_scan_rx) = std::sync::mpsc::channel();
         let scan_thread = scope.spawn(move || {
-            scan_db.scan_root_at_with_observation_hook(&scan_root_id, None, || {
+            scan_db.scan_root_at_with_observation_hook(&scan_root_id, None, |_| {
                 observed_tx.send(()).expect("signal filesystem observation");
                 let _ = release_scan_rx.recv();
             })
@@ -4090,6 +4285,10 @@ fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
             )
             .expect("read root locator while scan is paused");
 
+        fs::create_dir_all(&old_path).expect("restore scanned root directory");
+        fs::write(old_path.join("book.txt"), "original content")
+            .expect("restore scanned document before reconciliation");
+
         release_scan_tx
             .send(())
             .expect("release scan filesystem observation");
@@ -4118,11 +4317,13 @@ fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
             Some("missing")
         );
         assert_eq!(stored_locator, original_locator);
-        assert_eq!(scan_result.missing, 1);
+        assert_eq!(scan_result.missing, 0);
+        assert_eq!(scan_result.updated, 1);
         assert!(locate_result
             .expect_err("scan updates make the original preview stale")
             .contains("Library root changed since Locate Root preview"));
     });
+    fs::remove_dir_all(&old_path).expect("make scanned root missing for refreshed preview");
 
     let refreshed_preview = db
         .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
@@ -4136,7 +4337,7 @@ fn locate_waits_for_scan_and_scan_commits_before_root_rebind() {
     assert_eq!(final_documents[0].0, document_id);
     assert_eq!(final_documents[0].1, root.id);
     assert_eq!(final_documents[0].2, "book.txt");
-    assert_eq!(final_documents[0].3, "missing");
+    assert_eq!(final_documents[0].3, "present");
 
     fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }

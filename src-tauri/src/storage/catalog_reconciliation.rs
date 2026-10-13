@@ -113,6 +113,14 @@ pub(super) fn reconcile_missing_documents(
             .map_err(db_error)?;
     }
 
+    count_missing_documents(transaction, root_id, scope_path)
+}
+
+pub(super) fn count_missing_documents(
+    transaction: &Transaction<'_>,
+    root_id: &str,
+    scope_path: Option<&str>,
+) -> Result<i64, String> {
     if let Some(scope_path) = scope_path {
         transaction
             .query_row(

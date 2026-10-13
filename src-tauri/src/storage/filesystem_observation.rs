@@ -44,6 +44,10 @@ pub(super) fn observe(
         canonical_root.clone()
     };
 
+    if is_within_nested_root(&canonical_root, &scan_path, nested_boundaries) {
+        return Err("The selected folder is inside another attached library root.".to_string());
+    }
+
     let mut files = Vec::new();
     let mut errors = Vec::new();
     collect_files(
@@ -74,6 +78,10 @@ fn collect_files(
     files: &mut Vec<(PathBuf, String)>,
     errors: &mut Vec<ScanErrorDto>,
 ) {
+    if is_within_nested_root(root, current, nested_boundaries) {
+        return;
+    }
+
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(error) => {
@@ -110,9 +118,7 @@ fn collect_files(
             }
         };
         if metadata.is_dir() {
-            if !nested_boundaries.contains(&path) {
-                collect_files(root, &path, nested_boundaries, files, errors);
-            }
+            collect_files(root, &path, nested_boundaries, files, errors);
         } else if metadata.is_file() && SUPPORTED_FORMATS.contains(&extension(&path).as_str()) {
             if let Ok(relative) = path.strip_prefix(root) {
                 let rel = relative.to_string_lossy().replace('\\', "/");
@@ -120,4 +126,10 @@ fn collect_files(
             }
         }
     }
+}
+
+fn is_within_nested_root(root: &Path, path: &Path, nested_boundaries: &[PathBuf]) -> bool {
+    nested_boundaries.iter().any(|boundary| {
+        boundary != root && boundary.starts_with(root) && path.starts_with(boundary)
+    })
 }
