@@ -2004,6 +2004,314 @@ fn relink_rejects_detached_destination_without_mutating_catalog_state() {
     fs::remove_dir_all(temp_dir).expect("remove temporary directory");
 }
 
+fn insert_root_for_ownership_test(
+    db: &LibraryDb,
+    path: &Path,
+    label: &str,
+    attachment_state: &str,
+) -> String {
+    let root_id = Uuid::new_v4().to_string();
+    let locator = fs::canonicalize(path).expect("canonicalize legacy root");
+    db.lock()
+        .expect("lock database")
+        .execute(
+            "INSERT INTO library_roots
+                 (id, label, locator_kind, locator_value, attachment_state,
+                  last_scanned_at, created_at, updated_at)
+             VALUES (?1, ?2, 'filesystem-directory', ?3, ?4, NULL, ?5, ?5)",
+            params![
+                root_id,
+                label,
+                locator.to_string_lossy(),
+                attachment_state,
+                timestamp()
+            ],
+        )
+        .expect("insert legacy root");
+    root_id
+}
+
+#[test]
+fn external_add_uses_deepest_attached_root_and_preserves_legacy_records() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-external-deepest-{}", Uuid::new_v4()));
+    let outer_path = temp_dir.join("Library");
+    let nested_path = outer_path.join("Inner");
+    let sibling_path = temp_dir.join("Library-copy");
+    fs::create_dir_all(&nested_path).expect("create nested directory");
+    fs::create_dir_all(&sibling_path).expect("create sibling directory");
+    let nested_file = nested_path.join("nested.pdf");
+    let detached_nested_file = nested_path.join("after-detach.pdf");
+    let sibling_file = sibling_path.join("sibling.pdf");
+    fs::write(&nested_file, b"%PDF nested").expect("write nested document");
+    fs::write(&sibling_file, b"%PDF sibling").expect("write sibling document");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let outer_root = db
+        .add_root(&outer_path.to_string_lossy(), Some("Outer"))
+        .expect("add outer root");
+    db.scan_root(&outer_root.id).expect("scan outer root");
+    let original_outer_document = db
+        .list_documents(Some(&outer_root.id), false)
+        .expect("list outer documents")
+        .into_iter()
+        .find(|document| document.name == "nested.pdf")
+        .expect("outer scan indexed nested file");
+    let nested_root_id =
+        insert_root_for_ownership_test(&db, &nested_path, "Legacy nested", "attached");
+
+    let nested_document = db
+        .add_external_document_to_library(&nested_file.to_string_lossy())
+        .expect("add document through nested root");
+    assert_eq!(nested_document.root_id, nested_root_id);
+    assert_ne!(nested_document.id, original_outer_document.id);
+    let outer_document_after = db
+        .list_documents(Some(&outer_root.id), false)
+        .expect("list preserved outer documents")
+        .into_iter()
+        .find(|document| document.id == original_outer_document.id)
+        .expect("legacy outer document remains");
+    assert_eq!(outer_document_after.root_id, outer_root.id);
+    let roots = db.list_roots().expect("list overlapping roots");
+    assert!(roots.iter().any(|root| root.id == outer_root.id));
+    assert!(roots.iter().any(|root| root.id == nested_root_id));
+
+    db.remove_root(&nested_root_id)
+        .expect("detach deepest legacy root");
+    fs::write(&detached_nested_file, b"%PDF parent-owned").expect("write after-detach file");
+    let parent_owned = db
+        .add_external_document_to_library(&detached_nested_file.to_string_lossy())
+        .expect("use attached ancestor when deeper root is detached");
+    assert_eq!(parent_owned.root_id, outer_root.id);
+    let detached_root = db
+        .list_roots()
+        .expect("list roots after detach")
+        .into_iter()
+        .find(|root| root.id == nested_root_id)
+        .expect("detached legacy root remains");
+    assert_eq!(detached_root.attachment_state, "detached");
+
+    let sibling_document = db
+        .add_external_document_to_library(&sibling_file.to_string_lossy())
+        .expect("add sibling path as its own root");
+    assert_ne!(sibling_document.root_id, outer_root.id);
+    let sibling_root = db
+        .raw_roots()
+        .expect("list stored roots")
+        .into_iter()
+        .find(|root| root.id == sibling_document.root_id)
+        .expect("sibling root exists");
+    assert_eq!(
+        fs::canonicalize(&sibling_root.locator_value).expect("canonical sibling root"),
+        fs::canonicalize(&sibling_path).expect("canonical sibling directory")
+    );
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn relink_uses_deepest_attached_root_and_rejects_sibling_prefix() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-relink-deepest-{}", Uuid::new_v4()));
+    let outer_path = temp_dir.join("Library");
+    let nested_path = outer_path.join("Inner");
+    let source_path = temp_dir.join("Source");
+    let detached_nested_path = outer_path.join("Detached-Inner");
+    let sibling_path = temp_dir.join("Library-copy");
+    fs::create_dir_all(&nested_path).expect("create nested directory");
+    fs::create_dir_all(&source_path).expect("create source directory");
+    fs::create_dir_all(&detached_nested_path).expect("create detached nested directory");
+    fs::create_dir_all(&sibling_path).expect("create sibling directory");
+    let nested_file = nested_path.join("target.pdf");
+    let original_file = source_path.join("old.pdf");
+    fs::write(&nested_file, b"%PDF nested target").expect("write nested target");
+    fs::write(&original_file, b"%PDF original").expect("write source file");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let outer_root = db
+        .add_root(&outer_path.to_string_lossy(), Some("Outer"))
+        .expect("add outer root");
+    let source_root = db
+        .add_root(&source_path.to_string_lossy(), Some("Source"))
+        .expect("add source root");
+    db.scan_root(&outer_root.id).expect("scan outer root");
+    db.scan_root(&source_root.id).expect("scan source root");
+    let outer_document = db
+        .list_documents(Some(&outer_root.id), false)
+        .expect("list outer documents")
+        .into_iter()
+        .find(|document| document.name == "target.pdf")
+        .expect("outer scan indexed target");
+    let document_id = db
+        .list_documents(Some(&source_root.id), false)
+        .expect("list source documents")[0]
+        .id
+        .clone();
+    let nested_root_id =
+        insert_root_for_ownership_test(&db, &nested_path, "Legacy nested", "attached");
+
+    let relinked = db
+        .relink_document(&document_id, &nested_file.to_string_lossy())
+        .expect("relink into deepest attached root");
+    assert_eq!(relinked.root_id, nested_root_id);
+    assert_eq!(relinked.relative_path, "target.pdf");
+    let outer_document_after = db
+        .list_documents(Some(&outer_root.id), false)
+        .expect("list outer after relink")
+        .into_iter()
+        .find(|document| document.id == outer_document.id)
+        .expect("existing outer record is not reassigned or merged");
+    assert_eq!(outer_document_after.root_id, outer_root.id);
+
+    let detached_file = detached_nested_path.join("target.pdf");
+    fs::write(&detached_file, b"%PDF detached target").expect("write detached target");
+    let detached_root_id =
+        insert_root_for_ownership_test(&db, &detached_nested_path, "Detached nested", "detached");
+    let relinked_to_parent = db
+        .relink_document(&document_id, &detached_file.to_string_lossy())
+        .expect("detached root must not be selected over attached ancestor");
+    assert_eq!(relinked_to_parent.root_id, outer_root.id);
+
+    let sibling_file = sibling_path.join("target.pdf");
+    fs::write(&sibling_file, b"%PDF sibling target").expect("write sibling target");
+    let before_failed_relink: (String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read state before sibling relink");
+    assert!(db
+        .relink_document(&document_id, &sibling_file.to_string_lossy())
+        .unwrap_err()
+        .contains("not inside any Library folder"));
+    let after_failed_relink: (String, String, Option<String>) = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT root_id, relative_path, excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read state after sibling relink");
+    assert_eq!(after_failed_relink, before_failed_relink);
+
+    let roots = db.list_roots().expect("list legacy roots");
+    assert!(roots.iter().any(|root| root.id == outer_root.id));
+    assert!(roots.iter().any(|root| root.id == nested_root_id));
+    assert!(roots.iter().any(|root| root.id == detached_root_id));
+    assert_eq!(
+        roots
+            .iter()
+            .find(|root| root.id == detached_root_id)
+            .expect("detached root record remains")
+            .attachment_state,
+        "detached"
+    );
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn successful_relink_preserves_exclusion_and_non_exclusion_state() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-relink-excluded-{}", Uuid::new_v4()));
+    let root_path = temp_dir.join("Library");
+    fs::create_dir_all(&root_path).expect("create root");
+    let old_file = root_path.join("old.pdf");
+    let new_file = root_path.join("renamed.pdf");
+    fs::write(&old_file, b"%PDF original").expect("write original");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&root_path.to_string_lossy(), None)
+        .expect("add root");
+    db.scan_root(&root.id).expect("scan root");
+    let document_id = db
+        .list_documents(Some(&root.id), false)
+        .expect("list initial document")
+        .into_iter()
+        .next()
+        .expect("initial document")
+        .id;
+    db.set_reading_state(ReadingState {
+        document_id: document_id.clone(),
+        position: ReadingPosition::PdfPage {
+            page: 4,
+            progression: None,
+        },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set reading state");
+
+    fs::rename(&old_file, &new_file).expect("rename document");
+    db.scan_root(&root.id).expect("record moved document");
+    let non_excluded = db
+        .relink_document(&document_id, &new_file.to_string_lossy())
+        .expect("relink non-excluded document");
+    assert_eq!(non_excluded.id, document_id);
+    let excluded_before: Option<String> = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| row.get(0),
+        )
+        .expect("read non-excluded state");
+    assert_eq!(excluded_before, None);
+
+    db.remove_document(&document_id)
+        .expect("exclude document before second move");
+    let excluded_at_before: String = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .expect("read excluded state")
+        .expect("exclusion timestamp exists");
+    let second_file = root_path.join("second-name.pdf");
+    fs::rename(&new_file, &second_file).expect("rename excluded document");
+    db.scan_root(&root.id)
+        .expect("scan moved excluded document");
+
+    let relinked_excluded = db
+        .relink_document(&document_id, &second_file.to_string_lossy())
+        .expect("relink excluded document");
+    assert_eq!(relinked_excluded.id, document_id);
+    assert_eq!(relinked_excluded.relative_path, "second-name.pdf");
+    let excluded_at_after: Option<String> = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&document_id],
+            |row| row.get(0),
+        )
+        .expect("read exclusion after relink");
+    assert_eq!(
+        excluded_at_after.as_deref(),
+        Some(excluded_at_before.as_str())
+    );
+    assert!(db
+        .list_documents(None, true)
+        .expect("list normal active documents")
+        .iter()
+        .all(|document| document.id != document_id));
+    assert_eq!(
+        db.get_reading_state(&document_id)
+            .expect("get preserved reading state")
+            .expect("reading state remains")
+            .document_id,
+        document_id
+    );
+
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
 fn migration_snapshot(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
     let mut statement = connection
         .prepare(query)
