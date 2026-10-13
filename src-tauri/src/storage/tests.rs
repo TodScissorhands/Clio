@@ -3196,3 +3196,550 @@ fn test_detaching_root_preserves_catalog_and_isolates_active_operations() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+fn locate_root_snapshot(
+    db: &LibraryDb,
+    root_id: &str,
+) -> (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    String,
+) {
+    db.lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT id, label, locator_value, attachment_state, updated_at, last_scanned_at,
+                    (SELECT COUNT(*) FROM documents WHERE root_id = library_roots.id), created_at
+             FROM library_roots WHERE id = ?1",
+            [root_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("read root snapshot")
+}
+
+fn locate_document_snapshot(
+    db: &LibraryDb,
+    root_id: &str,
+) -> Vec<(String, String, String, String, Option<String>)> {
+    let connection = db.lock().expect("lock database");
+    let mut statement = connection
+        .prepare(
+            "SELECT id, root_id, relative_path, availability, excluded_at
+             FROM documents WHERE root_id = ?1 ORDER BY id",
+        )
+        .expect("prepare document snapshot");
+    statement
+        .query_map([root_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query document snapshot")
+        .map(|row| row.expect("read document snapshot row"))
+        .collect()
+}
+
+#[test]
+fn locate_root_preview_reports_detached_and_missing_roots_without_mutation() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-preview-{}", Uuid::new_v4()));
+    let detached_path = temp_dir.join("detached");
+    let missing_path = temp_dir.join("missing");
+    let detached_candidate = temp_dir.join("detached-candidate");
+    let missing_candidate = temp_dir.clone();
+    fs::create_dir_all(&detached_path).expect("create detached root");
+    fs::create_dir_all(&missing_path).expect("create root to remove");
+    fs::create_dir_all(&detached_candidate).expect("create detached candidate");
+    fs::write(detached_path.join("kept.txt"), b"kept").expect("write detached-root document");
+    fs::write(missing_path.join("missing.txt"), b"missing").expect("write missing-root document");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let detached_root = db
+        .add_root(&detached_path.to_string_lossy(), Some("Detached"))
+        .expect("add detached candidate root");
+    let missing_root = db
+        .add_root(&missing_path.to_string_lossy(), Some("Missing"))
+        .expect("add missing candidate root");
+    db.scan_root(&detached_root.id)
+        .expect("scan detached candidate root");
+    db.scan_root(&missing_root.id)
+        .expect("scan missing candidate root");
+    db.remove_root(&detached_root.id).expect("detach root");
+    fs::remove_dir_all(&missing_path).expect("remove attached root directory");
+
+    let detached_before = locate_root_snapshot(&db, &detached_root.id);
+    let missing_before = locate_root_snapshot(&db, &missing_root.id);
+    let detached_documents_before = locate_document_snapshot(&db, &detached_root.id);
+    let missing_documents_before = locate_document_snapshot(&db, &missing_root.id);
+
+    let detached_preview = db
+        .preview_locate_root(&detached_root.id, &detached_candidate.to_string_lossy())
+        .expect("preview detached root");
+    assert_eq!(detached_preview.root_id, detached_root.id);
+    assert_eq!(detached_preview.label, "Detached");
+    assert_eq!(detached_preview.attachment_state, "detached");
+    assert_eq!(detached_preview.availability, None);
+    assert_eq!(detached_preview.document_count, 1);
+    assert_eq!(
+        detached_preview.candidate_locator,
+        fs::canonicalize(&detached_candidate)
+            .expect("canonical detached candidate")
+            .to_string_lossy()
+    );
+
+    let missing_preview = db
+        .preview_locate_root(&missing_root.id, &missing_candidate.to_string_lossy())
+        .expect("preview attached but missing root");
+    assert_eq!(missing_preview.attachment_state, "attached");
+    assert_eq!(missing_preview.availability.as_deref(), Some("missing"));
+    assert_eq!(missing_preview.document_count, 1);
+
+    assert_eq!(
+        locate_root_snapshot(&db, &detached_root.id),
+        detached_before
+    );
+    assert_eq!(locate_root_snapshot(&db, &missing_root.id), missing_before);
+    assert_eq!(
+        locate_document_snapshot(&db, &detached_root.id),
+        detached_documents_before
+    );
+    assert_eq!(
+        locate_document_snapshot(&db, &missing_root.id),
+        missing_documents_before
+    );
+    let located_missing = db
+        .confirm_locate_root(&missing_preview)
+        .expect("locate missing root to its ancestor candidate");
+    assert_eq!(located_missing.id, missing_root.id);
+    assert_eq!(located_missing.attachment_state, "attached");
+    assert_eq!(
+        db.root(&missing_root.id)
+            .expect("load located missing root")
+            .expect("root remains")
+            .locator_value,
+        fs::canonicalize(&temp_dir)
+            .expect("canonical ancestor candidate")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        locate_document_snapshot(&db, &missing_root.id),
+        missing_documents_before
+    );
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn locate_root_rebinds_in_place_and_preserves_catalog_user_state() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-preserve-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old-library");
+    let candidate_path = temp_dir.join("new-library");
+    fs::create_dir_all(&old_path).expect("create old root");
+    fs::create_dir_all(&candidate_path).expect("create new root");
+    fs::write(old_path.join("kept.txt"), b"old bytes").expect("write old kept file");
+    fs::write(old_path.join("excluded.txt"), b"old excluded bytes")
+        .expect("write old excluded file");
+    fs::write(candidate_path.join("kept.txt"), b"new bytes").expect("write candidate kept file");
+    fs::write(candidate_path.join("excluded.txt"), b"new excluded bytes")
+        .expect("write candidate excluded file");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&old_path.to_string_lossy(), Some("Rebound"))
+        .expect("add original root");
+    db.scan_root(&root.id).expect("scan original root");
+    let documents = db
+        .list_documents(Some(&root.id), false)
+        .expect("list original documents");
+    let kept = documents
+        .iter()
+        .find(|document| document.name == "kept.txt")
+        .expect("find kept document");
+    let excluded = documents
+        .iter()
+        .find(|document| document.name == "excluded.txt")
+        .expect("find excluded document");
+    let kept_id = kept.id.clone();
+    db.update_metadata(
+        &kept_id,
+        DocumentMetadata {
+            title: Some("Catalog title".to_string()),
+            authors: vec!["A. Author".to_string()],
+            publisher: Some("Clio Press".to_string()),
+            published_date: Some("2025-01-02".to_string()),
+            description: Some("Preserve this catalog metadata.".to_string()),
+            language: Some("en".to_string()),
+            identifiers: vec!["test:locate".to_string()],
+            provenance: MetadataProvenance::Fallback,
+            thumbnail_path: None,
+        },
+    )
+    .expect("set document metadata");
+    let metadata_before = db
+        .get_metadata(&kept_id)
+        .expect("read metadata before locate")
+        .expect("metadata exists");
+    let excluded_id = excluded.id.clone();
+    let collection = db
+        .create_collection("Saved", None)
+        .expect("create collection");
+    db.add_document_to_collection(&collection.id, &kept_id)
+        .expect("add collection membership");
+    db.set_reading_state(ReadingState {
+        document_id: kept_id.clone(),
+        position: ReadingPosition::TextScroll { progression: 0.42 },
+        last_opened_at: timestamp(),
+        updated_at: timestamp(),
+    })
+    .expect("set reading state");
+    db.create_bookmark(
+        &kept_id,
+        ReadingPosition::TextScroll { progression: 0.42 },
+        Some("Saved position"),
+    )
+    .expect("create bookmark");
+    db.create_annotation(
+        &kept_id,
+        "note",
+        ReadingPosition::TextScroll { progression: 0.42 },
+        Some("Saved selection"),
+        Some("Preserve this note"),
+        None,
+    )
+    .expect("create annotation");
+    let reading_state_before = db
+        .get_reading_state(&kept_id)
+        .expect("read reading state before locate")
+        .expect("reading state exists");
+    let bookmarks_before = db
+        .list_bookmarks(&kept_id)
+        .expect("read bookmarks before locate");
+    let annotations_before = db
+        .list_annotations(&kept_id)
+        .expect("read annotations before locate");
+    db.remove_document(&excluded_id)
+        .expect("exclude associated document");
+    db.remove_root(&root.id).expect("detach original root");
+
+    let root_before = locate_root_snapshot(&db, &root.id);
+    let documents_before = locate_document_snapshot(&db, &root.id);
+    let preview = db
+        .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
+        .expect("preview rebind");
+    assert_eq!(preview.document_count, 2);
+    assert_eq!(locate_root_snapshot(&db, &root.id), root_before);
+    assert_eq!(locate_document_snapshot(&db, &root.id), documents_before);
+
+    let located = db
+        .confirm_locate_root(&preview)
+        .expect("confirm root location");
+    let canonical_candidate =
+        fs::canonicalize(&candidate_path).expect("canonical candidate location");
+    assert_eq!(located.id, root.id);
+    assert_eq!(located.label, "Rebound");
+    assert_eq!(located.attachment_state, "attached");
+    assert_eq!(located.availability.as_deref(), Some("available"));
+    let root_after = db.root(&root.id).expect("load rebound root").unwrap();
+    assert_eq!(
+        root_after.locator_value,
+        canonical_candidate.to_string_lossy()
+    );
+    assert_eq!(root_after.last_scanned_at, root_before.5);
+    assert_eq!(root_after.created_at, root_before.7);
+    assert_eq!(locate_document_snapshot(&db, &root.id), documents_before);
+    assert_eq!(
+        db.get_metadata(&kept_id)
+            .expect("read metadata after locate")
+            .expect("metadata preserved"),
+        metadata_before
+    );
+    assert!(old_path.join("kept.txt").exists());
+    assert!(candidate_path.join("kept.txt").exists());
+    assert_eq!(
+        db.document_path(&kept_id)
+            .expect("resolve located document"),
+        candidate_path
+            .join("kept.txt")
+            .canonicalize()
+            .expect("canonical located document")
+            .to_string_lossy()
+    );
+    let reading_state_after = db
+        .get_reading_state(&kept_id)
+        .expect("get reading state")
+        .expect("reading state preserved");
+    assert_eq!(
+        serde_json::to_value(reading_state_after).expect("serialize reading state"),
+        serde_json::to_value(reading_state_before).expect("serialize expected state")
+    );
+    let bookmarks_after = db
+        .list_bookmarks(&kept_id)
+        .expect("list bookmarks after locate");
+    assert_eq!(
+        serde_json::to_value(bookmarks_after).expect("serialize bookmarks"),
+        serde_json::to_value(bookmarks_before).expect("serialize expected bookmarks")
+    );
+    let annotations_after = db
+        .list_annotations(&kept_id)
+        .expect("list annotations after locate");
+    assert_eq!(
+        serde_json::to_value(annotations_after).expect("serialize annotations"),
+        serde_json::to_value(annotations_before).expect("serialize expected annotations")
+    );
+    assert_eq!(
+        db.list_collection_documents(&collection.id)
+            .expect("list preserved collection document")[0]
+            .id,
+        kept_id
+    );
+    assert!(db
+        .list_documents(None, true)
+        .expect("list active documents after locate")
+        .iter()
+        .all(|document| document.id != excluded_id));
+    let excluded_at_after: Option<String> = db
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT excluded_at FROM documents WHERE id = ?1",
+            [&excluded_id],
+            |row| row.get(0),
+        )
+        .expect("read preserved exclusion");
+    assert!(excluded_at_after.is_some());
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn locate_root_rejects_attached_available_roots_and_overlap_candidates() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-overlap-{}", Uuid::new_v4()));
+    let available_path = temp_dir.join("available");
+    let target_path = temp_dir.join("target");
+    let conflict_parent = temp_dir.join("conflicts");
+    let conflict_path = conflict_parent.join("other");
+    let descendant_path = conflict_path.join("child");
+    fs::create_dir_all(&available_path).expect("create available root");
+    fs::create_dir_all(&target_path).expect("create target root");
+    fs::create_dir_all(&descendant_path).expect("create descendant candidate");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let available_root = db
+        .add_root(&available_path.to_string_lossy(), None)
+        .expect("add available root");
+    let target_root = db
+        .add_root(&target_path.to_string_lossy(), None)
+        .expect("add target root");
+    db.remove_root(&target_root.id).expect("detach target root");
+    let available_before = locate_root_snapshot(&db, &available_root.id);
+    assert!(db
+        .preview_locate_root(&available_root.id, &target_path.to_string_lossy())
+        .unwrap_err()
+        .contains("already attached and available"));
+    assert_eq!(
+        locate_root_snapshot(&db, &available_root.id),
+        available_before
+    );
+
+    let conflict_root = db
+        .add_root(&conflict_path.to_string_lossy(), None)
+        .expect("add attached conflict root");
+    let target_before = locate_root_snapshot(&db, &target_root.id);
+    for candidate in [&conflict_parent, &conflict_path, &descendant_path] {
+        assert!(db
+            .preview_locate_root(&target_root.id, &candidate.to_string_lossy())
+            .unwrap_err()
+            .contains("overlaps"));
+        assert_eq!(locate_root_snapshot(&db, &target_root.id), target_before);
+    }
+    assert_eq!(
+        db.list_roots()
+            .expect("list roots after overlap rejection")
+            .iter()
+            .filter(|root| root.id == conflict_root.id)
+            .count(),
+        1
+    );
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn locate_root_allows_overlap_only_with_detached_roots() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-detached-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old");
+    let detached_overlap_path = temp_dir.join("detached-overlap");
+    let candidate_path = detached_overlap_path.join("candidate");
+    fs::create_dir_all(&old_path).expect("create old root");
+    fs::create_dir_all(&candidate_path).expect("create nested candidate");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let target_root = db
+        .add_root(&old_path.to_string_lossy(), Some("Target"))
+        .expect("add target root");
+    let overlap_root = db
+        .add_root(
+            &detached_overlap_path.to_string_lossy(),
+            Some("Detached overlap"),
+        )
+        .expect("add overlapping root before detaching target");
+    db.remove_root(&target_root.id).expect("detach target");
+    db.remove_root(&overlap_root.id)
+        .expect("detach overlapping root");
+
+    let preview = db
+        .preview_locate_root(&target_root.id, &candidate_path.to_string_lossy())
+        .expect("detached roots do not block preview");
+    let located = db
+        .confirm_locate_root(&preview)
+        .expect("detached roots do not block confirmation");
+    assert_eq!(located.id, target_root.id);
+    assert_eq!(
+        fs::canonicalize(&candidate_path)
+            .expect("canonical candidate")
+            .to_string_lossy(),
+        db.root(&target_root.id)
+            .expect("load located root")
+            .expect("located root remains")
+            .locator_value
+    );
+    assert_eq!(
+        db.list_roots()
+            .expect("list roots after location")
+            .into_iter()
+            .find(|root| root.id == overlap_root.id)
+            .expect("detached overlap remains")
+            .attachment_state,
+        "detached"
+    );
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn locate_root_rejects_invalid_candidates_and_stale_previews_without_mutation() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-stale-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old");
+    let candidate_path = temp_dir.join("candidate");
+    let file_path = temp_dir.join("not-a-directory");
+    let missing_path = temp_dir.join("missing-candidate");
+    fs::create_dir_all(&old_path).expect("create old root");
+    fs::create_dir_all(&candidate_path).expect("create candidate");
+    fs::write(&file_path, b"not a directory").expect("create non-directory candidate");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&old_path.to_string_lossy(), None)
+        .expect("add root");
+    db.remove_root(&root.id).expect("detach root");
+    let before = locate_root_snapshot(&db, &root.id);
+    assert!(db
+        .preview_locate_root(&root.id, &file_path.to_string_lossy())
+        .is_err());
+    assert!(db
+        .preview_locate_root(&root.id, &missing_path.to_string_lossy())
+        .is_err());
+    assert_eq!(locate_root_snapshot(&db, &root.id), before);
+
+    let valid_preview = db
+        .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
+        .expect("preview valid candidate");
+    let mut invalid_confirmation = valid_preview.clone();
+    invalid_confirmation.candidate_locator = missing_path.to_string_lossy().into_owned();
+    assert!(db.confirm_locate_root(&invalid_confirmation).is_err());
+    assert_eq!(locate_root_snapshot(&db, &root.id), before);
+
+    let attached_missing_path = temp_dir.join("attached-missing");
+    fs::create_dir_all(&attached_missing_path).expect("create attached root");
+    let attached_missing = db
+        .add_root(&attached_missing_path.to_string_lossy(), None)
+        .expect("add attached root");
+    fs::remove_dir_all(&attached_missing_path).expect("make root missing");
+    let stale_state_preview = db
+        .preview_locate_root(&attached_missing.id, &candidate_path.to_string_lossy())
+        .expect("preview attached missing root");
+    db.remove_root(&attached_missing.id)
+        .expect("change root attachment after preview");
+    let detached_state = locate_root_snapshot(&db, &attached_missing.id);
+    assert!(db
+        .confirm_locate_root(&stale_state_preview)
+        .unwrap_err()
+        .contains("changed since Locate Root preview"));
+    assert_eq!(
+        locate_root_snapshot(&db, &attached_missing.id),
+        detached_state
+    );
+
+    let reappearing_path = temp_dir.join("reappearing");
+    fs::create_dir_all(&reappearing_path).expect("create root that will disappear");
+    let reappearing_root = db
+        .add_root(&reappearing_path.to_string_lossy(), None)
+        .expect("add reappearing root");
+    fs::remove_dir_all(&reappearing_path).expect("make root missing");
+    let reappearing_preview = db
+        .preview_locate_root(&reappearing_root.id, &candidate_path.to_string_lossy())
+        .expect("preview missing root");
+    fs::create_dir_all(&reappearing_path).expect("make attached root available");
+    let reappearing_before = locate_root_snapshot(&db, &reappearing_root.id);
+    assert!(db
+        .confirm_locate_root(&reappearing_preview)
+        .unwrap_err()
+        .contains("already attached and available"));
+    assert_eq!(
+        locate_root_snapshot(&db, &reappearing_root.id),
+        reappearing_before
+    );
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}
+
+#[test]
+fn locate_root_confirmation_rechecks_new_attached_overlaps_atomically() {
+    let temp_dir = std::env::temp_dir().join(format!("clio-locate-race-{}", Uuid::new_v4()));
+    let old_path = temp_dir.join("old");
+    let candidate_path = temp_dir.join("candidate");
+    fs::create_dir_all(&old_path).expect("create old root");
+    fs::create_dir_all(&candidate_path).expect("create candidate root");
+
+    let db = LibraryDb::open_in_memory().expect("open database");
+    let root = db
+        .add_root(&old_path.to_string_lossy(), Some("Target"))
+        .expect("add target root");
+    db.remove_root(&root.id).expect("detach target root");
+    let preview = db
+        .preview_locate_root(&root.id, &candidate_path.to_string_lossy())
+        .expect("preview non-overlapping candidate");
+    let competing_root = db
+        .add_root(&candidate_path.to_string_lossy(), Some("Competing"))
+        .expect("add newly conflicting root");
+    let before_confirmation = locate_root_snapshot(&db, &root.id);
+
+    assert!(db
+        .confirm_locate_root(&preview)
+        .unwrap_err()
+        .contains("overlaps"));
+    assert_eq!(locate_root_snapshot(&db, &root.id), before_confirmation);
+    assert_eq!(
+        db.list_roots()
+            .expect("list roots after rejected confirmation")
+            .iter()
+            .filter(|candidate| candidate.id == competing_root.id)
+            .count(),
+        1
+    );
+    fs::remove_dir_all(temp_dir).expect("remove temporary directory");
+}

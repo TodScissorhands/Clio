@@ -12,7 +12,7 @@ use std::{
 use tauri::Manager;
 use uuid::Uuid;
 
-use storage::{LibraryDb, ReaderOpen};
+use storage::{LibraryDb, LibraryRootDto, LocateRootPreviewDto, ReaderOpen};
 
 const SUPPORTED: &[&str] = &[
     "pdf", "epub", "docx", "odt", "rtf", "html", "htm", "md", "txt",
@@ -141,8 +141,8 @@ fn mint_library_reader_token(
     let mut authorizations = reader_authorizations()
         .lock()
         .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
-    if !db.root_is_attached(root_id)? {
-        return Err("Library root is detached.".to_string());
+    if !db.root_authorizes_path(root_id, document)? {
+        return Err("Library document no longer belongs to an attached root.".to_string());
     }
     mint_reader_token_locked(&mut authorizations, document, Some(root_id))
 }
@@ -183,6 +183,26 @@ fn detach_library_root_locked(
     db.remove_root(root_id)?;
     authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(root_id));
     Ok(())
+}
+
+pub(crate) fn locate_library_root(
+    db: &LibraryDb,
+    preview: &LocateRootPreviewDto,
+) -> Result<LibraryRootDto, String> {
+    let mut authorizations = reader_authorizations()
+        .lock()
+        .map_err(|_| "Reader authorization registry is unavailable.".to_string())?;
+    locate_library_root_locked(db, preview, &mut authorizations)
+}
+
+fn locate_library_root_locked(
+    db: &LibraryDb,
+    preview: &LocateRootPreviewDto,
+    authorizations: &mut HashMap<String, ReaderAuthorizationEntry>,
+) -> Result<LibraryRootDto, String> {
+    let root = db.confirm_locate_root(preview)?;
+    authorizations.retain(|_, entry| entry.root_id.as_deref() != Some(preview.root_id.as_str()));
+    Ok(root)
 }
 
 #[tauri::command]
@@ -273,6 +293,8 @@ pub fn run() {
             storage::commands::library_root_add,
             storage::commands::library_root_list,
             storage::commands::library_root_remove,
+            storage::commands::library_root_locate_preview,
+            storage::commands::library_root_locate_confirm,
             storage::commands::library_root_scan,
             storage::commands::library_folder_scan,
             storage::commands::library_document_list,
@@ -505,6 +527,84 @@ mod tests {
         drop(authorizations);
         assert!(read_thread.join().expect("join read thread").is_err());
 
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn locate_root_revokes_library_tokens_for_the_old_location() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+        let library_open = db
+            .open_library_document(&document_id, |path, root_id| {
+                mint_library_reader_token(&db, path, root_id)
+            })
+            .expect("mint library token");
+        let direct_open = storage::direct_open(
+            document_path.to_string_lossy().into_owned(),
+            mint_reader_token,
+        )
+        .expect("mint direct-open token");
+        let old_root_path = document_path
+            .parent()
+            .expect("document parent")
+            .to_path_buf();
+        fs::remove_dir_all(&old_root_path).expect("make attached root missing");
+        let candidate_path = test_dir.join("ReboundBooks");
+        fs::create_dir_all(&candidate_path).expect("create candidate root");
+        fs::write(
+            candidate_path.join("document.pdf"),
+            b"new located document content",
+        )
+        .expect("write candidate document");
+
+        let preview = db
+            .preview_locate_root(&root_id, &candidate_path.to_string_lossy())
+            .expect("preview missing attached root");
+        locate_library_root(&db, &preview).expect("confirm root location");
+        assert!(mint_library_reader_token(&db, &document_path, &root_id).is_err());
+
+        fs::create_dir_all(&old_root_path).expect("recreate old root path");
+        fs::write(&document_path, b"recreated old path content")
+            .expect("write recreated old-path document");
+        assert!(read_document_bytes(library_open.locator.value).is_err());
+        assert_eq!(
+            read_document_bytes(direct_open.locator.value).expect("direct token remains valid"),
+            b"recreated old path content"
+        );
+
+        fs::remove_dir_all(test_dir).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn mint_waiting_on_locate_gate_cannot_authorize_the_old_root_path() {
+        let (test_dir, db, root_id, document_path, document_id) = library_token_fixture();
+        let mut authorizations = reader_authorizations().lock().expect("lock registry");
+        let thread_db = db.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let open_thread = std::thread::spawn(move || {
+            thread_db.open_library_document(&document_id, |path, root_id| {
+                started_tx.send(()).expect("signal token mint start");
+                mint_library_reader_token(&thread_db, path, root_id)
+            })
+        });
+
+        started_rx.recv().expect("wait for token mint attempt");
+        fs::remove_dir_all(document_path.parent().expect("document parent"))
+            .expect("make root missing");
+        let candidate_path = test_dir.join("LocatedBooks");
+        fs::create_dir_all(&candidate_path).expect("create candidate root");
+        fs::write(candidate_path.join("document.pdf"), b"located document")
+            .expect("write candidate document");
+        let preview = db
+            .preview_locate_root(&root_id, &candidate_path.to_string_lossy())
+            .expect("preview missing root");
+        locate_library_root_locked(&db, &preview, &mut authorizations)
+            .expect("locate root while holding authorization gate");
+        drop(authorizations);
+
+        assert!(open_thread
+            .join()
+            .expect("join document-open thread")
+            .is_err());
         fs::remove_dir_all(test_dir).expect("remove temporary directory");
     }
 }

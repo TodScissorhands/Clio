@@ -1,6 +1,7 @@
 use super::{
     AnnotationDto, BookmarkDto, CollectionDto, DocumentDto, FormatCapabilitiesDto, FormatId,
-    LibraryDb, LibraryRootDto, LibraryScanResultDto, ReadingPosition, ReadingState,
+    LibraryDb, LibraryRootDto, LibraryScanResultDto, LocateRootPreviewDto, ReadingPosition,
+    ReadingState,
 };
 use crate::metadata::DocumentMetadata;
 use tauri::State;
@@ -22,6 +23,23 @@ pub fn library_root_list(db: State<'_, LibraryDb>) -> Result<Vec<LibraryRootDto>
 #[tauri::command]
 pub fn library_root_remove(db: State<'_, LibraryDb>, root_id: String) -> Result<(), String> {
     crate::detach_library_root(&db, &root_id)
+}
+
+#[tauri::command]
+pub fn library_root_locate_preview(
+    db: State<'_, LibraryDb>,
+    root_id: String,
+    candidate_path: String,
+) -> Result<LocateRootPreviewDto, String> {
+    db.preview_locate_root(&root_id, &candidate_path)
+}
+
+#[tauri::command]
+pub fn library_root_locate_confirm(
+    db: State<'_, LibraryDb>,
+    preview: LocateRootPreviewDto,
+) -> Result<LibraryRootDto, String> {
+    crate::locate_library_root(&db, &preview)
 }
 
 #[tauri::command]

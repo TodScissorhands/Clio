@@ -16,10 +16,19 @@ impl LibraryDb {
             .map_err(db_error)
     }
 
-    pub(crate) fn root_is_attached(&self, root_id: &str) -> Result<bool, String> {
-        Ok(self
-            .root(root_id)?
-            .is_some_and(|root| root.attachment_state == "attached"))
+    pub(crate) fn root_authorizes_path(
+        &self,
+        root_id: &str,
+        document_path: &Path,
+    ) -> Result<bool, String> {
+        let Some(root) = self.root(root_id)? else {
+            return Ok(false);
+        };
+        if root.attachment_state != "attached" {
+            return Ok(false);
+        }
+        let root_path = canonical_directory(&root.locator_value)?;
+        Ok(document_path.starts_with(&root_path))
     }
 
     pub fn add_root(&self, path: &str, label: Option<&str>) -> Result<LibraryRootDto, String> {
@@ -73,6 +82,143 @@ impl LibraryDb {
         Ok(root.into_dto())
     }
 
+    pub fn preview_locate_root(
+        &self,
+        root_id: &str,
+        candidate_path: &str,
+    ) -> Result<LocateRootPreviewDto, String> {
+        let candidate = canonical_directory(candidate_path)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let root = transaction
+            .query_row(
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
+                 FROM library_roots WHERE id = ?1",
+                [root_id],
+                root_from_row,
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "Library root was not found.".to_string())?;
+        ensure_root_can_be_located(&root)?;
+        validate_attached_root_overlap(&transaction, &candidate, Some(root_id))?;
+        let document_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE root_id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let availability = if root.attachment_state == "attached" {
+            Some(
+                if directory_exists(&root.locator_value) {
+                    "available"
+                } else {
+                    "missing"
+                }
+                .to_string(),
+            )
+        } else {
+            None
+        };
+        Ok(LocateRootPreviewDto {
+            root_id: root.id,
+            label: root.label,
+            current_locator: root.locator_value,
+            attachment_state: root.attachment_state,
+            availability,
+            updated_at: root.updated_at,
+            candidate_locator: candidate.to_string_lossy().into_owned(),
+            document_count: document_count.max(0) as u64,
+        })
+    }
+
+    pub fn confirm_locate_root(
+        &self,
+        preview: &LocateRootPreviewDto,
+    ) -> Result<LibraryRootDto, String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let mut root = transaction
+            .query_row(
+                "SELECT id, label, locator_kind, locator_value, attachment_state, last_scanned_at, created_at, updated_at
+                 FROM library_roots WHERE id = ?1",
+                [&preview.root_id],
+                root_from_row,
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "Library root was not found.".to_string())?;
+        if root.label != preview.label
+            || root.locator_value != preview.current_locator
+            || root.attachment_state != preview.attachment_state
+            || root.updated_at != preview.updated_at
+        {
+            return Err(
+                "Library root changed since Locate Root preview. Preview again.".to_string(),
+            );
+        }
+        let document_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE root_id = ?1",
+                [&preview.root_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if document_count.max(0) as u64 != preview.document_count {
+            return Err(
+                "Library root catalog changed since Locate Root preview. Preview again."
+                    .to_string(),
+            );
+        }
+        ensure_root_can_be_located(&root)?;
+        let candidate = canonical_directory(&preview.candidate_locator)?;
+        if candidate.to_string_lossy() != preview.candidate_locator {
+            return Err(
+                "Proposed library directory changed since Locate Root preview. Preview again."
+                    .to_string(),
+            );
+        }
+        validate_attached_root_overlap(&transaction, &candidate, Some(&preview.root_id))?;
+        ensure_root_can_be_located(&root)?;
+        let current_candidate = canonical_directory(&preview.candidate_locator)?;
+        if current_candidate != candidate {
+            return Err(
+                "Proposed library directory changed since Locate Root preview. Preview again."
+                    .to_string(),
+            );
+        }
+        let updated_at = timestamp();
+        let updated = transaction
+            .execute(
+                "UPDATE library_roots
+                 SET locator_value = ?1, attachment_state = 'attached', updated_at = ?2
+                 WHERE id = ?3 AND label = ?7 AND locator_value = ?4 AND attachment_state = ?5 AND updated_at = ?6",
+                params![
+                    candidate.to_string_lossy(),
+                    updated_at,
+                    preview.root_id,
+                    preview.current_locator,
+                    preview.attachment_state,
+                    preview.updated_at,
+                    preview.label
+                ],
+            )
+            .map_err(db_error)?;
+        if updated != 1 {
+            return Err(
+                "Library root changed since Locate Root preview. Preview again.".to_string(),
+            );
+        }
+        root.locator_value = candidate.to_string_lossy().into_owned();
+        root.attachment_state = "attached".to_string();
+        root.updated_at = updated_at;
+        transaction.commit().map_err(db_error)?;
+        Ok(root.into_dto())
+    }
+
     pub fn list_roots(&self) -> Result<Vec<LibraryRootDto>, String> {
         let connection = self.lock()?;
         let mut statement = connection
@@ -117,6 +263,19 @@ impl LibraryDb {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }
+}
+
+fn ensure_root_can_be_located(root: &RootRow) -> Result<(), String> {
+    if root.locator_kind != "filesystem-directory" {
+        return Err("This library root is not a filesystem directory.".to_string());
+    }
+    if root.attachment_state == "attached" && directory_exists(&root.locator_value) {
+        return Err(
+            "Library root is already attached and available; detach it before locating."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn paths_overlap(path_a: &Path, path_b: &Path) -> bool {
