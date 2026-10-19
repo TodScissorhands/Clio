@@ -1,8 +1,8 @@
 # Clio Product Design Contract
 
-**Status:** Authoritative product-design foundation for future implementation. The overall direction is chosen; this document consolidates it into product and interaction rules.  
-**Direction:** **Balanced Hybrid** — quiet precision, restrained editorial warmth, local-source orientation, content-first reading, and contextual controls. This is the approved direction, not an open selection question.  
-**Implementation authority:** Documentation only; this contract does not authorize production changes.  
+**Status:** Authoritative product-design foundation for future implementation. The overall direction is chosen; this document consolidates it into product and interaction rules.<br>
+**Direction:** **Balanced Hybrid** — quiet precision, restrained editorial warmth, local-source orientation, content-first reading, and contextual controls. This is the approved direction, not an open selection question.<br>
+**Implementation authority:** Documentation only; this contract does not authorize production changes.<br>
 **Evidence labels:** **Current** = verified in source; **Decision** = approved design direction/default; **Implementation guidance** = practical translation; **Known limitation** = behavior not established; **Proposal** = future capability, not current functionality.
 
 ## 1. Authority and decision order
