@@ -2,6 +2,8 @@
 
 This roadmap is intentionally staged. It describes direction, not promises to implement every listed capability immediately.
 
+The approved design direction and its implementation sequence are documented in the [Product Design Contract](product-design-contract.md) and the separate [Product Implementation Roadmap](product-implementation-roadmap.md).
+
 1. **Reader foundation — implemented**
    - Application shell, PDF.js PDF reader, foliate-js EPUB reader, local byte loading, navigation, search foundations, EPUB TOC, themes, responsive behavior, conversion workspace separation, and tokenized native reader opening.
    - The packaged hostile EPUB could not be driven or inspected. Blob-origin Tauri ACL/native command reachability remains unproven; sanitization and CSP are defense-in-depth.
