@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { ReadingState, StoredDocument } from "../storage/domain";
+import type { Collection, LibraryRoot, ReadingState, StoredDocument } from "../storage/domain";
 import {
   deriveContinueDocuments,
+  getLibraryContentState,
   filterDocuments,
   formatReadingProgress,
   formatRelativeTime,
@@ -138,6 +139,67 @@ describe("matchesSearch", () => {
     expect(matchesSearch(docWithMeta, "algorithms")).toBe(true);
     // Non-match
     expect(matchesSearch(docWithMeta, "calculus")).toBe(false);
+  });
+});
+
+const rootForState: LibraryRoot = {
+  id: "root-1",
+  label: "Research",
+  kind: "filesystem-directory",
+  status: "active",
+  createdAt: "",
+  updatedAt: "",
+};
+const collectionForState: Collection = {
+  id: "collection-1",
+  name: "Saved",
+  description: "",
+  documentCount: 0,
+  createdAt: "",
+  updatedAt: "",
+};
+const stateArgs: Parameters<typeof getLibraryContentState>[0] = {
+  catalogLoadState: "ready",
+  roots: [],
+  documents: [],
+  collections: [],
+  visibleDocuments: [],
+  activeScope: { kind: "all" },
+  searchQuery: "",
+};
+
+function contentState(overrides: Partial<typeof stateArgs> = {}) {
+  return getLibraryContentState({ ...stateArgs, ...overrides });
+}
+
+describe("Library catalog and empty-state distinctions", () => {
+  it("distinguishes initial loading, IPC failure, and a successfully empty catalog", () => {
+    expect(contentState({ catalogLoadState: "loading" })).toBe("loading");
+    expect(contentState({ catalogLoadState: "error" })).toBe("error");
+    expect(contentState()).toBe("no-roots");
+  });
+
+  it("distinguishes empty folders, unavailable roots, empty collections, and filtered results", () => {
+    expect(contentState({
+      roots: [rootForState],
+      activeScope: { kind: "root", rootId: rootForState.id },
+    })).toBe("empty-folder");
+    expect(contentState({
+      roots: [{ ...rootForState, status: "missing" }],
+      activeScope: { kind: "root", rootId: rootForState.id },
+    })).toBe("missing-source");
+    expect(contentState({
+      collections: [collectionForState],
+      activeScope: { kind: "collection", collectionId: collectionForState.id },
+    })).toBe("empty-collection");
+    expect(contentState({ searchQuery: "not present" })).toBe("no-results");
+  });
+
+  it("keeps cataloged direct documents visible without configured roots", () => {
+    expect(contentState({
+      documents: [docDirectPdf],
+      visibleDocuments: [docDirectPdf],
+    })).toBe("documents");
   });
 });
 

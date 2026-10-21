@@ -1,7 +1,6 @@
-# Safe PDF Operations Investigation (Milestone 8A)
+# Safe PDF Operations Investigation — Historical Snapshot
 
-## Context & Objectives
-Clio's long-term product vision combines reader, library management, and lightweight document tools without hosted cloud dependencies. Following Milestone 8A's capability architecture, this document records the technical investigation into local, safe PDF manipulation operations for Milestone 8B.
+**Superseded investigation snapshot from the Milestone 8A/8B planning period.** This record preserves the original evaluation and proposed sequence; merge and page extraction are now implemented, so its candidate rankings and “next pass” recommendation are historical, not current plans. Consult [Current Status](../status/current.md) for implementation history and [Roadmap](../roadmap.md) as the sole forward-looking plan. PDF rotation remains deferred as described there. The recorded host/tool observations are not claims of current host verification.
 
 ## Evaluation Criteria
 1. **Local & Offline**: Must operate strictly on the local machine without remote network calls.

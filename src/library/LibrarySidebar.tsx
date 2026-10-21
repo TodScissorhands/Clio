@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
 import type { LibraryScope } from "../navigation/navigation";
+import type { LibraryCatalogLoadState } from "./libraryFilter";
 import {
   Sidebar,
   SidebarContent,
@@ -86,6 +87,7 @@ export interface LibrarySidebarProps {
   roots: LibraryRoot[];
   documents: StoredDocument[];
   collections: Collection[];
+  catalogLoadState: LibraryCatalogLoadState;
   activeScope: LibraryScope;
   onSelectScope: (scope: LibraryScope) => void;
   onAddRoot: () => void;
@@ -100,6 +102,7 @@ export function LibrarySidebar({
   roots,
   documents,
   collections,
+  catalogLoadState,
   activeScope,
   onSelectScope,
   onAddRoot,
@@ -257,7 +260,7 @@ export function LibrarySidebar({
                 >
                   <BookOpenIcon />
                   <span>All Documents</span>
-                  <SidebarMenuBadge>{documents.length}</SidebarMenuBadge>
+                  <SidebarMenuBadge>{catalogLoadState === "ready" ? documents.length : "—"}</SidebarMenuBadge>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
@@ -378,7 +381,13 @@ export function LibrarySidebar({
               })}
               {collections.length === 0 && !isCreatingCollection && (
                 <SidebarMenuItem>
-                  <span className="px-2 py-1 text-xs text-muted-foreground">No collections yet</span>
+                  <span className="px-2 py-1 text-xs text-muted-foreground">
+                    {catalogLoadState === "loading"
+                      ? "Loading collections…"
+                      : catalogLoadState === "error"
+                        ? "Collections unavailable"
+                        : "No collections yet"}
+                  </span>
                 </SidebarMenuItem>
               )}
             </SidebarMenu>
@@ -439,7 +448,12 @@ export function LibrarySidebar({
                           onClick={() => handleScopeSelect({ kind: "root", rootId: root.id })}
                         >
                           <FolderIcon />
-                          <span>{root.label}</span>
+                          <span className="truncate">{root.label}</span>
+                          {root.status !== "active" && (
+                            <span className="shrink-0 text-[10px] text-muted-foreground">
+                              {root.status === "missing" ? "Missing" : "Disabled"}
+                            </span>
+                          )}
                           <SidebarMenuBadge className="right-7">{rootDocs.length}</SidebarMenuBadge>
                         </SidebarMenuButton>
                         <SidebarMenuAction
@@ -464,10 +478,16 @@ export function LibrarySidebar({
               })}
               {roots.length === 0 && (
                 <SidebarMenuItem>
-                  <Button type="button" variant="ghost" size="sm" className="w-full justify-start" onClick={onAddRoot}>
-                    <PlusIcon />
-                    <span>Add a folder</span>
-                  </Button>
+                  {catalogLoadState === "ready" ? (
+                    <Button type="button" variant="ghost" size="sm" className="w-full justify-start" onClick={onAddRoot}>
+                      <PlusIcon />
+                      <span>Add a folder</span>
+                    </Button>
+                  ) : (
+                    <span className="px-2 py-1 text-xs text-muted-foreground" role="status">
+                      {catalogLoadState === "loading" ? "Loading folders…" : "Folder sources unavailable"}
+                    </span>
+                  )}
                 </SidebarMenuItem>
               )}
             </SidebarMenu>

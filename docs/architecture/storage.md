@@ -28,7 +28,7 @@ Rust Storage Core
 
 ## Catalog boundary
 
-SQLite schema version 5 stores library roots, document/source metadata, availability, collection membership, reading state, bookmarks, annotations, and metadata. It never stores document bytes or runtime reader tokens. Reading state and reader artifacts are keyed by opaque document IDs.
+SQLite schema version 6 stores library roots, document/source metadata, availability, collection membership, reading state, bookmarks, annotations, metadata, and root attachment state. It never stores document bytes or runtime reader tokens. Reading state and reader artifacts are keyed by opaque document IDs.
 
 Scans are explicit, scoped to a selected root, and reconcile the catalog with the observed filesystem. Attached nested roots are ownership boundaries: whole-root scans prune their directories, and folder scans whose canonical start path is inside another attached root are rejected. A scan that reports filesystem observation errors reconciles only successfully observed files; it skips missing-document reconciliation, preserves unobserved document state, and does not advance the root's `last_scanned_at`. Missing roots are observations, not catalog mutations. Files absent from a complete observation of an existing scanned root are marked missing; missing records retain their metadata and reading state. “Remove from Library” excludes a record from active catalog views without deleting the source file, and later scans keep it excluded. Removing a document from a collection removes only that membership.
 

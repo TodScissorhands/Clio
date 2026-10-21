@@ -1,8 +1,6 @@
-# Reader Foundation Review
+# Reader Foundation Review — Historical Snapshot
 
-Date: 2026-10-01
-
-A read-only reviewer inspected the completed reader foundation, storage boundary, Rust commands, Tauri configuration, dependencies, responsive shell, and conversion integration. No application source was modified in response to this review. Findings below are reviewer findings pending lead/product-owner triage; they are not claims of independent reproduction during this bootstrap.
+**Superseded review snapshot (2026-10-01); not a current source/status assessment or implementation plan.** Findings below are preserved as submitted and may be stale or superseded by later implementation and investigations. Consult [Current Status](../status/current.md) for the current state, [Reader Hardening Investigation](reader-hardening-investigation.md) for the later security/lifecycle record, and [Roadmap](../roadmap.md) as the sole forward-looking plan. No live session owner is identified here.
 
 ## BLOCKING
 

@@ -116,7 +116,7 @@ Preserve shell route/local-state responsibilities; use a shared title/location h
 4. Retain grid/list, sorting, scope, and existing actions. Distinguish keyboard/pointer focus from selection. Multi-select activates explicit action bar; selection is not inferred from focus.
 5. Show path, metadata, reading position, and relevant actions contextually on focus/selection or via Properties/context menu. Do not make a permanent inspector the default. Preserve document menus and direct keyboard path.
 
-**Known limitation:** catalog arrays start empty and load asynchronously without initial-loaded state; empty-root rendering may confuse initial loading with true empty. This is a source-based risk, not confirmed runtime flash. Confirm IPC and first-load/error behavior before changing presentation. Library cover thumbnails are not PDF page thumbnails.
+**Known limitation:** `useLibraryCatalog` currently distinguishes loading, ready, and error states. The earlier empty-array/initial-loading concern is superseded by the implemented state model; native runtime behavior must be judged from the verification evidence in current status, not inferred from source alone. Library cover thumbnails are not PDF page thumbnails.
 
 **Acceptance:** initial loading is not presented as confirmed empty; zero roots, empty folder/collection, filtered no-results, and initial-load failure have different useful messages/actions; scope remains visible when navigation collapses; metadata/path scope is explicit; focus and selection differ; dialog cancel preserves selection; compact Continue and grid/list retain essential metadata; narrow mode has no clipped source/search/action controls.
 
@@ -128,11 +128,11 @@ Hide only after deliberate idle interval when focus, hover/pointer, Find, Naviga
 
 **Loading concern:** source suggests engine loading after position restoration may lack visible progress; this is not a confirmed runtime defect. Stage 3 verifies transition through engine `ready` or `error` and truthful loading state.
 
-Navigator is a floating solid overlay; it does not reserve width, change page layout, or dim the page. Contents/outline, Bookmarks, and Notes stay distinct. PDF Pages/thumbnails are a proposal, not current functionality. Closing returns to same page.
+The design decision remains a floating solid Navigator overlay; it does not reserve width, change page layout, or dim the page. Contents/outline, Bookmarks, and Notes stay distinct. **Current implementation discrepancy:** Stage 3 worktree currently uses a docked workspace. This conflict is unresolved and requires explicit product approval; do not treat the implementation as an approved design change.
 
-Keep single-page rendering and actual-size 100% initial zoom. Fit Width/Fit Page are future modes. Direct page entry is proposed, not current; accept only integer `1..total`, commit on Enter/field commit, and never silently clamp invalid input. Any thumbnails are lazy, bounded, cancellable, and use an engine-neutral capability; never render/cache every page at full size.
+Direct page entry, Fit Width/Fit Page, and bounded page-thumbnail rendering are present in the current Stage 3 worktree. Their acceptance remains incomplete; see [Current Status](status/current.md). Thumbnails must be lazy, bounded, cancellable, and must not render/cache every page at full size.
 
-**Current limits:** outline/TOC navigation, page turns, manual zoom, page-level search/counts, bookmarks, and annotation/note-list UI exist. PDF search has no in-page match geometry. Current selection uses temporary text preview, not PDF.js TextLayer. `pdf-page-text` stores page plus selected text and is non-durable. `PdfEngine` receives annotations but does not render them. Do not claim stored PDF highlights restore visually.
+**Current limits:** outline/TOC navigation, page turns, manual zoom, page-level search/counts, bookmarks, and annotation/note-list UI exist. PDF search has no in-page match geometry. The legacy selection pathway uses a temporary text preview, but that preview is suppressed; actual PDF text selection/copy is not currently provided by it, and PDF.js TextLayer is not integrated. `pdf-page-text` stores page plus selected text and is non-durable. `PdfEngine` receives annotations but does not render them. Do not claim stored PDF highlights restore visually.
 
 **Acceptance:** page unobstructed by permanent chrome; explicit reveal works keyboard and pointer/touch; hidden controls discoverable; focus/hover/open-layer prevents premature hiding; Escape follows stack; Find/Navigator do not move page; page pixels unaffected by theme/overlays; progress available to assistive tech and after reveal; existing outline, position restore, page turns, bookmarks, errors remain usable.
 
@@ -142,7 +142,7 @@ Keep single-page rendering and actual-size 100% initial zoom. Fit Width/Fit Page
 
 Keep Foliate reflowable/paginated model and CFI progress/annotation semantics. Contents is chapter navigation, not page-thumbnail rail. Font family/size, line height, paragraph spacing, content width, and light/sepia/dark theme are EPUB-specific. Do not hide EPUB controls merely because PDF controls are transient. Compact toolbar placement can be adjusted for concrete width/focus/discoverability problem; format distinction remains settled.
 
-**Current:** Foliate TOC, relocation/CFI, display settings, Find, and CFI-backed annotation overlays exist; ergonomic behavior has not been revalidated by this synthesis.
+**Current:** Foliate TOC, relocation/CFI, display settings, Find, and CFI-backed annotation overlays exist. Current status records a prior native exercise of EPUB theme/font/Find/selection/restore; this contract has not independently revalidated that evidence. Cross-surface theme/background integration remains a candidate for the consolidated UI consistency review in the canonical roadmap.
 
 **Acceptance:** Contents, Find, chapter/progress, typography/theme are pointer/keyboard/narrow-window accessible; EPUB theme changes content only, not shell or PDF; CFI position and stored CFI highlights restore; settings are not confused with PDF page numbers; no Foliate loading/security/iframe boundary changes in visual work.
 
@@ -176,22 +176,22 @@ There is **no active Settings screen or route**. `.settings-view` CSS is not pro
 |---|---|---|
 | Tauri 2, React/TypeScript, Rust, SQLite; shared reader shell/engine boundary | Existing | Preserve; no framework/database/universal renderer replacement. |
 | Library roots/folders, collections, grid/list, sorting, metadata/path search, Continue, selection/context | Existing | Preserve behavior; refine hierarchy/state. Search is not body search. |
-| Library initial loading distinct from empty | Partial/source concern | Confirm IPC behavior; arrays currently initialize empty without loaded state. |
+| Library initial loading distinct from empty | Implemented state model | `useLibraryCatalog` tracks loading/ready/error; preserve truthful messages and refer to current status for recorded runtime evidence. |
 | App System/Light/Dark theme | Existing | App-level; owns application/shared chrome under target theme contract. |
 | Reader Display theme and EPUB typography | Existing, separately scoped in source | Keep EPUB content theme independent from app chrome; reconcile reader-chrome coupling during implementation. |
 | Quick Open/shortcut reference | Existing, Library-scoped | Keep scope honest; no full reader-wide command palette implied. |
 | PDF outline, page turns, manual zoom, progress, page-level Find count | Existing | Retain; present appropriately in controls/Navigator. |
-| PDF direct page field, Fit Width/Fit Page, page thumbnails | Absent | Future PDF controls stage; keep one-page renderer. |
-| PDF TextLayer, selectable page text, geometry search marks | Absent | Separate PDF.js technical stage; preview is not TextLayer. |
+| PDF direct page field, Fit Width/Fit Page, bounded page thumbnails | Present in current Stage 3 worktree; acceptance incomplete | Verify per current status; preserve one-page main renderer and bounded/cancellable thumbnails. |
+| PDF.js TextLayer, selectable page text, geometry search marks | Absent | Separate future capability; current temporary text preview is suppressed. |
 | PDF stored notes/annotations | Partial | Records/list/note operations exist; visible highlight restore is not durable or implemented. Preserve truth/legacy notes. |
 | EPUB TOC, CFI progress/selection/annotation overlay, Find, display settings | Existing | Preserve Foliate/CFI; align presentation only. |
 | Global palette, custom shortcut registry, Settings page | Absent/future | Not required; essential workflows remain visible. |
 | Conversion, PDF merge, extraction | Existing | Preserve supported operations/errors; no safe cancellation claim without native support. |
 | Prototype-only controls/data | Synthetic | Design evidence only; not production functionality. |
 
-## 7. Seven implementation stages and gates
+## 7. Historical implementation acceptance criteria
 
-This is a bounded future plan, not authorization to start. Each stage is reviewable and retains current functionality. Adjacent stages may be combined only when dependencies and regression scope remain clear.
+The following stage criteria are retained as historical acceptance records, not as a current sequence or a second roadmap. Use [Clio Roadmap](roadmap.md) for forward-looking commitments and [Current Status](status/current.md) for implementation and verification evidence.
 
 ### Stage 1 — Shared visual foundation
 
@@ -255,10 +255,10 @@ The Phase 5.4 experiment did **not** test child-frame isolation. This is a limit
 
 ## 9. Approved decisions, proposals, limitations, and risks
 
-- **Approved decisions:** Balanced Hybrid is selected; warm blue interaction accent direction, paired light/dark development, solid surfaces, content-first PDF controls with explicit reveal, compact persistent EPUB controls, scoped themes, PDF page-integrity invariant, engine ownership boundaries, and seven staged gates. A/B/D is not an open selection question.
-- **Proposed improvements, not existing functionality:** PDF direct page entry, Fit Width/Fit Page, PDF Pages thumbnails, PDF.js TextLayer/geometry search, durable PDF restoration after locator approval. Global command palette, custom shortcut registry, Settings page, full-text index, and new preference persistence are not required or authorized here.
-- **Known limitations:** PDF `pdf-page-text` locator is non-durable and PDF annotations are not visually restored; PDF search has counts but no in-page match geometry; dialog focus behavior is not established by static review; Library and reader loading concerns are source risks, not confirmed runtime defects; EPUB ergonomics were not runtime-revalidated by the synthesis.
-- **Unverified risks:** contrast/accessibility/performance results, Tauri WebView behaviors not actually smoke-tested, exact theme combinations, focus trapping/restoration, initial loading transitions, and security boundaries without direct experiment. Never present unverified as guaranteed.
+- **Approved decisions:** Balanced Hybrid is selected; warm blue interaction accent direction, paired light/dark development, solid surfaces, content-first PDF controls with explicit reveal, compact persistent EPUB controls, scoped themes, PDF page-integrity invariant, engine ownership boundaries, and the PDF locator approval gate. A/B/D is not an open selection question.
+- **Proposed improvements, not existing functionality:** PDF.js TextLayer/geometry search, durable PDF restoration after locator approval. Global command palette, custom shortcut registry, Settings page, full-text index, and new preference persistence are not required or authorized here.
+- **Known limitations:** PDF `pdf-page-text` locator is non-durable and PDF annotations are not visually restored; PDF search has counts but no in-page match geometry; dialog focus behavior is not established by static review; the Navigator currently docks despite the floating-overlay design decision, and the conflict is unresolved; Stage 3 acceptance is incomplete.
+- **Unverified risks:** contrast/accessibility/performance results, Tauri WebView behaviors not actually smoke-tested, exact theme combinations, focus trapping/restoration, and security boundaries without direct experiment. Never present unverified as guaranteed.
 
 ## 10. Flexibility and change policy
 
@@ -268,7 +268,7 @@ Routine refinements need no new design-selection round. Keep changes reviewable,
 
 ## 11. Reconciled history and repository references
 
-This contract resolves prior differences: the Linear-reference study/prototype compared A/B/D without selection; the product owner direction now selects Balanced Hybrid. PDF UX's persistent PDF-only second row is superseded by content-first transient controls with visible reveal. Theme relationship, accent direction, PDF progress default, and compact persistent EPUB affordance are settled here; exact values remain flexible. Preserve Library behavior, not a frozen hierarchy. Quick Open, Settings, thumbnails, page entry, fit modes, TextLayer, geometry highlights, and durable PDF restoration remain proposals bounded by the capability truth table.
+This contract resolves prior differences: the Linear-reference study/prototype compared A/B/D without selection; the product owner direction now selects Balanced Hybrid. PDF UX's persistent PDF-only second row is superseded by content-first transient controls with visible reveal. Theme relationship, accent direction, PDF progress default, and compact persistent EPUB affordance are settled here; exact values remain flexible. Preserve Library behavior, not a frozen hierarchy. PDF direct page entry, fit modes, and bounded thumbnails are present in the current Stage 3 worktree but not yet accepted. TextLayer, geometry highlights, and durable PDF restoration remain future; see the canonical roadmap for current commitments and candidate design-review work.
 
 Useful tracked references:
 

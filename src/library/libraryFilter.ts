@@ -12,6 +12,20 @@ export type SortOption =
   | "size-asc"
   | "format";
 
+export type LibraryCatalogLoadState = "loading" | "ready" | "error";
+
+export type LibraryContentState =
+  | "loading"
+  | "error"
+  | "documents"
+  | "no-roots"
+  | "empty-library"
+  | "empty-folder"
+  | "missing-source"
+  | "empty-collection"
+  | "missing-collection"
+  | "no-results";
+
 export function getDocumentMonogram(title: string, format: string): string {
   const initials = title
     .replace(/[^\p{L}\s]/gu, "")
@@ -97,6 +111,40 @@ export function matchesSearch(document: StoredDocument, query: string): boolean 
   }
 
   return false;
+}
+
+export function getLibraryContentState({
+  catalogLoadState,
+  roots,
+  documents,
+  collections,
+  visibleDocuments,
+  activeScope,
+  searchQuery,
+}: {
+  catalogLoadState: LibraryCatalogLoadState;
+  roots: LibraryRoot[];
+  documents: StoredDocument[];
+  collections: Collection[];
+  visibleDocuments: StoredDocument[];
+  activeScope: LibraryScope;
+  searchQuery: string;
+}): LibraryContentState {
+  if (catalogLoadState === "loading") return "loading";
+  if (catalogLoadState === "error") return "error";
+  if (visibleDocuments.length > 0) return "documents";
+  if (searchQuery.trim() || activeScope.kind === "search") return "no-results";
+  if (activeScope.kind === "collection") {
+    return collections.some((collection) => collection.id === activeScope.collectionId)
+      ? "empty-collection"
+      : "missing-collection";
+  }
+  if (activeScope.kind === "root" || activeScope.kind === "folder") {
+    const root = roots.find((item) => item.id === activeScope.rootId);
+    return !root || root.status !== "active" ? "missing-source" : "empty-folder";
+  }
+  if (roots.length === 0 && documents.length === 0) return "no-roots";
+  return "empty-library";
 }
 
 export function matchesFormat(document: StoredDocument, filter: FormatFilterOption): boolean {

@@ -86,7 +86,7 @@ export function DocumentGrid({
                   checked={isSelected}
                   onClick={(event) => onToggleSelect(doc.record.id, event.shiftKey, true)}
                   aria-label={isSelected ? `Deselect ${displayTitle}` : `Select ${displayTitle}`}
-                  className="size-[21px] rounded-[4px] border-2 border-neutral-800 bg-white text-neutral-950 shadow-sm data-[state=checked]:border-neutral-900 data-[state=checked]:bg-neutral-900 data-[state=checked]:text-white dark:border-neutral-300 dark:bg-neutral-900 dark:data-[state=checked]:border-neutral-100 dark:data-[state=checked]:bg-neutral-100 dark:data-[state=checked]:text-neutral-950"
+                  className="size-[21px] rounded-sm border-2 border-input bg-background text-primary-foreground shadow-sm data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
                 />
               </div>
 

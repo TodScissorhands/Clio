@@ -22,7 +22,8 @@ Reader document
 
 `ReaderShell` owns common reader chrome and state: navigation controls, progress, search controls, contents panel, themes, keyboard interaction, loading/error presentation, and responsive layout.
 
-`PdfEngine` owns PDF.js worker setup, PDF loading, page rendering, page navigation, zoom, current-page text extraction, and basic search.
+`PdfEngine` owns PDF.js worker setup, PDF loading, page rendering and navigation, zoom/fit calculations, current-page text extraction, basic search, and the current thumbnail-rendering lifecycle. Stage 3 additions are present in the working tree but remain subject to acceptance checks in current status.
+PDF.js `TextLayer` is not integrated. The current temporary text preview is suppressed; PDF `pdf-page-text` locators are non-durable, and annotations are not visually restored.
 
 `EpubEngine` owns EPUB ZIP resource access, foliate view creation, pagination, navigation, TOC extraction, basic search, theme application, restrictive CSP/resource handling, and lifecycle cleanup.
 

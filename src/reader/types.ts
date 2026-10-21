@@ -21,6 +21,9 @@ export { isSameReadingPosition, validateAnnotationLocator } from "../storage/dom
 
 export type ReaderFormat = "pdf" | "epub" | "txt" | "md";
 export type ReaderTheme = "light" | "sepia" | "dark";
+
+export type ReaderZoomMode = "manual" | "fit-page" | "fit-width";
+
 export type ReaderFontFamily = "book" | "serif" | "sans" | "mono";
 export type ReaderLineHeight = "book" | "1.4" | "1.6" | "1.8" | "2";
 export type ReaderParagraphSpacing = "book" | "0.5" | "1" | "1.5";
@@ -76,18 +79,23 @@ export type ReaderSearchResult = {
   label: string;
 };
 
+export type PdfPageThumbnail = { page: number; dataUrl?: string; error?: true };
+
 export type ReaderEngineHandle = {
   previous(): void | Promise<void>;
   next(): void | Promise<void>;
   zoomIn(): void | Promise<void>;
   zoomOut(): void | Promise<void>;
   resetZoom?(): void | Promise<void>;
+  fitPage?(): void | Promise<void>;
+  fitWidth?(): void | Promise<void>;
   search(query: string): Promise<ReaderSearchResult>;
   nextSearchResult?(): Promise<ReaderSearchResult>;
   previousSearchResult?(): Promise<ReaderSearchResult>;
   clearSearch?(): void | Promise<void>;
   goToToc(item: ReaderTocItem): void | Promise<void>;
   goToPosition?(position: ReadingPosition): void | Promise<void>;
+  setPageThumbnailDemand?(pages: readonly number[]): void;
 };
 
 export type ReaderEngineProps = {
@@ -100,7 +108,9 @@ export type ReaderEngineProps = {
   onProgress(progress: ReaderProgress): void;
   onPositionChange?(position: ReadingPosition): void;
   onZoomChange?(zoomPercent: number): void;
+  onZoomModeChange?(mode: ReaderZoomMode): void;
   onToc(items: ReaderTocItem[]): void;
+  onPageThumbnails?(thumbnails: readonly PdfPageThumbnail[]): void;
   onState(state: "loading" | "ready" | "error", message?: string): void;
   onTextSelection?(selection: TextSelection): void;
   annotations?: Annotation[];

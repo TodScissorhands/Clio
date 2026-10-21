@@ -12,12 +12,17 @@ import {
   type ReaderLineHeight,
   type ReaderParagraphSpacing,
   type ReaderTheme,
+  type ReaderZoomMode,
 } from "./types";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /** Milliseconds of inactivity before the reader topbar auto-hides. */
 export const TOPBAR_HIDE_DELAY = 2500;
+
+export function shouldHideReaderControls(format: string | undefined, status: string): boolean {
+  return format === "pdf" && status === "ready";
+}
 
 // ── Theme persistence helpers ─────────────────────────────────────────────────
 
@@ -99,6 +104,92 @@ export function getReaderZoomLimits(format: string | undefined): ReaderZoomLimit
   if (format === "pdf") return PDF_ZOOM_LIMITS;
   if (format === "txt" || format === "md") return REFLOWABLE_ZOOM_LIMITS;
   return null;
+}
+
+
+/** Parse a strictly positive, in-range PDF page number without clamping. */
+export function parsePdfPageNumber(value: string, pageCount: number): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(pageCount) || pageCount < 1) return null;
+  const page = Number(trimmed);
+  return Number.isSafeInteger(page) && page >= 1 && page <= pageCount ? page : null;
+}
+
+/** Submit a validated PDF page through the reader's existing position boundary. */
+export function submitPdfPageNavigation(
+  value: string,
+  pageCount: number,
+  navigate: (position: { kind: "pdf-page"; page: number }) => void
+): boolean {
+  const page = parsePdfPageNumber(value, pageCount);
+  if (page === null) return false;
+  navigate({ kind: "pdf-page", page });
+  return true;
+}
+
+export function pdfPageInputKeyAction(key: string): "submit" | "cancel" | null {
+  if (key === "Enter") return "submit";
+  if (key === "Escape") return "cancel";
+  return null;
+}
+
+/**
+ * Compute PDF.js scale from its unscaled (rotation-aware) viewport and the
+ * available content box. Fit Page can be below the manual zoom floor.
+ */
+export function calculatePdfFitScale(
+  page: { width: number; height: number },
+  available: { width: number; height: number },
+  mode: Exclude<ReaderZoomMode, "manual">,
+  limits: ReaderZoomLimits = PDF_ZOOM_LIMITS
+): number | null {
+  if (
+    !Number.isFinite(page.width) || page.width <= 0 ||
+    !Number.isFinite(page.height) || page.height <= 0 ||
+    !Number.isFinite(available.width) || available.width <= 0 ||
+    !Number.isFinite(available.height) || available.height <= 0
+  ) return null;
+
+  const fitWidth = available.width / page.width;
+  const requested = mode === "fit-width"
+    ? fitWidth
+    : Math.min(fitWidth, available.height / page.height);
+  const maximum = limits.max / 100;
+  if (mode === "fit-page") return Math.min(requested, maximum);
+  return Math.max(limits.min / 100, Math.min(requested, maximum));
+}
+
+export type PdfZoomState = {
+  scale: number;
+  mode: ReaderZoomMode;
+};
+
+export type PdfZoomAction =
+  | { type: "fit"; mode: Exclude<ReaderZoomMode, "manual">; scale: number }
+  | { type: "step"; direction: -1 | 1 }
+  | { type: "reset" };
+
+/** Keep PDF scale and active fit/manual mode in one transition source. */
+export function transitionPdfZoomState(
+  current: PdfZoomState,
+  action: PdfZoomAction,
+  limits: ReaderZoomLimits = PDF_ZOOM_LIMITS
+): PdfZoomState {
+  if (action.type === "fit") {
+    return Number.isFinite(action.scale) && action.scale > 0
+      ? { scale: action.scale, mode: action.mode }
+      : current;
+  }
+  if (action.type === "reset") return { scale: 1, mode: "manual" };
+
+  if (current.mode === "fit-page" && current.scale < limits.min / 100 && action.direction === -1) {
+    return { scale: current.scale, mode: "manual" };
+  }
+  const next = Number((current.scale + action.direction * limits.step / 100).toFixed(2));
+  return {
+    scale: Math.max(limits.min / 100, Math.min(limits.max / 100, next)),
+    mode: "manual",
+  };
 }
 
 /** Calculate text-reader progress without treating a non-scrollable document as already finished. */

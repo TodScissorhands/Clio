@@ -112,6 +112,8 @@ function App() {
     roots,
     documents,
     collections,
+    catalogLoadState,
+    retryCatalog,
     refreshLibrary,
     addRoot: addLibraryRootToCatalog,
     createCollection,
@@ -741,6 +743,7 @@ function App() {
           roots={roots}
           documents={documents}
           collections={collections}
+          catalogLoadState={catalogLoadState}
           activeScope={libraryScope}
           onSelectScope={handleLibraryScopeSelect}
           searchQuery={searchQuery}
@@ -755,6 +758,10 @@ function App() {
           pendingRootId={pendingRootId}
           message={libraryMessage}
           error={libraryError}
+          onRetryCatalog={() => {
+            setLibraryError("");
+            void retryCatalog();
+          }}
           onAddRoot={() => void addRoot()}
           onScanRoot={(rootId, relativePath) => void scanRoot(rootId, relativePath)}
           onRemoveRoot={(rootId) => void removeRoot(rootId)}

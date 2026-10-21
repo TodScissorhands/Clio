@@ -6,9 +6,21 @@ import type {
   ReaderEngineProps,
   ReaderSearchResult,
   ReaderTocItem,
+  ReaderZoomMode,
   TextSelection,
 } from "./types";
-import { getReaderZoomLimits } from "./readerLogic";
+import {
+  calculatePdfFitScale,
+  getReaderZoomLimits,
+  transitionPdfZoomState,
+  type PdfZoomState,
+} from "./readerLogic";
+import {
+  PDF_THUMBNAIL_HEIGHT,
+  PDF_THUMBNAIL_WIDTH,
+  PdfThumbnailScheduler,
+} from "./pdfThumbnailScheduler";
+import { cancelPdfRenderTask, runPdfRenderTask } from "./pdfRenderLifecycle";
 
 const PDF_ZOOM_LIMITS = getReaderZoomLimits("pdf")!;
 
@@ -27,6 +39,16 @@ type PdfPageRef = {
 
 function pageText(page: PDFPageProxy) {
   return page.getTextContent().then((content) => content.items.map((item) => ("str" in item ? item.str : "")).join(" "));
+}
+
+function getPdfContentBox(element: HTMLElement) {
+  const style = globalThis.getComputedStyle(element);
+  const paddingX = Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+  const paddingY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+  return {
+    width: Math.max(0, element.clientWidth - (Number.isFinite(paddingX) ? paddingX : 0)),
+    height: Math.max(0, element.clientHeight - (Number.isFinite(paddingY) ? paddingY : 0)),
+  };
 }
 
 async function resolveDestination(pdf: PDFDocumentProxy, destination: string | unknown[] | null | undefined) {
@@ -72,10 +94,11 @@ export function PdfEngine({
   onProgress,
   onPositionChange,
   onZoomChange,
+  onZoomModeChange,
   onToc,
   onState,
   onTextSelection,
-  annotations: _annotations,
+  onPageThumbnails,
 }: ReaderEngineProps & { engineRef: React.RefObject<ReaderEngineHandle | null> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
@@ -84,20 +107,53 @@ export function PdfEngine({
   const tocDestinationsRef = useRef<Map<string, number>>(new Map());
   const loadTokenRef = useRef(0);
   const pageSequenceRef = useRef(0);
+  const pageRef = useRef(1);
+  const renderedPageRef = useRef<number | null>(null);
+  const zoomStateRef = useRef<PdfZoomState>({ scale: 1, mode: "manual" });
   const [page, setPage] = useState(1);
-  const [pageCount, setPageCount] = useState(0);
-  const [zoom, setZoom] = useState(1);
   const [text, setText] = useState("");
   const searchMatchesRef = useRef<number[]>([]);
   const currentMatchIdxRef = useRef<number>(-1);
   const searchTokenRef = useRef(0);
-  const cancelRenderTask = useCallback(() => {
-    const renderTask = renderTaskRef.current;
-    renderTaskRef.current = null;
-    if (!renderTask) return null;
-    renderTask.cancel();
-    return renderTask.promise.catch(() => undefined);
-  }, []);
+  const onPageThumbnailsRef = useRef(onPageThumbnails);
+  onPageThumbnailsRef.current = onPageThumbnails;
+  const thumbnailSchedulerRef = useRef<PdfThumbnailScheduler | null>(null);
+  if (!thumbnailSchedulerRef.current) {
+    thumbnailSchedulerRef.current = new PdfThumbnailScheduler(async (pageNumber, signal) => {
+      const pdf = pdfRef.current;
+      const token = loadTokenRef.current;
+      if (!pdf) throw new Error("PDF is not available.");
+      const pdfPage = await pdf.getPage(pageNumber);
+      if (signal.aborted || token !== loadTokenRef.current || pdf !== pdfRef.current) throw new Error("Thumbnail cancelled.");
+      const base = pdfPage.getViewport({ scale: 1 });
+      const scale = Math.min(PDF_THUMBNAIL_WIDTH / base.width, PDF_THUMBNAIL_HEIGHT / base.height);
+      const viewport = pdfPage.getViewport({ scale });
+      const canvas = globalThis.document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Could not create thumbnail canvas.");
+      const task = pdfPage.render({ canvas, canvasContext: context, viewport });
+      const cancel = () => task.cancel();
+      signal.addEventListener("abort", cancel, { once: true });
+      try {
+        await task.promise;
+        if (signal.aborted || token !== loadTokenRef.current || pdf !== pdfRef.current) throw new Error("Thumbnail cancelled.");
+        return canvas.toDataURL("image/jpeg", 0.65);
+      } finally {
+        signal.removeEventListener("abort", cancel);
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    }, (thumbnails) => onPageThumbnailsRef.current?.(thumbnails));
+  }
+  const thumbnailScheduler = thumbnailSchedulerRef.current;
+  const updateZoomState = useCallback((next: PdfZoomState) => {
+    zoomStateRef.current = next;
+    onZoomChange?.(Math.round(next.scale * 100));
+    onZoomModeChange?.(next.mode);
+  }, [onZoomChange, onZoomModeChange]);
+  const cancelRenderTask = useCallback(() => cancelPdfRenderTask(renderTaskRef), []);
 
   const disposePdf = useCallback(async () => {
     const renderSettled = cancelRenderTask();
@@ -137,30 +193,49 @@ export function PdfEngine({
       canvasContext: context,
       viewport: scaledViewport,
     });
-    try {
-      await renderTask.promise;
-      return active();
-    } catch (error) {
-      if (error instanceof Error && (error.name === "RenderingCancelledException" || error.message.toLowerCase().includes("cancel"))) return false;
-      throw error;
-    } finally {
-      if (renderTaskRef.current === renderTask) renderTaskRef.current = null;
-    }
+    return runPdfRenderTask(renderTaskRef, renderTask, active);
   }, [cancelRenderTask]);
 
-  const loadPage = useCallback(async (pdf: PDFDocumentProxy, nextPage: number, scale: number, token: number) => {
+  const loadPage = useCallback(async (pdf: PDFDocumentProxy, nextPage: number, token: number) => {
     if (token !== loadTokenRef.current) return false;
     const sequence = ++pageSequenceRef.current;
     const active = () => token === loadTokenRef.current && sequence === pageSequenceRef.current;
     if (!active()) return false;
+    pageRef.current = nextPage;
     setPage(nextPage);
     const pdfPage = await pdf.getPage(nextPage);
     if (!active()) return false;
     const nextText = await pageText(pdfPage);
     if (!active()) return false;
     setText(nextText);
-    if (!await renderPage(pdf, nextPage, scale, token, sequence)) return false;
+
+    let renderScale = zoomStateRef.current.scale;
+    const mode = zoomStateRef.current.mode;
+    if (mode !== "manual") {
+      const container = canvasRef.current?.parentElement;
+      if (container) {
+        const baseViewport = pdfPage.getViewport({ scale: 1 });
+        const fitScale = calculatePdfFitScale(
+          { width: baseViewport.width, height: baseViewport.height },
+          getPdfContentBox(container),
+          mode,
+          PDF_ZOOM_LIMITS
+        );
+        if (fitScale !== null) {
+          const nextZoomState = transitionPdfZoomState(
+            zoomStateRef.current,
+            { type: "fit", mode, scale: fitScale },
+            PDF_ZOOM_LIMITS
+          );
+          renderScale = nextZoomState.scale;
+          updateZoomState(nextZoomState);
+        }
+      }
+    }
+
+    if (!await renderPage(pdf, nextPage, renderScale, token, sequence)) return false;
     if (!active()) return false;
+    renderedPageRef.current = nextPage;
     onProgress({ current: nextPage, total: pdf.numPages, fraction: nextPage / pdf.numPages });
     onPositionChange?.({
       kind: "pdf-page",
@@ -168,10 +243,12 @@ export function PdfEngine({
       progression: nextPage / pdf.numPages,
     });
     return true;
-  }, [onPositionChange, onProgress, renderPage]);
+  }, [onPositionChange, onProgress, renderPage, updateZoomState]);
 
   useEffect(() => {
     const token = ++loadTokenRef.current;
+    thumbnailScheduler.setDocument();
+    onPageThumbnailsRef.current?.([]);
     ++pageSequenceRef.current;
     let cancelled = false;
     const active = () => !cancelled && token === loadTokenRef.current;
@@ -179,10 +256,10 @@ export function PdfEngine({
     onToc([]);
     tocDestinationsRef.current.clear();
     setText("");
+    pageRef.current = 1;
+    renderedPageRef.current = null;
     setPage(1);
-    setPageCount(0);
-    setZoom(1);
-    onZoomChange?.(100);
+    updateZoomState(transitionPdfZoomState(zoomStateRef.current, { type: "reset" }, PDF_ZOOM_LIMITS));
     searchMatchesRef.current = [];
     currentMatchIdxRef.current = -1;
     searchTokenRef.current += 1;
@@ -205,7 +282,6 @@ export function PdfEngine({
         return;
       }
       pdfRef.current = pdf;
-      setPageCount(pdf.numPages);
       try {
         const outline = await pdf.getOutline();
         if (outline) {
@@ -226,7 +302,7 @@ export function PdfEngine({
         initialPosition.page <= pdf.numPages
           ? initialPosition.page
           : 1;
-      if (await loadPage(pdf, startPage, 1, token) && active()) onState("ready", `PDF.js loaded ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}.`);
+      if (await loadPage(pdf, startPage, token) && active()) onState("ready", `PDF.js loaded ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}.`);
     };
 
     void load().catch((error: unknown) => {
@@ -238,51 +314,129 @@ export function PdfEngine({
       ++loadTokenRef.current;
       ++pageSequenceRef.current;
       searchTokenRef.current += 1;
-      searchMatchesRef.current = [];
-      currentMatchIdxRef.current = -1;
+      thumbnailScheduler.cancelAll();
       void disposePdf();
     };
-  }, [document, disposePdf, initialPosition, loadPage, onProgress, onState, onToc, onZoomChange]);
+  }, [document, disposePdf, initialPosition, loadPage, onProgress, onState, onToc, updateZoomState, thumbnailScheduler]);
+
+
+  const applyFitMode = useCallback(async (requestedMode?: Exclude<ReaderZoomMode, "manual">) => {
+    const mode = requestedMode ?? zoomStateRef.current.mode;
+    if (mode === "manual") return;
+    if (requestedMode) {
+      updateZoomState({ ...zoomStateRef.current, mode: requestedMode });
+    }
+    const pdf = pdfRef.current;
+    const container = canvasRef.current?.parentElement;
+    if (!pdf || !container) return;
+
+    const token = loadTokenRef.current;
+    const pageNumber = pageRef.current;
+    const sequence = ++pageSequenceRef.current;
+    const active = () =>
+      token === loadTokenRef.current &&
+      sequence === pageSequenceRef.current &&
+      pageNumber === pageRef.current &&
+      mode === zoomStateRef.current.mode;
+    const pdfPage = await pdf.getPage(pageNumber);
+    if (!active()) return;
+    const baseViewport = pdfPage.getViewport({ scale: 1 });
+    const fitScale = calculatePdfFitScale(
+      { width: baseViewport.width, height: baseViewport.height },
+      getPdfContentBox(container),
+      mode,
+      PDF_ZOOM_LIMITS
+    );
+    if (fitScale === null) return;
+    const nextZoomState = transitionPdfZoomState(
+      zoomStateRef.current,
+      { type: "fit", mode, scale: fitScale },
+      PDF_ZOOM_LIMITS
+    );
+    updateZoomState(nextZoomState);
+    if (!await renderPage(pdf, pageNumber, nextZoomState.scale, token, sequence) || !active()) return;
+    if (renderedPageRef.current !== pageNumber) {
+      renderedPageRef.current = pageNumber;
+      onProgress({ current: pageNumber, total: pdf.numPages, fraction: pageNumber / pdf.numPages });
+      onPositionChange?.({
+        kind: "pdf-page",
+        page: pageNumber,
+        progression: pageNumber / pdf.numPages,
+      });
+    }
+  }, [onPositionChange, onProgress, renderPage, updateZoomState]);
+
+  useEffect(() => {
+    const container = canvasRef.current?.parentElement;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    let previousWidth = -1;
+    let previousHeight = -1;
+    const observer = new ResizeObserver(() => {
+      const available = getPdfContentBox(container);
+      if (available.width === previousWidth && available.height === previousHeight) return;
+      previousWidth = available.width;
+      previousHeight = available.height;
+      if (zoomStateRef.current.mode === "manual" || frame !== 0) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (zoomStateRef.current.mode !== "manual") void applyFitMode();
+      });
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [applyFitMode]);
 
   useImperativeHandle(engineRef, () => ({
     previous: async () => {
       const pdf = pdfRef.current;
       const token = loadTokenRef.current;
-      if (!pdf || page <= 1) return;
-      await loadPage(pdf, page - 1, zoom, token);
+      if (!pdf || pageRef.current <= 1) return;
+      await loadPage(pdf, pageRef.current - 1, token);
     },
     next: async () => {
       const pdf = pdfRef.current;
       const token = loadTokenRef.current;
-      if (!pdf || page >= pageCount) return;
-      await loadPage(pdf, page + 1, zoom, token);
+      if (!pdf || pageRef.current >= pdf.numPages) return;
+      await loadPage(pdf, pageRef.current + 1, token);
     },
     zoomOut: async () => {
       const pdf = pdfRef.current;
-      const nextZoom = Math.max(PDF_ZOOM_LIMITS.min / 100, Number((zoom - PDF_ZOOM_LIMITS.step / 100).toFixed(2)));
+      const nextState = transitionPdfZoomState(
+        zoomStateRef.current,
+        { type: "step", direction: -1 },
+        PDF_ZOOM_LIMITS
+      );
+      updateZoomState(nextState);
       const token = loadTokenRef.current;
       const sequence = ++pageSequenceRef.current;
-      setZoom(nextZoom);
-      onZoomChange?.(Math.round(nextZoom * 100));
-      if (pdf) await renderPage(pdf, page, nextZoom, token, sequence);
+      if (pdf) await renderPage(pdf, pageRef.current, nextState.scale, token, sequence);
     },
     zoomIn: async () => {
       const pdf = pdfRef.current;
-      const nextZoom = Math.min(PDF_ZOOM_LIMITS.max / 100, Number((zoom + PDF_ZOOM_LIMITS.step / 100).toFixed(2)));
+      const nextState = transitionPdfZoomState(
+        zoomStateRef.current,
+        { type: "step", direction: 1 },
+        PDF_ZOOM_LIMITS
+      );
+      updateZoomState(nextState);
       const token = loadTokenRef.current;
       const sequence = ++pageSequenceRef.current;
-      setZoom(nextZoom);
-      onZoomChange?.(Math.round(nextZoom * 100));
-      if (pdf) await renderPage(pdf, page, nextZoom, token, sequence);
+      if (pdf) await renderPage(pdf, pageRef.current, nextState.scale, token, sequence);
     },
     resetZoom: async () => {
       const pdf = pdfRef.current;
+      const nextState = transitionPdfZoomState(zoomStateRef.current, { type: "reset" }, PDF_ZOOM_LIMITS);
+      updateZoomState(nextState);
       const token = loadTokenRef.current;
       const sequence = ++pageSequenceRef.current;
-      setZoom(1);
-      onZoomChange?.(100);
-      if (pdf) await renderPage(pdf, page, 1, token, sequence);
+      if (pdf) await renderPage(pdf, pageRef.current, nextState.scale, token, sequence);
     },
+    fitPage: () => applyFitMode("fit-page"),
+    fitWidth: () => applyFitMode("fit-width"),
     search: async (query: string): Promise<ReaderSearchResult> => {
       const pdf = pdfRef.current;
       const token = loadTokenRef.current;
@@ -320,12 +474,12 @@ export function PdfEngine({
         return { count: 0, currentIndex: 0, label: "No matches found" };
       }
 
-      let matchIndex = matches.findIndex((pageNum) => pageNum >= page);
+      let matchIndex = matches.findIndex((pageNum) => pageNum >= pageRef.current);
       if (matchIndex === -1) matchIndex = 0;
       currentMatchIdxRef.current = matchIndex;
       const targetPage = matches[matchIndex];
-      if (targetPage !== page && token === loadTokenRef.current) {
-        await loadPage(pdf, targetPage, zoom, token);
+      if (targetPage !== pageRef.current && token === loadTokenRef.current) {
+        await loadPage(pdf, targetPage, token);
       }
       return {
         count: matches.length,
@@ -344,8 +498,8 @@ export function PdfEngine({
       if (nextIndex >= matches.length) nextIndex = 0;
       currentMatchIdxRef.current = nextIndex;
       const targetPage = matches[nextIndex];
-      if (targetPage !== page && token === loadTokenRef.current) {
-        await loadPage(pdf, targetPage, zoom, token);
+      if (targetPage !== pageRef.current && token === loadTokenRef.current) {
+        await loadPage(pdf, targetPage, token);
       }
       return {
         count: matches.length,
@@ -364,8 +518,8 @@ export function PdfEngine({
       if (prevIndex < 0) prevIndex = matches.length - 1;
       currentMatchIdxRef.current = prevIndex;
       const targetPage = matches[prevIndex];
-      if (targetPage !== page && token === loadTokenRef.current) {
-        await loadPage(pdf, targetPage, zoom, token);
+      if (targetPage !== pageRef.current && token === loadTokenRef.current) {
+        await loadPage(pdf, targetPage, token);
       }
       return {
         count: matches.length,
@@ -382,16 +536,17 @@ export function PdfEngine({
       const pdf = pdfRef.current;
       const destination = tocDestinationsRef.current.get(item.id);
       const token = loadTokenRef.current;
-      if (pdf && destination !== undefined) await loadPage(pdf, destination, zoom, token);
+      if (pdf && destination !== undefined) await loadPage(pdf, destination, token);
     },
     goToPosition: async (pos) => {
       const pdf = pdfRef.current;
       const token = loadTokenRef.current;
       if (pdf && pos.kind === "pdf-page" && pos.page >= 1 && pos.page <= pdf.numPages) {
-        await loadPage(pdf, pos.page, zoom, token);
+        await loadPage(pdf, pos.page, token);
       }
     },
-  }), [engineRef, loadPage, page, pageCount, renderPage, zoom]);
+    setPageThumbnailDemand: (pages) => thumbnailScheduler.setDemand(pages),
+  }), [applyFitMode, engineRef, loadPage, renderPage, updateZoomState]);
 
   return (
     <div

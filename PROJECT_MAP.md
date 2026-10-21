@@ -1,6 +1,6 @@
 # Project Map
 
-This is a source-oriented guide to Clio's application architecture. The project is a Tauri 2 desktop application with a React 19/TypeScript frontend and a Rust native backend backed by SQLite.
+This is a source-oriented guide to Clio's application architecture. Clio is a Tauri 2 desktop application with a React 19/TypeScript frontend and a Rust native backend using SQLite schema v6. For the current implementation state and reported verification, see [Current Status](docs/status/current.md); [Roadmap](docs/roadmap.md) is the sole forward-looking plan.
 
 ## Core Interaction Flow
 
@@ -8,19 +8,13 @@ This is a source-oriented guide to Clio's application architecture. The project 
 Library → Document → Reading / Contextual Actions
 ```
 
-1. **Library Home**: The default landing surface. Contains:
-   - Single contextual toolbar (`src/library/LibraryToolbar.tsx`): handles sidebar toggle, scope title/breadcrumb, catalog search, presentation toggle (Grid/List), and switches to the Selection Action Bar when documents are selected.
-   - Collapsible sidebar (`src/library/LibrarySidebar.tsx`): manages flat Collections and hierarchical Folders derived from library roots.
-   - Continue section (`src/library/ContinueSection.tsx`): displays the top ~6 started reading items with reading progress bars.
-   - Full catalog presentation (`src/library/DocumentGrid.tsx` and `DocumentList.tsx`): handles distinct selection and activation models.
+1. **Library Home**: Catalog views (`src/library/DocumentGrid.tsx`, `DocumentList.tsx`), collections/folder navigation (`LibrarySidebar.tsx`), Continue Reading (`ContinueSection.tsx`), search, selection, and contextual actions.
 2. **Document Reading**:
-   - Clicking a document navigates to the document reading route (`src/reader/ReaderShell.tsx`).
-   - The reading surface fills the viewport, restoring the exact last-read position (PDF page, EPUB CFI, TextScroll progression).
-   - Back button returns to the previous Library state, restoring scope, scroll position, search query, and selection.
-3. **Contextual Document Actions & Foundation**:
-   - Selection action bar (`src/library/LibraryToolbar.tsx`): capability-filtered buttons (Open, Add to collection, Convert, Extract pages, Merge PDFs, Properties, Locate, Remove) derived from `getSelectionCapabilities`. Remove requires inline confirmation. `canMerge` uses the authoritative `canMergeSelected` from `documentCommands.ts`. Search bar provides an explicit, switchable scope indicator (OD-10).
-   - Context menus (`src/library/DocumentContextMenu.tsx`): Remove from library requires inline confirmation; missing documents expose Locate file… (OD-2); unselected right-click targets the clicked document while selected right-click operates on selection (OD-6).
-   - Global App Menu (`src/App.tsx`): reachable from toolbar and mobile touch targets; provides Appearance, Open external document, Keyboard shortcuts, and About Clio (OD-7).
+   - Clicking a document navigates to the reader route (`src/reader/ReaderShell.tsx`).
+   - Reading positions are persisted for PDF, EPUB, and text/Markdown formats.
+   - Returning to Library restores navigation context; consult source for the current restoration state.
+3. **Contextual Document Actions**: Selection actions and context menus are capability-driven. Removal from the library does not delete the underlying file.
+
 ## Frontend Subsystems (`src/`)
 
 - `src/App.tsx`: Top-level application shell, routing state (`AppRoute`), restoration stack, and native window bridge.
@@ -29,28 +23,26 @@ Library → Document → Reading / Contextual Actions
 - `src/commands/selectionCommands.ts`: Pure selection capability derivation (`getSelectionCapabilities`) — maps a set of selected documents to available actions (open, convert, extract pages, merge PDFs, properties, reveal, locate, add to collection, remove). Used by `LibraryToolbar` to render only applicable action bar buttons.
 - `src/library/`: Library components, filtering (`libraryFilter.ts`), reading shelves (`ContinueSection.tsx`), presentation views (`DocumentGrid.tsx`, `DocumentList.tsx`), and dialog modals (`DocumentPropertiesModal.tsx`, `UnsupportedFormatModal.tsx`, `MissingDocumentModal.tsx`, `KeyboardShortcutsModal.tsx`, `AboutClioModal.tsx`).
 - `src/reader/`:
-  - `ReaderShell.tsx`: Document-first reader surface. The document viewport fills 100vh. Reader chrome is transient: a compact top bar overlays the document and auto-hides after inactivity; it is revealed by pointer proximity, touch tap, or keyboard. Controls: ‹ Library, title, Find, Navigator, Display, ⋯ document menu. Annotation toolbar exposes contextual Highlight, Add note, and Copy actions without auto-focusing note entry (OD-12). External documents support explicit Add to Library (OD-3).
-  - Navigator panel (`reader-navigator`): overlay drawer (right side) with three tabs — Contents (TOC), Bookmarks, Notes. Does not reflow the document.
+  - `ReaderShell.tsx`: Document-first reader surface with reader chrome, Find, Navigator, Display, document menu, and annotation interactions.
+  - Navigator panel (`reader-navigator`): Contents, Bookmarks, and Notes. Current Stage 3 implementation docks the Navigator; the design contract calls for a floating non-dimming overlay. This discrepancy is unresolved; see [Roadmap](docs/roadmap.md).
   - Find bar (`reader-find-bar`): floating overlay, no document layout shift. Keyboard: `Ctrl/Cmd+F` open, `Enter`/`Shift+Enter` next/prev, `Escape` close.
-  - Display popover (`reader-display-popover`): theme (light/sepia/dark), zoom (PDF only). Theme persisted to `localStorage` (`clio-reader-theme`).
+  - `reader-display-popover`: reader display controls. PDF controls include zoom and Stage 3 page-entry/fit modes; consult source and status for exact current behavior.
   - Document menu (`reader-doc-menu`): capability-filtered commands from `src/commands/documentCommands.ts`. Remove from library requires confirmation; does not delete the underlying file.
-  - Progress strip (`reader-progress-strip`): 2px accent bar + page/percent label, always visible at bottom.
+  - `reader-progress-strip`: reader progress presentation; transient-control behavior is under active Stage 3 work.
   - `PdfEngine.tsx`: PDF.js-backed rendering and navigation.
   - `EpubEngine.tsx`: foliate-js-backed pagination, themes, and highlight overlays.
   - `TextEngine.tsx`: Plain text and Markdown reader with heading TOC extraction and TextScroll progression.
-  - `readingState.ts`: Debounced reading state coordinator (1 s debounce, flushed on back/unload/document switch).
+  - `readingState.ts`: Debounced reading-state coordinator, flushed on reader exit/document switch.
 - `src/tools/`:
   - `ConversionWorkspace.tsx`: Local conversion, PDF merge, and PDF page extraction tool workspace.
-- `src/storage/`:
-  - `domain.ts`: Core data types (`DocumentRecord`, `SourceRef`, `StorageLocator`, `ReadingPosition`, `Bookmark`, `Annotation`, `Collection`).
-  - `documentStorage.ts`: Tauri IPC client adapter for SQLite catalog operations.
+- `src/storage/`: frontend domain types and the Tauri IPC adapter for SQLite catalog operations.
 
 ## Backend Subsystems (`src-tauri/`)
 
 - `src-tauri/src/main.rs`: Native desktop launcher.
 - `src-tauri/src/lib.rs`: Tauri command registration, plugin initialization, and native IPC boundary.
-- `src-tauri/src/storage.rs`: SQLite database (`LibraryDb`), migrations, scanning, reading-state persistence, collections, bookmarks, annotations, thumbnails, and canonical path resolution.
-- `src-tauri/src/conversion.rs`: Capability registry, Pandoc and Poppler tool execution, overwrite policies, and PDF manipulation (merge & extraction).
+- `src-tauri/src/storage.rs` and `src-tauri/src/storage/`: SQLite catalog (`LibraryDb`), schema v6 migrations, scanning, reading-state persistence, collections, bookmarks, annotations, thumbnails, and path resolution.
+- `src-tauri/src/conversion.rs`: Capability registry, Pandoc and Poppler tool execution, overwrite policies, and PDF manipulation (merge and page extraction).
 
 ## Key Commands
 
@@ -61,3 +53,5 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Run native backend tests
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
+
+Stage 3 PDF reader controls and navigation is in progress. Its bounded thumbnail, page-entry, and fit-mode slices are implemented, but acceptance is incomplete; see [Current Status](docs/status/current.md). The Navigator placement discrepancy remains unresolved. Do not use this map or historical research as an alternate plan.

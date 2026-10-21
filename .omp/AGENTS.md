@@ -21,20 +21,13 @@ Desktop/Linux is the immediate environment. Cross-platform interfaces are requir
 
 ## Current implementation state
 
-The first reader foundation and application-shell milestone is implemented in the main repository. Current application source includes:
+Clio has a persistent SQLite-backed library and reader, in addition to its conversion tools. For the source-grounded implementation state and verification history, consult `docs/status/current.md`; the forward-looking plan lives only in `docs/roadmap.md`.
 
-- Clio shell navigation with Library, Reader, Tools, and Settings placeholder views.
-- `ReaderShell` with navigation, progress, search UI, contents UI, themes, loading/error state, keyboard handling, and responsive layout.
-- `PdfEngine` using PDF.js for local PDF loading, canvas rendering, page navigation, zoom, text extraction, and basic search.
-- `EpubEngine` using foliate-js and `@zip.js/zip.js` for local EPUB loading, pagination, navigation, TOC, basic search, and themes.
-- `ReaderEngineHandle` and format-neutral reader types separating shell behavior from engine implementation.
-- `StorageLocator`, `SourceRef`, and `DocumentRecord` concepts with a desktop path-to-bytes adapter.
-- Rust `read_document_bytes` in addition to the existing inspection and conversion commands.
-- Existing conversion workspace preserved under `src/tools/ConversionWorkspace.tsx`.
+Current boundaries include PDF.js PDF reading, Foliate.js EPUB reading, and a text/Markdown reader; SQLite schema v6 stores catalog and reader artifacts, not document bytes or runtime reader tokens. Local conversion, PDF merge, and PDF page extraction are implemented. Do not infer that every registered format has a reader or that all planned features are implemented.
 
-This is a read-only reader foundation, not a document library or editor. There is no persistent catalog, SQLite database, filesystem index, durable reading state, bookmarks, annotations, thumbnails, page-level PDF manipulation, or additional office/image reader workflow.
+Stage 3 PDF controls and navigation is in progress. Its implemented slices and remaining acceptance checks are recorded in `docs/status/current.md`; preserve active work and do not claim completion. The floating-versus-docked Navigator discrepancy remains unresolved as recorded in `docs/roadmap.md`; do not decide it implicitly.
 
-Bootstrap work must not restart, redesign, or extend this reader foundation. Genuine blocking findings must be documented first and fixed only through an explicitly approved follow-up.
+Legacy research documents are historical snapshots, not current implementation instructions. Read them for preserved findings, then reconcile present claims against source and status.
 
 ## Settled architecture decisions
 
@@ -64,22 +57,23 @@ Use these concepts as boundaries rather than treating a raw path as universal do
 - `SourceRef`: physical source representation reference.
 - `StorageLocator`: portable location/access representation.
 - `FormatId`: format identity.
-- `ReadingState`: future durable reading position and reader state.
-- `Locator`: format-aware position within a document.
-- `Bookmark` and `Annotation`: future reader artifacts.
-- `ConversionJob`: future conversion/manipulation job model.
+- `ReadingState`: implemented durable reading position and reader state.
+- `Locator`: format-aware position within a document; current PDF `pdf-page-text` annotation locators are non-durable, and durable PDF restoration remains approval-gated.
+- `Bookmark` and `Annotation`: implemented reader artifacts; visual restoration is format-specific and PDF highlights do not currently restore.
+- `ConversionJob`: a possible future job model; do not imply a general job manager exists.
 
 A logical document and its physical source are separate concepts.
 
 ### Storage
 
-The eventual storage model is hybrid:
+The implemented desktop catalog is hybrid:
 
-- Desktop: user-selected/watched directories, with the filesystem authoritative.
-- Mobile: managed copies or persisted content-URI/security-scoped access where required.
-- Future locator kinds may include watched paths, managed files, Android content URIs, iOS security-scoped bookmarks, temporary picked files, and external provider references.
+- User-selected library roots and the filesystem are authoritative; roots are explicitly scanned, not watched.
+- SQLite schema v6 stores catalog, root attachment, reading state, bookmarks, and annotations; it stores neither document bytes nor runtime reader tokens.
+- Mobile managed copies and persisted content-URI/security-scoped access remain deferred.
+- Future locator kinds may include managed files, Android content URIs, iOS security-scoped bookmarks, temporary picked files, and external provider references.
 
-Do not implement every locator now. Do not assume Unix paths exist on every target. Keep platform conditions in platform services, not scattered through React. Do not add a database until library or reading-state requirements justify it.
+Do not implement every locator now. Do not assume Unix paths exist on every target. Keep platform conditions in platform services, not scattered through React.
 
 ### Security
 
@@ -90,12 +84,7 @@ Documents are untrusted input, especially EPUB. Preserve restrictive resource bo
 Do not add dependencies automatically. A significant dependency requires a concrete current requirement, compatibility and licensing review, maintenance assessment, bundle/runtime impact assessment, and an explicit boundary decision. Prefer mature libraries and system utilities over new format parsers. Do not copy GPL/AGPL application code into Clio merely because a reference project is useful.
 
 ### Conversion
-
-Conversion is a capability, not the center of the architecture. Existing Pandoc/Poppler behavior must remain functional. The eventual direction is:
-
-```text
-OperationPlanner -> CapabilityRegistry -> JobManager -> format/tool adapter
-```
+The current conversion workspace invokes local Pandoc/Poppler capabilities and PDF operations. A general `OperationPlanner -> CapabilityRegistry -> JobManager -> format/tool adapter` remains an architectural direction, not an implemented job-management pipeline.
 
 Do not implement a universal all-to-all converter.
 
@@ -120,16 +109,14 @@ Do not spontaneously implement cloud accounts/sync, a server backend, AI/RAG, a 
 
 ## Current milestone and working method
 
-The reader foundation plus application shell is complete. The reader hardening investigation is complete and recorded in `docs/research/reader-hardening-investigation.md`. No hardening implementation has started. Storage/library implementation remains explicitly blocked until the reader byte/security/lifecycle boundaries are settled.
+Stage 3 PDF controls and navigation is in progress. See `docs/status/current.md` for implemented slices, evidence, and remaining acceptance work. `docs/roadmap.md` is the sole forward-looking roadmap. Do not claim Stage 3 acceptance or decide the unresolved floating-versus-docked Navigator discrepancy.
 
-For future meaningful features:
+For meaningful work:
 
-1. Understand the actual code, docs, Git state, and project context.
+1. Understand the actual code, docs, and project context.
 2. Classify the work as research, architecture, frontend, Rust/platform, reader, integration, or review.
 3. Define affected subsystems, interfaces, dependencies, and verification.
 4. Use the appropriate specialist; serialize overlapping ownership.
-5. Run targeted builds, tests, smoke checks, and document rendering checks.
+5. Run targeted builds, tests, smoke checks, and document rendering checks as assigned by the coordinator.
 6. Run a read-only reviewer for meaningful or security-sensitive work.
 7. Update `docs/status/current.md` and relevant architecture/research documents.
-
-The single recommended next milestone is reader hardening implementation: EPUB containment and lifecycle correctness, native file-read authorization, measured byte transport handling, PDF loading-task cleanup, and basic local PDF outline/TOC support. Do not begin storage, indexing, catalog, or database work before this milestone is complete and reviewed.

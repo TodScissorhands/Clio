@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addDocumentToCollection as addDocumentToCollectionCommand,
   addExternalDocumentToLibrary,
@@ -14,11 +14,15 @@ import {
   renameCollection as renameCollectionCommand,
 } from "../storage/documentStorage";
 import type { Collection, LibraryRoot, StoredDocument } from "../storage/domain";
+import type { LibraryCatalogLoadState } from "./libraryFilter";
+
 
 export type LibraryCatalog = {
   roots: LibraryRoot[];
   documents: StoredDocument[];
   collections: Collection[];
+  catalogLoadState: LibraryCatalogLoadState;
+  retryCatalog: () => Promise<void>;
   refreshLibrary: (rootIds?: string[]) => Promise<void>;
   addRoot: (path: string) => Promise<LibraryRoot>;
   createCollection: (name: string) => Promise<Collection>;
@@ -36,11 +40,39 @@ type UseLibraryCatalogOptions = {
 };
 
 export function useLibraryCatalog({ onError }: UseLibraryCatalogOptions): LibraryCatalog {
+  const mountedRef = useRef(false);
   const [roots, setRoots] = useState<LibraryRoot[]>([]);
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
 
+
+  const [catalogLoadState, setCatalogLoadState] = useState<LibraryCatalogLoadState>("loading");
+
+  const loadCatalog = useCallback(async (isCurrent: () => boolean = () => mountedRef.current) => {
+    if (!isCurrent()) return;
+    setCatalogLoadState("loading");
+    try {
+      const [nextRoots, nextDocuments, nextCollections] = await Promise.all([
+        listLibraryRoots(),
+        listLibraryDocuments(undefined, true),
+        listCollections(),
+      ]);
+      if (!isCurrent()) return;
+      setRoots(nextRoots);
+      setDocuments(nextDocuments);
+      setCollections(nextCollections);
+      setCatalogLoadState("ready");
+    } catch (error) {
+      if (!isCurrent()) return;
+      setCatalogLoadState("error");
+      onError(error);
+    }
+  }, [onError]);
+
+  const retryCatalog = useCallback(() => loadCatalog(), [loadCatalog]);
+
   const refreshLibrary = useCallback(async (rootIds?: string[]) => {
+    if (!mountedRef.current) return;
     try {
       const [nextRoots, nextDocuments, nextCollections] = await Promise.all([
         listLibraryRoots(),
@@ -49,6 +81,7 @@ export function useLibraryCatalog({ onError }: UseLibraryCatalogOptions): Librar
           : listLibraryDocuments(undefined, true),
         listCollections(),
       ]);
+      if (!mountedRef.current) return;
       setRoots(nextRoots);
       if (rootIds?.length) {
         const updatedRootIds = new Set(rootIds);
@@ -61,26 +94,20 @@ export function useLibraryCatalog({ onError }: UseLibraryCatalogOptions): Librar
       }
       setCollections(nextCollections);
     } catch (error) {
+      if (!mountedRef.current) return;
       onError(error);
     }
   }, [onError]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([listLibraryRoots(), listLibraryDocuments(undefined, true), listCollections()])
-      .then(([nextRoots, nextDocuments, nextCollections]) => {
-        if (cancelled) return;
-        setRoots(nextRoots);
-        setDocuments(nextDocuments);
-        setCollections(nextCollections);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) onError(error);
-      });
+    mountedRef.current = true;
+    void loadCatalog(() => !cancelled && mountedRef.current);
     return () => {
       cancelled = true;
+      mountedRef.current = false;
     };
-  }, [onError]);
+  }, [loadCatalog]);
 
   const addRoot = useCallback(async (path: string) => {
     const root = await addLibraryRoot(path);
@@ -124,6 +151,8 @@ export function useLibraryCatalog({ onError }: UseLibraryCatalogOptions): Librar
     roots,
     documents,
     collections,
+    catalogLoadState,
+    retryCatalog,
     refreshLibrary,
     addRoot,
     createCollection,
@@ -136,4 +165,3 @@ export function useLibraryCatalog({ onError }: UseLibraryCatalogOptions): Librar
     addExternalDocument,
   };
 }
-

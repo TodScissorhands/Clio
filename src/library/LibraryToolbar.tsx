@@ -239,16 +239,27 @@ export function LibraryToolbar({
       return <h1 className="truncate text-sm font-semibold">{collection?.name ?? "Collection"}</h1>;
     }
     if (activeScope.kind === "search") return <h1 className="truncate text-sm font-semibold">Search: “{activeScope.query}”</h1>;
+
+    const rootId = activeScope.rootId;
+    const root = roots.find((item) => item.id === rootId);
+    const sourceStatus = root?.status === "missing"
+      ? "Missing source"
+      : root?.status === "disabled"
+        ? "Disabled source"
+        : null;
     if (activeScope.kind === "root") {
-      const root = roots.find((item) => item.id === activeScope.rootId);
-      return <h1 className="truncate text-sm font-semibold">{root?.label ?? "Folder"}</h1>;
+      return (
+        <h1 className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <span className="truncate">{root?.label ?? "Folder"}</span>
+          {sourceStatus && <span className="shrink-0 text-[11px] font-normal text-muted-foreground">{sourceStatus}</span>}
+        </h1>
+      );
     }
 
-    const root = roots.find((item) => item.id === activeScope.rootId);
     const parts = activeScope.relativePath.split("/");
     return (
       <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-sm" aria-label="Breadcrumb location">
-        <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "root", rootId: activeScope.rootId })}>{root?.label ?? "Folder"}</button>
+        <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "root", rootId })}>{root?.label ?? "Folder"}</button>
         {parts.map((part, index) => {
           const subPath = parts.slice(0, index + 1).join("/");
           const isLast = index === parts.length - 1;
@@ -256,11 +267,12 @@ export function LibraryToolbar({
             <span key={subPath} className="flex min-w-0 items-center gap-1">
               <ChevronDownIcon className="size-3 -rotate-90 shrink-0 text-muted-foreground" aria-hidden="true" />
               {isLast ? <span className="truncate font-medium" aria-current="location">{part}</span> : (
-                <button type="button" className="truncate text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "folder", rootId: activeScope.rootId, relativePath: subPath })}>{part}</button>
+                <button type="button" className="truncate text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onSelectScope({ kind: "folder", rootId, relativePath: subPath })}>{part}</button>
               )}
             </span>
           );
         })}
+        {sourceStatus && <span className="shrink-0 text-[11px] text-muted-foreground">{sourceStatus}</span>}
       </nav>
     );
   }
@@ -313,11 +325,11 @@ export function LibraryToolbar({
               <Input
                 ref={searchInputRef}
                 className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 text-foreground shadow-none placeholder:text-muted-foreground focus-visible:ring-0"
-                placeholder={activeScope.kind === "all" ? "Search in Books..." : `Search in ${getScopeLabel(activeScope, roots, collections)}...`}
+                placeholder="Search names, metadata & paths…"
                 value={searchQuery}
                 onFocus={() => setIsSearchOpen(true)}
                 onChange={(event) => onSearchChange(event.target.value)}
-                aria-label="Search library"
+                aria-label="Search document names, metadata, and paths"
               />
               {searchQuery && (
                 <Button size="icon-xs" variant="ghost" className="shrink-0" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} aria-label="Clear search query">×</Button>

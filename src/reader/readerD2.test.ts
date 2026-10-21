@@ -22,6 +22,7 @@ import {
   parseReaderTheme,
   resolveEscapeAction,
   resolveFindEnterAction,
+  shouldHideReaderControls,
   isCurrentReaderOperation,
 } from "./readerLogic";
 
@@ -159,6 +160,14 @@ describe("isSameReadingPosition", () => {
 describe("Reader chrome — topbar visibility model", () => {
   it("TOPBAR_HIDE_DELAY is a positive integer (2500 ms)", () => {
     expect(TOPBAR_HIDE_DELAY).toBe(2500);
+  });
+
+  it("hides controls only after a PDF reaches ready state", () => {
+    expect(shouldHideReaderControls("pdf", "loading")).toBe(false);
+    expect(shouldHideReaderControls("pdf", "ready")).toBe(true);
+    expect(shouldHideReaderControls("pdf", "error")).toBe(false);
+    expect(shouldHideReaderControls("epub", "ready")).toBe(false);
+    expect(shouldHideReaderControls("txt", "ready")).toBe(false);
   });
 
   it("resolveEscapeAction: editingAnnotation is highest priority", () => {

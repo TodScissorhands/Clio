@@ -1,6 +1,6 @@
 import { getDocumentDisplayTitle, type StoredDocument } from "../storage/domain";
-import { MoreHorizontalIcon } from "./LibraryIcons";
 import { Button } from "../components/ui/button";
+import { MoreHorizontalIcon } from "./LibraryIcons";
 
 export interface ContinueSectionProps {
   documents: StoredDocument[];
@@ -18,24 +18,31 @@ export function ContinueSection({
   if (documents.length === 0) return null;
 
   return (
-    <section aria-label="Continue Reading" className="border-b border-border pb-5">
-      <h2 className="mb-3 text-sm font-semibold">Continue Reading</h2>
-
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-x-5 gap-y-4 max-sm:grid-cols-[repeat(auto-fill,minmax(105px,1fr))] max-sm:gap-x-4" role="list">
+    <section aria-label="Continue Reading" className="mb-5 border-b border-border pb-3">
+      <h2 className="mb-2 text-sm font-semibold">Continue Reading</h2>
+      <div className="flex gap-2 overflow-x-auto pb-2" role="list">
         {documents.map((doc) => {
           const displayTitle = getDocumentDisplayTitle(doc.record);
           const authors = doc.record.metadata?.authors?.filter(Boolean) ?? [];
           const author = authors.length > 0 ? authors.join(", ") : null;
-          let progressPercent: number | null = null;
           const position = doc.readingState?.position;
-          if (position?.kind === "text-scroll" || position?.kind === "epub-cfi") {
-            progressPercent = typeof position.progression === "number" ? Math.round(position.progression * 100) : null;
-          }
+          const progression =
+            position && "progression" in position ? position.progression : undefined;
+          const progressPercent =
+            typeof progression === "number" && Number.isFinite(progression)
+              ? Math.min(100, Math.max(0, Math.round(progression * 100)))
+              : null;
+          const locationLabel =
+            position?.kind === "pdf-page"
+              ? `Page ${position.page}${progressPercent !== null ? ` · ${progressPercent}%` : ""}`
+              : progressPercent !== null
+                ? `${progressPercent}% through`
+                : "Saved position";
 
           return (
             <article
               key={doc.record.id}
-              className="group min-w-0 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              className="flex w-60 shrink-0 items-center gap-2 rounded-md border border-border bg-card p-2 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               role="listitem"
               tabIndex={0}
               onClick={() => onOpenDocument(doc)}
@@ -45,37 +52,51 @@ export function ContinueSection({
                 onOpenContextMenu(doc, event);
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter") {
+                if (event.target === event.currentTarget && event.key === "Enter") {
                   event.preventDefault();
                   onOpenDocument(doc);
                 }
               }}
             >
-              <div className="relative aspect-[2/3] overflow-hidden bg-muted">
+              <div className="h-12 w-8 shrink-0 overflow-hidden rounded-sm bg-muted">
                 {renderThumbnail(doc)}
-                {progressPercent !== null && progressPercent > 0 && (
-                  <div className="absolute inset-x-0 bottom-0 h-1 bg-background/60" aria-hidden="true">
-                    <div className="h-full bg-foreground" style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <strong className="block truncate text-xs font-medium" title={displayTitle}>{displayTitle}</strong>
+                {author && <span className="block truncate text-[11px] text-muted-foreground" title={author}>{author}</span>}
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">{locationLabel}</span>
+                {progressPercent !== null && (
+                  <div className="mt-1 h-0.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                    <div className="h-full bg-primary" style={{ width: `${progressPercent}%` }} />
                   </div>
                 )}
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="secondary"
-                  className="absolute bottom-2 right-2 bg-background/90 opacity-100 shadow-sm transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpenContextMenu(doc, event);
-                  }}
-                  aria-label={`Options for ${displayTitle}`}
-                >
-                  <MoreHorizontalIcon className="size-4" />
-                </Button>
               </div>
-              <div className="pt-2">
-                <strong className="block truncate text-[13px] font-medium leading-5">{displayTitle}</strong>
-                {author && <span className="mt-0.5 block truncate text-xs text-muted-foreground">{author}</span>}
-              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 shrink-0 px-2 text-xs"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenDocument(doc);
+                }}
+                aria-label={`Resume ${displayTitle} at ${locationLabel}`}
+              >
+                Resume
+              </Button>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                className="shrink-0"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenContextMenu(doc, event);
+                }}
+                aria-label={`Options for ${displayTitle}`}
+              >
+                <MoreHorizontalIcon className="size-4" />
+              </Button>
             </article>
           );
         })}

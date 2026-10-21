@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   createAnnotation,
   createBookmark,
@@ -37,18 +37,24 @@ import type {
   ReaderTocItem,
   ReadingPosition,
   TextSelection,
+  ReaderZoomMode,
+  PdfPageThumbnail,
 } from "./types";
 import { DEFAULT_READER_DISPLAY_SETTINGS } from "./types";
+import { PdfPageThumbnails } from "./PdfPageThumbnails";
 import "./ReaderShell.css";
 import {
   getReaderZoomLimits,
+  pdfPageInputKeyAction,
   nextReaderFontSize,
   parseReaderDisplaySettings,
   parseReaderTheme,
   READER_FONT_SIZES,
   resolveEscapeAction,
   isCurrentReaderOperation,
+  shouldHideReaderControls,
   TOPBAR_HIDE_DELAY,
+  submitPdfPageNavigation,
 } from "./readerLogic";
 
 // ── Persistence helpers (browser-side wrappers around pure parseReaderTheme) ──
@@ -146,6 +152,7 @@ export function ReaderShell({
   const documentEpochRef = useRef(0);
   const searchRequestRef = useRef(0);
   const engineRef = useRef<ReaderEngineHandle | null>(null);
+  const pageNumberInputRef = useRef<HTMLInputElement | null>(null);
 
   const [theme, setTheme] = useState<ReaderTheme>(loadReaderTheme);
 
@@ -173,7 +180,10 @@ export function ReaderShell({
 
   // ── Reading position & progress ──────────────────────────────────────────────
   const [progress, setProgress] = useState<ReaderProgress>({ current: 1 });
+  const [pageNumberInput, setPageNumberInput] = useState("1");
+  const [pageNumberError, setPageNumberError] = useState("");
   const [toc, setToc] = useState<ReaderTocItem[]>([]);
+  const [pageThumbnails, setPageThumbnails] = useState<readonly PdfPageThumbnail[]>([]);
   const [initialPosition, setInitialPosition] = useState<ReadingPosition | undefined>(undefined);
   const [positionLoaded, setPositionLoaded] = useState(false);
   const [currentPosition, setCurrentPosition] = useState<ReadingPosition | undefined>(undefined);
@@ -182,6 +192,7 @@ export function ReaderShell({
   const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [statusMessage, setStatusMessage] = useState("");
   const [zoomPercent, setZoomPercent] = useState(100);
+  const [zoomMode, setZoomMode] = useState<ReaderZoomMode>("manual");
 
   // ── Search (Find) ────────────────────────────────────────────────────────────
   const [findOpen, setFindOpen] = useState(false);
@@ -204,6 +215,11 @@ export function ReaderShell({
   // ── Transient chrome visibility ──────────────────────────────────────────────
   const [topbarVisible, setTopbarVisible] = useState(true);
   const hideTimerRef = useRef<number | null>(null);
+  const topbarPointerRef = useRef(false);
+  const topbarFocusRef = useRef(false);
+  const topbarRef = useRef<HTMLDivElement | null>(null);
+  const showControlsRef = useRef<HTMLButtonElement | null>(null);
+  const navigatorTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   // ── Navigator panel ──────────────────────────────────────────────────────────
   const [navigatorOpen, setNavigatorOpen] = useState(false);
@@ -237,8 +253,42 @@ export function ReaderShell({
     [coordinator, document]
   );
 
-  const onProgress = useCallback((next: ReaderProgress) => setProgress(next), []);
+  const onProgress = useCallback((next: ReaderProgress) => {
+    setProgress(next);
+    if (
+      next.label == null &&
+      Number.isSafeInteger(next.current) &&
+      Number.isSafeInteger(next.total) &&
+      next.total! > 0
+    ) {
+      setPageNumberInput(String(next.current));
+      setPageNumberError("");
+    }
+  }, []);
+  const submitPageNumber = useCallback(() => {
+    const submitted = submitPdfPageNavigation(
+      pageNumberInput,
+      progress.total ?? 0,
+      (position) => void engineRef.current?.goToPosition?.(position)
+    );
+    if (!submitted) {
+      setPageNumberError(
+        progress.total
+          ? `Enter a whole page number from 1 to ${progress.total}.`
+          : "The PDF page count is not available yet."
+      );
+      return;
+    }
+    setPageNumberError("");
+  }, [pageNumberInput, progress.total]);
+  const cancelPageNumberEdit = useCallback(() => {
+    setPageNumberInput(String(progress.current));
+    setPageNumberError("");
+    pageNumberInputRef.current?.blur();
+  }, [progress.current]);
   const onToc = useCallback((next: ReaderTocItem[]) => setToc(next), []);
+  const onPageThumbnails = useCallback((thumbnails: readonly PdfPageThumbnail[]) => setPageThumbnails(thumbnails), []);
+  const setPageThumbnailDemand = useCallback((pages: readonly number[]) => engineRef.current?.setPageThumbnailDemand?.(pages), []);
   const onTextSelection = useCallback((selection: TextSelection) => {
     setPendingTextSelection(selection);
     // Reveal topbar so annotation toolbar is visible
@@ -264,10 +314,19 @@ export function ReaderShell({
     setTopbarVisible(true);
     clearHideTimer();
     hideTimerRef.current = setTimeout(() => {
-      setTopbarVisible(false);
-      hideTimerRef.current = null;
+      if (
+        !topbarPointerRef.current &&
+        !topbarFocusRef.current &&
+        !navigatorOpen &&
+        !displayOpen &&
+        !docMenuOpen &&
+        !findOpen &&
+        !pendingTextSelection
+      ) {
+        setTopbarVisible(false);
+      }
     }, TOPBAR_HIDE_DELAY) as unknown as number;
-  }, [clearHideTimer]);
+  }, [clearHideTimer, navigatorOpen, displayOpen, docMenuOpen, findOpen, pendingTextSelection]);
 
   const keepTopbarVisible = useCallback(() => {
     clearHideTimer();
@@ -278,15 +337,55 @@ export function ReaderShell({
   useEffect(() => {
     if (navigatorOpen || displayOpen || docMenuOpen || findOpen || pendingTextSelection) {
       keepTopbarVisible();
+    } else if (document?.record.format === "pdf" && status !== "ready") {
+      keepTopbarVisible();
+    } else if (document?.record.format === "pdf") {
+      clearHideTimer();
+      if (!topbarPointerRef.current && !topbarFocusRef.current) {
+        setTopbarVisible(false);
+      }
     } else {
-      // Start hide timer when all panels closed
       hideTimerRef.current = setTimeout(() => {
         setTopbarVisible(false);
         hideTimerRef.current = null;
       }, TOPBAR_HIDE_DELAY) as unknown as number;
     }
     return () => clearHideTimer();
-  }, [navigatorOpen, displayOpen, docMenuOpen, findOpen, pendingTextSelection, keepTopbarVisible, clearHideTimer]);
+  }, [
+    navigatorOpen,
+    displayOpen,
+    docMenuOpen,
+    findOpen,
+    pendingTextSelection,
+    document?.record.format,
+    status,
+    keepTopbarVisible,
+    clearHideTimer,
+  ]);
+
+  useLayoutEffect(() => {
+    if (
+      !shouldHideReaderControls(document?.record.format, status) ||
+      navigatorOpen ||
+      displayOpen ||
+      docMenuOpen ||
+      findOpen ||
+      pendingTextSelection ||
+      topbarPointerRef.current ||
+      topbarFocusRef.current
+    ) return;
+    clearHideTimer();
+    setTopbarVisible(false);
+  }, [
+    document?.record.format,
+    status,
+    navigatorOpen,
+    displayOpen,
+    docMenuOpen,
+    findOpen,
+    pendingTextSelection,
+    clearHideTimer,
+  ]);
 
   // ── Flush reading state on unload ─────────────────────────────────────────────
   useEffect(() => {
@@ -310,12 +409,15 @@ export function ReaderShell({
       setStatus("idle");
       setStatusMessage("");
       setProgress({ current: 1 });
+      setPageNumberInput("1");
+      setPageNumberError("");
       setToc([]);
       setQuery("");
       setSearchResult(null);
       setSearchPending(false);
       setSearchActiveQuery("");
       setZoomPercent(100);
+      setZoomMode("manual");
       setBookmarks([]);
       setAnnotations([]);
       setAnnotationsLoading(false);
@@ -343,12 +445,15 @@ export function ReaderShell({
     setStatusMessage("");
     setPositionLoaded(false);
     setProgress({ current: 1 });
+    setPageNumberInput("1");
+    setPageNumberError("");
     setToc([]);
     setQuery("");
     setSearchResult(null);
     setSearchActiveQuery("");
     setSearchPending(false);
     setZoomPercent(100);
+    setZoomMode("manual");
     setBookmarks([]);
     setAnnotations([]);
     setAnnotationsLoading(false);
@@ -633,6 +738,7 @@ export function ReaderShell({
 
   const closeNavigator = useCallback(() => {
     setNavigatorOpen(false);
+    requestAnimationFrame(() => navigatorTriggerRef.current?.focus());
   }, []);
 
   // ── Display popover ───────────────────────────────────────────────────────────
@@ -683,6 +789,7 @@ export function ReaderShell({
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!document) return;
+      if (event.target === pageNumberInputRef.current) return;
       // OD-14/15: Do not process reader navigation keys when a modal or overlay is open
       if (window.document.querySelector(".modal-backdrop, .conversion-overlay-backdrop, .context-menu-backdrop")) {
         return;
@@ -742,7 +849,7 @@ export function ReaderShell({
             closeFind();
             break;
           case "closeNavigator":
-            setNavigatorOpen(false);
+            closeNavigator();
             break;
           case "closeDisplay":
             setDisplayOpen(false);
@@ -752,7 +859,18 @@ export function ReaderShell({
             setRemoveConfirm(false);
             break;
           case "toggleTopbar":
-            setTopbarVisible((visible) => !visible);
+            if (topbarVisible) {
+              if (topbarFocusRef.current && !shouldHideReaderControls(document?.record.format, status)) break;
+              topbarPointerRef.current = false;
+              topbarFocusRef.current = false;
+              clearHideTimer();
+              setTopbarVisible(false);
+              if (shouldHideReaderControls(document?.record.format, status)) {
+                requestAnimationFrame(() => showControlsRef.current?.focus());
+              }
+            } else {
+              revealTopbar();
+            }
             break;
         }
         return;
@@ -817,6 +935,7 @@ export function ReaderShell({
     displayOpen,
     docMenuOpen,
     pendingTextSelection,
+    topbarVisible,
     query,
     searchResult,
     searchActiveQuery,
@@ -824,6 +943,8 @@ export function ReaderShell({
     revealTopbar,
     openFind,
     closeFind,
+    closeNavigator,
+    clearHideTimer,
     toggleBookmark,
     nextMatch,
     prevMatch,
@@ -855,7 +976,9 @@ export function ReaderShell({
   // ── Progress label ────────────────────────────────────────────────────────────
   const progressLabel = (() => {
     if (!document) return null;
-    if (document.record.format === "pdf" && progress.total != null) {
+    if (document.record.format === "pdf") {
+      if (status === "loading") return progress.label ?? "Loading PDF…";
+      if (status !== "ready" || progress.total == null || progress.label != null) return null;
       return `${progress.current} / ${progress.total}`;
     }
     if (progress.fraction != null) {
@@ -883,10 +1006,17 @@ export function ReaderShell({
     }
   }, [revealTopbar]);
 
+  const showReaderControls = useCallback(() => {
+    revealTopbar();
+    requestAnimationFrame(() => {
+      topbarRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
+    });
+  }, [revealTopbar]);
+
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <section
-      className={`reader-shell theme-${theme}${topbarVisible ? " topbar-visible" : " topbar-hidden"}${navigatorOpen ? " navigator-open" : ""}`}
+      className={`reader-shell theme-${theme}${topbarVisible ? " topbar-visible" : " topbar-hidden"}${navigatorOpen ? " navigator-open" : ""}${document?.record.format === "pdf" ? " pdf-reader" : ""}${displayOpen ? " display-open" : ""}`}
       aria-label="Document reader"
       data-selection-active={pendingTextSelection ? "true" : undefined}
       onMouseMove={handleMouseMove}
@@ -902,8 +1032,27 @@ export function ReaderShell({
 
       {/* ── Compact top bar (transient overlay) ──────────────────────────────────*/}
       <div
+        ref={topbarRef}
         className="reader-topbar"
-        onMouseEnter={keepTopbarVisible}
+        onMouseEnter={() => {
+          topbarPointerRef.current = true;
+          keepTopbarVisible();
+        }}
+        onMouseLeave={() => {
+          topbarPointerRef.current = false;
+          if (!topbarFocusRef.current) revealTopbar();
+        }}
+        onFocusCapture={() => {
+          topbarFocusRef.current = true;
+          keepTopbarVisible();
+        }}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            topbarFocusRef.current = false;
+            if (event.relatedTarget === showControlsRef.current) return;
+            if (!topbarPointerRef.current) revealTopbar();
+          }
+        }}
         role="toolbar"
         aria-label="Reader controls"
       >
@@ -929,6 +1078,62 @@ export function ReaderShell({
 
         {/* Right: controls */}
         <div className="reader-topbar-right">
+          {document?.record.format === "pdf" &&
+            status === "ready" &&
+            progress.total != null &&
+            progress.total > 0 &&
+            progress.label == null && (
+              <form
+                className="reader-page-control"
+                aria-label="PDF page navigation"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  submitPageNumber();
+                }}
+              >
+                <label className="sr-only" htmlFor="reader-pdf-page-input">Go to PDF page</label>
+                <input
+                  ref={pageNumberInputRef}
+                  id="reader-pdf-page-input"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={16}
+                  value={pageNumberInput}
+                  onChange={(event) => {
+                    setPageNumberInput(event.target.value);
+                    setPageNumberError("");
+                  }}
+                  onKeyDown={(event) => {
+                    const action = pdfPageInputKeyAction(event.key);
+                    if (action === "submit") {
+                      event.preventDefault();
+                      submitPageNumber();
+                    } else if (action === "cancel") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelPageNumberEdit();
+                    }
+                  }}
+                  aria-label={`PDF page number, currently ${progress.current} of ${progress.total}`}
+                  aria-invalid={pageNumberError ? true : undefined}
+                  aria-describedby="reader-pdf-page-total reader-pdf-page-error"
+                  title={`Current page ${progress.current} of ${progress.total}`}
+                />
+                <span className="reader-page-total" id="reader-pdf-page-total">of {progress.total}</span>
+                <button type="submit" className="reader-page-submit" aria-label="Go to page" title="Go to page">
+                  Go
+                </button>
+                <span
+                  className="reader-page-error"
+                  id="reader-pdf-page-error"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {pageNumberError}
+                </span>
+              </form>
+            )}
           {/* Bookmark toggle */}
           {canBookmark && document && (
             <button
@@ -960,6 +1165,7 @@ export function ReaderShell({
           {/* Navigator */}
           {document && (
             <button
+              ref={navigatorTriggerRef}
               type="button"
               className={`reader-topbar-btn${navigatorOpen ? " active" : ""}`}
               onClick={() => (navigatorOpen ? closeNavigator() : openNavigator())}
@@ -1001,6 +1207,18 @@ export function ReaderShell({
           )}
         </div>
       </div>
+
+      {document?.record.format === "pdf" && status === "ready" && !topbarVisible && (
+        <button
+          ref={showControlsRef}
+          type="button"
+          className="reader-controls-reveal"
+          onClick={showReaderControls}
+          aria-label="Show controls"
+        >
+          Show controls
+        </button>
+      )}
 
       {/* ── Display popover ────────────────────────────────────────────────────── */}
       {displayOpen && document && (
@@ -1106,7 +1324,7 @@ export function ReaderShell({
                     type="button"
                     className="reader-zoom-btn"
                     onClick={() => void engineRef.current?.zoomOut()}
-                    disabled={zoomPercent <= zoomLimits.min}
+                    disabled={zoomMode === "manual" && zoomPercent <= zoomLimits.min}
                     aria-label="Zoom out (Ctrl –)"
                     title="Zoom out (Ctrl –)"
                   >
@@ -1116,6 +1334,7 @@ export function ReaderShell({
                     type="button"
                     className="reader-zoom-reset-btn"
                     onClick={() => void engineRef.current?.resetZoom?.()}
+                    aria-label="Reset zoom to 100 percent (Ctrl 0)"
                     title="Reset zoom (Ctrl 0)"
                   >
                     {zoomPercent}%
@@ -1124,11 +1343,31 @@ export function ReaderShell({
                     type="button"
                     className="reader-zoom-btn"
                     onClick={() => void engineRef.current?.zoomIn()}
-                    disabled={zoomPercent >= zoomLimits.max}
+                    disabled={zoomMode === "manual" && zoomPercent >= zoomLimits.max}
                     aria-label="Zoom in (Ctrl +)"
                     title="Zoom in (Ctrl +)"
                   >
                     +
+                  </button>
+                </div>
+                <div className="reader-zoom-fit-row" role="group" aria-label="PDF fit mode">
+                  <button
+                    type="button"
+                    className={`reader-zoom-fit-btn${zoomMode === "fit-page" ? " active" : ""}`}
+                    onClick={() => void engineRef.current?.fitPage?.()}
+                    aria-pressed={zoomMode === "fit-page"}
+                    disabled={status !== "ready"}
+                  >
+                    Fit page
+                  </button>
+                  <button
+                    type="button"
+                    className={`reader-zoom-fit-btn${zoomMode === "fit-width" ? " active" : ""}`}
+                    onClick={() => void engineRef.current?.fitWidth?.()}
+                    aria-pressed={zoomMode === "fit-width"}
+                    disabled={status !== "ready"}
+                  >
+                    Fit width
                   </button>
                 </div>
               </>
@@ -1237,14 +1476,10 @@ export function ReaderShell({
         </>
       )}
 
+      <div className="reader-workspace">
       {/* ── Navigator overlay panel ───────────────────────────────────────────── */}
       {navigatorOpen && document && (
         <>
-          <div
-            className="reader-navigator-backdrop"
-            onClick={closeNavigator}
-            aria-hidden="true"
-          />
           <aside
             className="reader-navigator"
             aria-label="Navigator"
@@ -1279,14 +1514,32 @@ export function ReaderShell({
             <div className="reader-navigator-body" role="tabpanel">
               {/* Contents tab */}
               {navigatorTab === "contents" && (
-                hasToc ? (
-                  <TocList items={toc} onSelect={(item) => {
-                    void engineRef.current?.goToToc(item);
-                    closeNavigator();
-                  }} />
-                ) : (
-                  <p className="reader-navigator-empty">No table of contents available.</p>
-                )
+                <>
+                  {document.record.format === "pdf" &&
+                    status === "ready" &&
+                    progress.label == null &&
+                    progress.total != null &&
+                    progress.total > 0 && (
+                    <PdfPageThumbnails
+                      totalPages={progress.total}
+                      currentPage={progress.current}
+                      thumbnails={pageThumbnails}
+                      onDemand={setPageThumbnailDemand}
+                      onSelect={(pageNumber) => {
+                        void engineRef.current?.goToPosition?.({ kind: "pdf-page", page: pageNumber });
+                        closeNavigator();
+                      }}
+                    />
+                  )}
+                  {hasToc ? (
+                    <TocList items={toc} onSelect={(item) => {
+                      void engineRef.current?.goToToc(item);
+                      closeNavigator();
+                    }} />
+                  ) : document.record.format !== "pdf" ? (
+                    <p className="reader-navigator-empty">No table of contents available.</p>
+                  ) : null}
+                </>
               )}
 
               {/* Bookmarks tab */}
@@ -1620,7 +1873,9 @@ export function ReaderShell({
             onProgress={onProgress}
             onPositionChange={onPositionChange}
             onZoomChange={setZoomPercent}
+            onZoomModeChange={setZoomMode}
             onToc={onToc}
+            onPageThumbnails={onPageThumbnails}
             onState={onState}
             onTextSelection={canHighlight ? onTextSelection : undefined}
             annotations={annotations}
@@ -1654,9 +1909,14 @@ export function ReaderShell({
           </div>
         )}
       </div>
+      </div>
 
       {/* ── Progress strip (bottom, quiet) ───────────────────────────────────── */}
-      {document && (
+      {document?.record.format === "pdf" && status === "ready" ? (
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {progress.total == null ? `Page ${progress.current}` : `Page ${progress.current} of ${progress.total}`}
+        </div>
+      ) : document ? (
         <div className="reader-progress-strip" aria-label={`Reading progress: ${progressLabel ?? ""}`}>
           {progressFraction != null && (
             <div
@@ -1669,7 +1929,7 @@ export function ReaderShell({
             <span className="reader-progress-label">{progressLabel}</span>
           )}
         </div>
-      )}
+      ) : null}
     </section>
   );
 }

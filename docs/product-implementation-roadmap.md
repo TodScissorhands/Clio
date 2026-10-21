@@ -1,8 +1,10 @@
-# Product Implementation Roadmap
+# Superseded Product Implementation Plan — Historical Acceptance Record
 
-**Status:** Working plan. No stage below is claimed as implemented by this roadmap. The seven product-design stages are defined in the [authoritative Balanced Hybrid contract](product-design-contract.md); stages 8–10 below are a proposed product-completion plan, not stages validated by that contract.
+**Disposition:** Superseded as a forward-looking plan by [Clio Roadmap](roadmap.md). This document is retained to preserve its acceptance criteria and design sequencing history. It does not describe current implementation status, authorize work, or provide a second roadmap. Use [Current Status](status/current.md) for implementation and recorded verification.
 
-Implement and validate each stage before progressing. A stage's completion means its acceptance criteria are met, relevant regressions pass, and actual runtime behavior is verified where the surface requires it—not merely that code compiles. Routine implementation details may improve without reopening settled design decisions. Architectural changes and explicit approval gates remain binding.
+When this plan was active, a stage was considered complete only after its acceptance criteria, relevant regressions, and required runtime verification were met—not merely after compilation. The criteria below remain useful references, but their current disposition is recorded in the canonical roadmap and current status.
+
+## Historical stage sequence
 
 | # | Stage | Dependencies | High-level completion criteria |
 |---|---|---|---|
@@ -17,12 +19,12 @@ Implement and validate each stage before progressing. A stage's completion means
 | 9 | **Reliability, security, and performance** *(proposed completion plan)* | Stage 8 integrated baseline; threat/performance scope reviewed. | Relevant hostile-input boundaries, lifecycle/error recovery, accessibility, and resource/performance behavior are exercised and measured. Record untested areas as risks; do not infer guarantees, including child-frame isolation, from experiments that did not test them. |
 | 10 | **Release readiness** *(proposed completion plan)* | Stages 8–9 accepted; release packaging/platform criteria explicitly defined. | Release build and supported-platform smoke checks pass; dependencies/capabilities and known limitations are documented; release checks and user-facing behavior are accurate. |
 
-## Stage discipline
+## Historical controls retained as decisions
 
-- Each stage must be implemented, reviewed, and validated before progressing. If validation finds a blocker, resolve it or revise the plan explicitly; do not mark the stage complete by narrowing its criteria.
-- Preserve existing capabilities and format-specific ownership. Do not treat this roadmap as permission for a framework, database, schema, renderer, security-policy, or dependency change.
-- Stage 7 is an approval gate, not automatic authorization. Durable PDF locator/restoration work must wait for explicit approval of locator semantics; any schema migration for it needs its own explicit approval.
-- Stages 8–10 are proposed product-completion sequencing. Their inclusion is not evidence that work has started, passed validation, or was covered by the design contract's seven-stage plan.
-- Routine details can be improved from implementation evidence without reopening Balanced Hybrid. Genuine architectural changes and named approval gates remain binding.
+- The former plan required each then-defined stage to be implemented, reviewed, and validated before progression. Its acceptance criteria remain historical evidence, not current sequencing.
+- Preserve existing capabilities and format-specific ownership. This document does not authorize framework, database, schema, renderer, security-policy, or dependency changes.
+- The Stage 7 locator approval gate remains in force as restated in the canonical roadmap. Durable PDF locator/restoration work requires explicit approval of locator semantics; any schema migration requires separate approval.
+- Stages 8–10 were proposed product-completion sequencing, never approved commitments. Their inclusion is not evidence that work started or passed validation.
+- Routine details could be improved from implementation evidence without reopening Balanced Hybrid. Genuine architectural changes and named approval gates remain binding.
 
-See [Product Design Contract](product-design-contract.md) for approved interaction, visual, architecture, format-specific, and evidence constraints. The existing [project roadmap](roadmap.md) records broader product history and capabilities; this document is the staged roadmap for the design-contract implementation work, not a replacement for that history.
+The [Clio Roadmap](roadmap.md) is the only forward-looking plan. The [Product Design Contract](product-design-contract.md) retains normative interaction, visual, architecture, and evidence constraints; this file remains only as a historical acceptance record. Its proposed stages 8–10 were never approved commitments.

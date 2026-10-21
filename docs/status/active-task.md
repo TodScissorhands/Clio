@@ -1,3 +1,3 @@
 # Active Task
 
-No implementation task is active. See [Current Status](current.md) for the implemented capabilities, verification results, and remaining security boundary; see the [Roadmap](../roadmap.md) for planned work.
+Stage 3 — PDF Reader Controls and Navigation is in progress. See [Current Status](current.md) for implemented slices, reported verification, and remaining acceptance work. [Roadmap](../roadmap.md) is the sole forward-looking plan. Do not claim Stage 3 complete or decide the unresolved floating-versus-docked Navigator discrepancy.

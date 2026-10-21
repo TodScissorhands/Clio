@@ -6,9 +6,12 @@ import {
   deriveContinueDocuments,
   filterDocumentsByScope,
   getDocumentMonogram,
+  getLibraryContentState,
   sortDocuments,
+  type LibraryCatalogLoadState,
   type SortOption,
 } from "./libraryFilter";
+import { Button } from "../components/ui/button";
 import { LibraryToolbar } from "./LibraryToolbar";
 import { LibrarySidebar } from "./LibrarySidebar";
 import { SidebarInset, SidebarProvider } from "../components/ui/sidebar";
@@ -22,6 +25,7 @@ import { AddToCollectionModal } from "./AddToCollectionModal";
 import type { CommandContext } from "../commands/documentCommands";
 
 export interface LibraryViewProps {
+  catalogLoadState: LibraryCatalogLoadState;
   roots: LibraryRoot[];
   documents: StoredDocument[];
   collections: Collection[];
@@ -40,6 +44,7 @@ export interface LibraryViewProps {
   message: string;
   error: string;
   onAddRoot: () => void;
+  onRetryCatalog: () => void;
   onScanRoot: (rootId: string, relativePath?: string) => void;
   onRemoveRoot: (rootId: string) => void;
   onCreateCollection: (name: string) => Promise<void>;
@@ -123,6 +128,8 @@ export function LibraryView({
   roots,
   documents,
   collections,
+  catalogLoadState,
+  onRetryCatalog,
   activeScope,
   onSelectScope,
   searchQuery,
@@ -371,6 +378,16 @@ export function LibraryView({
   }
 
   const showContinueShelf = activeScope.kind === "all" && !searchQuery.trim();
+  const contentState = getLibraryContentState({
+    catalogLoadState,
+    roots,
+    documents,
+    collections,
+    visibleDocuments,
+    activeScope,
+    searchQuery,
+  });
+
 
   return (
     <SidebarProvider
@@ -382,6 +399,7 @@ export function LibraryView({
         roots={roots}
         documents={documents}
         collections={collections}
+        catalogLoadState={catalogLoadState}
         activeScope={activeScope}
         onSelectScope={onSelectScope}
         onAddRoot={onAddRoot}
@@ -450,18 +468,27 @@ export function LibraryView({
 
 
           <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5 max-sm:px-4 max-sm:py-4">
-            {roots.length === 0 ? (
+            {contentState === "loading" ? (
+              <section className="mx-auto flex max-w-md flex-col items-center gap-3 py-20 text-center" role="status" aria-live="polite">
+                <h2 className="text-lg font-semibold">Loading your Library…</h2>
+                <p className="text-sm text-muted-foreground">Reading folders, documents, and collections from the local catalog.</p>
+              </section>
+            ) : contentState === "error" ? (
+              <section className="mx-auto flex max-w-md flex-col items-center gap-3 py-20 text-center" role="alert">
+                <h2 className="text-lg font-semibold">Library could not be loaded</h2>
+                <p className="text-sm text-muted-foreground">Clio could not read the local catalog. Retry to load your folders, documents, and collections.</p>
+                <Button type="button" className="mt-2" onClick={onRetryCatalog}>Retry</Button>
+              </section>
+            ) : contentState === "no-roots" ? (
               <section className="mx-auto flex max-w-md flex-col items-center gap-3 py-20 text-center">
-                <h2 className="text-xl font-semibold tracking-tight">Your library is empty</h2>
+                <h2 className="text-lg font-semibold">No folders in your Library</h2>
                 <p className="text-sm text-muted-foreground">Add a folder or open a document to begin.</p>
                 <div className="mt-2 flex gap-2">
-                  <button type="button" className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onAddRoot}>Add folder</button>
-                  {onOpenFile && (
-                    <button type="button" className="inline-flex h-9 items-center justify-center rounded-md border border-input px-4 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onOpenFile}>Open file</button>
-                  )}
+                  <Button type="button" onClick={onAddRoot}>Add folder</Button>
+                  {onOpenFile && <Button type="button" variant="outline" onClick={onOpenFile}>Open file</Button>}
                 </div>
               </section>
-            ) : (
+            ) : contentState === "documents" ? (
               <>
                 {showContinueShelf && (
                   <ContinueSection
@@ -471,50 +498,60 @@ export function LibraryView({
                     renderThumbnail={renderThumbnail}
                   />
                 )}
-                <section className="mt-6">
-                  {visibleDocuments.length > 0 ? (
-                    viewMode === "grid" ? (
-                      <DocumentGrid
-                        documents={visibleDocuments}
-                        selectedDocIds={selectedDocIds}
-                        onToggleSelect={handleToggleSelect}
-                        onOpenDocument={handleOpenDoc}
-                        onOpenContextMenu={handleOpenContextMenu}
-                        renderThumbnail={renderThumbnail}
-                      />
-                    ) : (
-                      <DocumentList
-                        documents={visibleDocuments}
-                        roots={roots}
-                        selectedDocIds={selectedDocIds}
-                        sortBy={sortBy}
-                        onSortChange={onSortChange}
-                        onToggleSelect={handleToggleSelect}
-                        onOpenDocument={handleOpenDoc}
-                        onOpenContextMenu={handleOpenContextMenu}
-                        onToggleSelectAll={handleToggleSelectAll}
-                      />
-                    )
+                <section className="mt-5">
+                  {viewMode === "grid" ? (
+                    <DocumentGrid
+                      documents={visibleDocuments}
+                      selectedDocIds={selectedDocIds}
+                      onToggleSelect={handleToggleSelect}
+                      onOpenDocument={handleOpenDoc}
+                      onOpenContextMenu={handleOpenContextMenu}
+                      renderThumbnail={renderThumbnail}
+                    />
                   ) : (
-                    <div className="py-12 text-center">
-                      <p className="font-medium">
-                        {searchQuery
-                          ? `No documents matching “${searchQuery}”`
-                          : activeScope.kind === "collection"
-                            ? "This collection is empty"
-                            : "No documents in this view"}
-                      </p>
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        {searchQuery
-                          ? "Try searching Entire Library or checking spelling."
-                          : activeScope.kind === "collection"
-                            ? "Right-click documents in your library to add them here."
-                            : "Documents in this folder will appear here."}
-                      </p>
-                    </div>
+                    <DocumentList
+                      documents={visibleDocuments}
+                      roots={roots}
+                      selectedDocIds={selectedDocIds}
+                      sortBy={sortBy}
+                      onSortChange={onSortChange}
+                      onToggleSelect={handleToggleSelect}
+                      onOpenDocument={handleOpenDoc}
+                      onOpenContextMenu={handleOpenContextMenu}
+                      onToggleSelectAll={handleToggleSelectAll}
+                    />
                   )}
                 </section>
               </>
+            ) : (
+              <div className="py-12 text-center">
+                <p className="font-medium">
+                  {contentState === "no-results"
+                    ? `No documents matching “${searchQuery || (activeScope.kind === "search" ? activeScope.query : "")}”`
+                    : contentState === "empty-collection"
+                      ? "This collection is empty"
+                      : contentState === "missing-collection"
+                        ? "This collection is no longer available"
+                        : contentState === "missing-source"
+                          ? "This folder source is unavailable"
+                          : contentState === "empty-folder"
+                            ? "No documents in this folder"
+                            : "No documents in this view"}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {contentState === "no-results"
+                    ? "Search checks document names, metadata, and library paths. Try another query or search the entire Library."
+                    : contentState === "empty-collection"
+                      ? "Add documents from their context menu or selection actions."
+                      : contentState === "missing-collection"
+                        ? "Return to All Documents and choose an available collection."
+                        : contentState === "missing-source"
+                          ? "Check the folder source in the navigation tree. Existing missing documents remain available for relinking."
+                          : contentState === "empty-folder"
+                            ? "Documents in this folder will appear here."
+                            : "Scan a folder or open a document to add content."}
+                </p>
+              </div>
             )}
           </main>
         </div>
